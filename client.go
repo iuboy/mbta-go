@@ -30,7 +30,7 @@ type ACKHandler func(chunkID, ackMode string)
 // versionedClient wraps version-specific clients with a common interface.
 type versionedClient interface {
 	Connect(ctx context.Context) error
-	SendBatch(ctx context.Context, batch any, tag, source string) (string, error)
+	SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error)
 	Close() error
 	State() string
 	SetACKHandler(handler ACKHandler)
@@ -84,6 +84,37 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 	}
 
 	return c, nil
+}
+
+// Dial creates a Client, connects it, and returns the ready-to-use client.
+// This is a convenience function that combines NewClient + Connect in one call.
+//
+// For simple use cases:
+//
+//	client, err := mbta.Dial(ctx, "localhost:7400", "my-agent", "secret-token",
+//	    mbta.WithV1Credentials(v1.ClientCredentials{}),
+//	)
+//	if err != nil { ... }
+//	defer client.Close()
+//
+//	// client is already connected, ready to SendBatch
+func Dial(ctx context.Context, server, agentID, token string, opts ...ClientOption) (*Client, error) {
+	allOpts := append([]ClientOption{
+		WithServer(server),
+		WithAgent(agentID, "", token),
+	}, opts...)
+
+	client, err := NewClient(allOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("mbta dial: create client: %w", err)
+	}
+
+	if err := client.Connect(ctx); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("mbta dial: connect: %w", err)
+	}
+
+	return client, nil
 }
 
 // initClients initializes clients for each configured version.
@@ -166,7 +197,7 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // SendBatch sends a batch using the active connection.
-func (c *Client) SendBatch(ctx context.Context, batch any, tag, source string) (string, error) {
+func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	c.mu.RLock()
 	client, ok := c.clients[c.current]
 	c.mu.RUnlock()
@@ -320,13 +351,8 @@ func (w *v1ClientWrapper) Connect(ctx context.Context) error {
 	return w.client.Connect(ctx)
 }
 
-func (w *v1ClientWrapper) SendBatch(ctx context.Context, batch any, tag, source string) (string, error) {
-	// Type assertion for SignalBatch
-	sigBatch, ok := batch.(*core.SignalBatch)
-	if !ok {
-		return "", fmt.Errorf("expected *core.SignalBatch, got %T", batch)
-	}
-	return w.client.SendBatch(ctx, sigBatch, tag, source)
+func (w *v1ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
+	return w.client.SendBatch(ctx, batch, tag, source)
 }
 
 func (w *v1ClientWrapper) Close() error {
@@ -349,12 +375,8 @@ func (w *v2ClientWrapper) Connect(ctx context.Context) error {
 	return w.client.Connect(ctx)
 }
 
-func (w *v2ClientWrapper) SendBatch(ctx context.Context, batch any, tag, source string) (string, error) {
-	sigBatch, ok := batch.(*core.SignalBatch)
-	if !ok {
-		return "", fmt.Errorf("expected *core.SignalBatch, got %T", batch)
-	}
-	return w.client.SendBatch(ctx, sigBatch, tag, source)
+func (w *v2ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
+	return w.client.SendBatch(ctx, batch, tag, source)
 }
 
 func (w *v2ClientWrapper) Close() error {
@@ -378,12 +400,8 @@ func (w *ntlsClientWrapper) Connect(ctx context.Context) error {
 	return w.client.Connect(ctx)
 }
 
-func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch any, tag, source string) (string, error) {
-	sigBatch, ok := batch.(*core.SignalBatch)
-	if !ok {
-		return "", fmt.Errorf("expected *core.SignalBatch, got %T", batch)
-	}
-	return w.client.SendBatch(ctx, sigBatch, tag, source)
+func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
+	return w.client.SendBatch(ctx, batch, tag, source)
 }
 
 func (w *ntlsClientWrapper) Close() error {

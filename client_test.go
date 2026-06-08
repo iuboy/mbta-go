@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/iuboy/mbta-go/core"
 	v1 "github.com/iuboy/mbta-go/v1"
 )
 
@@ -292,7 +293,7 @@ func (m *mockVersionedClient) Connect(ctx context.Context) error {
 	return errors.New("mock connection error")
 }
 
-func (m *mockVersionedClient) SendBatch(ctx context.Context, batch interface{}, tag, source string) (string, error) {
+func (m *mockVersionedClient) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	m.sendBatchCalled = true
 	return "", errors.New("mock send error")
 }
