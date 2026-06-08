@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
@@ -99,7 +101,11 @@ func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 		MinVersion:         tls.VersionTLS13,
 		NextProtos:         []string{ALPNProtocol},
 		ServerName:         cfg.ServerName,
-		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		InsecureSkipVerify: cfg.InsecureSkipVerify, // #nosec G402 -- intentional for dev, warning logged below
+	}
+
+	if cfg.InsecureSkipVerify {
+		slog.Warn("TLS certificate verification is DISABLED - do not use in production")
 	}
 
 	if cfg.CAFile != "" {
@@ -155,7 +161,7 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 
 	ql, err := quic.Listen(udpConn, tlsCfg, quicCfg)
 	if err != nil {
-		udpConn.Close()
+		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path
 		return nil, fmt.Errorf("listen QUIC: %w", err)
 	}
 
@@ -168,6 +174,7 @@ type Conn struct {
 	RemoteAddr     net.Addr
 	TLSState       tls.ConnectionState
 	controlClaimed bool
+	controlMu      sync.Mutex
 	authed         bool
 }
 
@@ -201,7 +208,9 @@ func (c *Conn) OpenControlStream(ctx context.Context) (*quic.Stream, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open control stream: %w", err)
 	}
+	c.controlMu.Lock()
 	c.controlClaimed = true
+	c.controlMu.Unlock()
 	return s, nil
 }
 
@@ -211,6 +220,9 @@ func (c *Conn) AcceptStream(ctx context.Context) (*quic.Stream, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+
+	c.controlMu.Lock()
+	defer c.controlMu.Unlock()
 
 	if !c.controlClaimed {
 		c.controlClaimed = true
@@ -260,7 +272,7 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 
 	qc, err := quic.Dial(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
 	if err != nil {
-		udpConn.Close()
+		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path
 		return nil, fmt.Errorf("dial QUIC: %w", err)
 	}
 

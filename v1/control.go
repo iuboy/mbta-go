@@ -18,6 +18,9 @@ func (c *Client) readControlLoop(ctx context.Context) {
 
 		f, err := core.Read(c.controlStr, core.DefaultLimits())
 		if err != nil {
+			if ctx.Err() == nil {
+				slog.Warn("control loop read error", "error", err)
+			}
 			return
 		}
 
@@ -51,8 +54,8 @@ func (c *Client) handleAck(payload []byte) {
 	}
 
 	// Notify ACK handler (e.g., EnhancedSender for reliable delivery)
-	if c.ackHandler != nil {
-		c.ackHandler(ack.ChunkID, ack.AckMode)
+	if handler := c.loadACKHandler(); handler != nil {
+		handler(ack.ChunkID, ack.AckMode)
 	}
 
 	slog.Debug("ack received", "seq", ack.Seq, "chunk", ack.ChunkID, "count", ack.Count, "mode", ack.AckMode)
@@ -70,8 +73,8 @@ func (c *Client) handleNack(payload []byte) {
 	}
 
 	// Notify ACK handler with "nack" mode so the sender can handle retry logic
-	if c.ackHandler != nil {
-		c.ackHandler(nack.ChunkID, "nack")
+	if handler := c.loadACKHandler(); handler != nil {
+		handler(nack.ChunkID, "nack")
 	}
 
 	slog.Warn("nack received", "seq", nack.Seq, "code", nack.Code, "reason", nack.Reason, "retryable", nack.Retryable)

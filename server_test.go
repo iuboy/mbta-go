@@ -18,6 +18,7 @@ func TestNewServer(t *testing.T) {
 
 	if server == nil {
 		t.Fatal("NewServer() should not return nil")
+		return
 	}
 
 	if !server.cfg.EnableV1 {

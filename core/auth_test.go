@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const testAgentID = "agent-123"
+
 // TestStaticTokenValidator tests the StaticTokenValidator implementation.
 func TestStaticTokenValidator(t *testing.T) {
 	t.Run("valid token", func(t *testing.T) {
@@ -71,7 +73,7 @@ func TestStaticTokenValidator(t *testing.T) {
 func TestAgentIdentity(t *testing.T) {
 	t.Run("identity with permissions", func(t *testing.T) {
 		identity := &AgentIdentity{
-			AgentID: "agent-123",
+			AgentID: testAgentID,
 			Permissions: []string{
 				"read:events",
 				"write:events",
@@ -79,7 +81,7 @@ func TestAgentIdentity(t *testing.T) {
 			ExpiresAt: time.Now().Add(24 * time.Hour),
 		}
 
-		if identity.AgentID != "agent-123" {
+		if identity.AgentID != testAgentID {
 			t.Errorf("AgentID = %q, want 'agent-123'", identity.AgentID)
 		}
 		if len(identity.Permissions) != 2 {
@@ -92,7 +94,7 @@ func TestAgentIdentity(t *testing.T) {
 
 	t.Run("identity with empty permissions", func(t *testing.T) {
 		identity := &AgentIdentity{
-			AgentID:     "agent-123",
+			AgentID:     testAgentID,
 			Permissions: []string{},
 			ExpiresAt:   time.Now().Add(1 * time.Hour),
 		}
@@ -122,7 +124,7 @@ func TestGenerateSessionKeys(t *testing.T) {
 		}
 
 		// Check HMACAlgo
-		if keys.HMACAlgo != "sha256" {
+		if keys.HMACAlgo != HMACAlgoSHA256 {
 			t.Errorf("HMACAlgo = %q, want 'sha256'", keys.HMACAlgo)
 		}
 	})
@@ -152,7 +154,7 @@ func TestSessionKeysHMACKeyBase64(t *testing.T) {
 	keys := &SessionKeys{
 		KeyID:    "key-123",
 		HMACKey:  []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
-		HMACAlgo: "sha256",
+		HMACAlgo: HMACAlgoSHA256,
 	}
 
 	b64 := keys.HMACKeyBase64()
@@ -179,7 +181,7 @@ func TestSessionKeys(t *testing.T) {
 		keys := &SessionKeys{
 			KeyID:    "key-123",
 			HMACKey:  make([]byte, 32),
-			HMACAlgo: "sha256",
+			HMACAlgo: HMACAlgoSHA256,
 		}
 
 		if keys.KeyID != "key-123" {
@@ -188,7 +190,7 @@ func TestSessionKeys(t *testing.T) {
 		if len(keys.HMACKey) != 32 {
 			t.Errorf("HMACKey length = %d, want 32", len(keys.HMACKey))
 		}
-		if keys.HMACAlgo != "sha256" {
+		if keys.HMACAlgo != HMACAlgoSHA256 {
 			t.Errorf("HMACAlgo = %q, want 'sha256'", keys.HMACAlgo)
 		}
 	})

@@ -104,6 +104,16 @@ func (inf *Inflight) Snapshot() (batches int, events int, bytes int64) {
 	return inf.batches, inf.events, inf.bytes
 }
 
+// Reset clears all inflight counters. Called on disconnect or reconnect
+// to prevent stale counters from permanently blocking the window.
+func (inf *Inflight) Reset() {
+	inf.mu.Lock()
+	defer inf.mu.Unlock()
+	inf.batches = 0
+	inf.events = 0
+	inf.bytes = 0
+}
+
 // Window represents the server's current flow-control window.
 type Window struct {
 	mu                 sync.Mutex

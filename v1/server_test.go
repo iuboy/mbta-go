@@ -17,6 +17,7 @@ func TestNewServer(t *testing.T) {
 	server := NewServer(cfg)
 	if server == nil {
 		t.Fatal("NewServer should not return nil")
+		return
 	}
 
 	if server.config.ServerID != "test-server" {
@@ -33,6 +34,7 @@ func TestNewServerWithEmptyID(t *testing.T) {
 	server := NewServer(cfg)
 	if server == nil {
 		t.Fatal("NewServer should not return nil")
+		return
 	}
 
 	if server.config.ServerID == "" {
@@ -157,6 +159,7 @@ func TestServerConfigWithAllFields(t *testing.T) {
 	server := NewServer(cfg)
 	if server == nil {
 		t.Fatal("NewServer should not return nil")
+		return
 	}
 
 	if server.config.Transport.Address != "0.0.0.0:8080" {
@@ -226,6 +229,7 @@ func TestServerWithMockValidator(t *testing.T) {
 	server := NewServer(cfg)
 	if server == nil {
 		t.Fatal("NewServer should not return nil")
+		return
 	}
 
 	if server.config.Auth == nil {

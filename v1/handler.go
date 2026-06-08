@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,11 +28,12 @@ type ConnectionHandlerConfig struct {
 // NewConnectionHandler creates a new connection handler.
 func NewConnectionHandler(cfg ConnectionHandlerConfig) *ConnectionHandler {
 	return &ConnectionHandler{
-		conn:   cfg.Conn,
-		config: cfg,
-		sm:     core.NewServerMachine(),
-		replay: core.NewReplayCache(),
-		window: core.NewWindow(100, 10000, 16*1024*1024),
+		conn:      cfg.Conn,
+		config:    cfg,
+		sm:        core.NewServerMachine(),
+		replay:    core.NewReplayCache(),
+		window:    core.NewWindow(100, 10000, 16*1024*1024),
+		streamSem: make(chan struct{}, maxConcurrentDataStreams),
 	}
 }
 
@@ -49,7 +51,13 @@ type ConnectionHandler struct {
 	sessionID  string
 	controlStr *quic.Stream
 	controlMu  sync.Mutex // protects concurrent writes to controlStr
+
+	acceptOnce    sync.Once     // ensures acceptDataStreams starts only once
+	streamSem     chan struct{} // limits concurrent data-stream goroutines
+	activeStreams atomic.Int32
 }
+
+const maxConcurrentDataStreams = 64
 
 // HandleConnection orchestrates the full connection lifecycle.
 func (h *ConnectionHandler) HandleConnection(ctx context.Context) error {
@@ -110,9 +118,9 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 			}
 		}
 
-		// After AUTH_OK, also accept data streams
+		// After AUTH_OK, also accept data streams (exactly once)
 		if h.sm.State() == core.ServerStateReady {
-			go h.acceptDataStreams(ctx)
+			h.acceptOnce.Do(func() { go h.acceptDataStreams(ctx) })
 		}
 	}
 }
@@ -183,12 +191,14 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	}
 
 	if err := msg.Validate(); err != nil {
-		h.sendAuthFail("invalid_auth", err.Error(), false)
+		slog.Warn("auth validation failed", "session", h.sessionID, "error", err)
+		h.sendAuthFail("invalid_auth", "authentication failed", false)
 		return err
 	}
 
 	if msg.AgentID != h.agentID {
-		h.sendAuthFail("agent_mismatch", "auth agent_id does not match hello", false)
+		slog.Warn("auth agent_id mismatch", "session", h.sessionID, "hello_agent", h.agentID, "auth_agent", msg.AgentID)
+		h.sendAuthFail("invalid_auth", "authentication failed", false)
 		return fmt.Errorf("agent_id mismatch")
 	}
 
@@ -268,7 +278,20 @@ func (h *ConnectionHandler) acceptDataStreams(ctx context.Context) {
 			return
 		}
 		if role == core.StreamRoleData {
-			go h.handleDataStream(ctx, s)
+			select {
+			case h.streamSem <- struct{}{}:
+				h.activeStreams.Add(1)
+				go func() {
+					defer func() {
+						<-h.streamSem
+						h.activeStreams.Add(-1)
+					}()
+					h.handleDataStream(ctx, s)
+				}()
+			default:
+				_ = s.Close() // #nosec G104 -- rejecting stream, best-effort close
+				h.sendThrottle(1000, "too_many_streams", "max concurrent data streams exceeded")
+			}
 		}
 	}
 }
@@ -283,6 +306,7 @@ func (h *ConnectionHandler) handleDataStream(ctx context.Context, s *quic.Stream
 		}
 
 		if f.Header.Type != core.TypeBatch {
+			slog.Warn("unexpected frame type on data stream", "session", h.sessionID, "type", f.Header.Type)
 			continue
 		}
 
@@ -290,7 +314,7 @@ func (h *ConnectionHandler) handleDataStream(ctx context.Context, s *quic.Stream
 	}
 }
 
-func (h *ConnectionHandler) processBatch(ctx context.Context, w *quic.Stream, payload []byte) {
+func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, payload []byte) {
 	// Decode envelope
 	var env core.SecureEnvelope
 	if err := json.Unmarshal(payload, &env); err != nil {

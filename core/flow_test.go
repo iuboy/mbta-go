@@ -102,7 +102,7 @@ func TestEventSinkInterface(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	agentID := "agent-123"
+	agentID := testAgentID
 	batch := &SignalBatch{
 		Signals: []*SignalRecord{{SignalType: "log"}},
 	}
@@ -127,7 +127,7 @@ func TestDurableEventSinkInterface(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	agentID := "agent-123"
+	agentID := testAgentID
 	batch := &SignalBatch{
 		Signals: []*SignalRecord{{SignalType: "log"}},
 	}
@@ -152,14 +152,14 @@ func TestDurableEventSinkInterface(t *testing.T) {
 func TestAgentQueue(t *testing.T) {
 	t.Run("new agent queue", func(t *testing.T) {
 		queue := &AgentQueue{
-			AgentID:   "agent-123",
+			AgentID:   testAgentID,
 			QueueType: "memory",
 			EventsIn:  100,
 			EventsOut: 95,
 			CreatedAt: time.Now(),
 		}
 
-		if queue.AgentID != "agent-123" {
+		if queue.AgentID != testAgentID {
 			t.Errorf("AgentID = %q, want 'agent-123'", queue.AgentID)
 		}
 		if queue.QueueType != "memory" {

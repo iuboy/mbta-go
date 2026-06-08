@@ -128,6 +128,7 @@ func TestNewReplayCache(t *testing.T) {
 	rc := NewReplayCache()
 	if rc == nil {
 		t.Fatal("NewReplayCache() returned nil")
+		return
 	}
 	if rc.entries == nil {
 		t.Error("entries map is not initialized")
@@ -160,6 +161,7 @@ func TestReplayCacheSeenOrAdd(t *testing.T) {
 		second := rc.SeenOrAdd(key)
 		if second == nil {
 			t.Fatal("Second SeenOrAdd() = nil, want existing entry")
+			return
 		}
 		if second.Status != ReplayProcessing {
 			t.Errorf("Entry Status = %v, want ReplayProcessing", second.Status)

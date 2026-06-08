@@ -1,0 +1,23 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - gosec
+    - goconst
+    - staticcheck
+    - errcheck
+    - unused
+    - ineffassign
+    - typecheck
+
+issues:
+  exclude-rules:
+    # SA5011: staticcheck doesn't track t.Fatal termination in tests
+    - linters: [staticcheck]
+      text: "SA5011"
+      path: _test\.go
+    # G115: integer overflow in test helpers
+    - linters: [gosec]
+      text: "G115"
+      path: _test\.go

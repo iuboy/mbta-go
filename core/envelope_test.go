@@ -287,6 +287,7 @@ func TestBuildWithLargePayload(t *testing.T) {
 
 	if env == nil {
 		t.Fatal("Envelope should not be nil")
+		return
 	}
 	if env.Payload == "" {
 		t.Error("Payload should not be empty")
@@ -311,6 +312,7 @@ func TestBuildWithEmptyPayload(t *testing.T) {
 
 	if env == nil {
 		t.Fatal("Envelope should not be nil")
+		return
 	}
 	// Empty bytes encode to empty base64 string
 	if env.Payload != "" {

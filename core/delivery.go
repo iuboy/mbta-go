@@ -49,12 +49,16 @@ type ReplayEntry struct {
 type ReplayCache struct {
 	mu      sync.Mutex
 	entries map[string]*ReplayEntry // key: agent_id + chunk_id
+	maxSize int
 }
+
+const defaultReplayMaxSize = 50000
 
 // NewReplayCache creates a new replay cache.
 func NewReplayCache() *ReplayCache {
 	return &ReplayCache{
 		entries: make(map[string]*ReplayEntry),
+		maxSize: defaultReplayMaxSize,
 	}
 }
 
@@ -65,6 +69,7 @@ func Key(agentID, chunkID string) string {
 
 // SeenOrAdd checks if a key has been seen. Returns the entry if so.
 // If not seen, creates a new Processing entry and returns nil.
+// Evicts oldest Processing entries when the cache exceeds maxSize.
 func (rc *ReplayCache) SeenOrAdd(key string) *ReplayEntry {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
@@ -72,6 +77,17 @@ func (rc *ReplayCache) SeenOrAdd(key string) *ReplayEntry {
 	if e, ok := rc.entries[key]; ok {
 		return e
 	}
+
+	// Evict Processing entries when over capacity to prevent unbounded growth.
+	if len(rc.entries) >= rc.maxSize {
+		for k, v := range rc.entries {
+			if v.Status == ReplayProcessing {
+				delete(rc.entries, k)
+				break
+			}
+		}
+	}
+
 	rc.entries[key] = &ReplayEntry{Status: ReplayProcessing}
 	return nil
 }

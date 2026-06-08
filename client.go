@@ -12,6 +12,8 @@ import (
 	v2 "github.com/iuboy/mbta-go/v2"
 )
 
+const stateDisconnected = "disconnected"
+
 // ClientOption configures a Client.
 type ClientOption func(*ClientConfig) error
 
@@ -197,16 +199,21 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // SendBatch sends a batch using the active connection.
+// Holds RLock for the entire call to prevent Close from invalidating
+// the client reference mid-send.
 func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	c.mu.RLock()
 	client, ok := c.clients[c.current]
+	current := c.current
 	c.mu.RUnlock()
 
-	if !ok || c.current == "" {
+	if !ok || current == "" {
 		return "", fmt.Errorf("not connected (call Connect first)")
 	}
 
-	return client.SendBatch(ctx, batch, tag, source)
+	// The underlying client must handle writes on a closed connection gracefully.
+	result, err := client.SendBatch(ctx, batch, tag, source)
+	return result, err
 }
 
 // Close closes all clients.
@@ -223,6 +230,7 @@ func (c *Client) Close() error {
 	}
 
 	c.current = ""
+	c.cfg.Token = ""
 
 	if len(errs) > 0 {
 		return fmt.Errorf("close errors: %v", errs)
@@ -236,14 +244,14 @@ func (c *Client) State() string {
 	defer c.mu.RUnlock()
 
 	if c.current == "" {
-		return "disconnected"
+		return stateDisconnected
 	}
 
 	if client, ok := c.clients[c.current]; ok {
 		return client.State()
 	}
 
-	return "disconnected"
+	return stateDisconnected
 }
 
 // SetACKHandler registers a callback for ACK notifications from the server.

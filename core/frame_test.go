@@ -350,7 +350,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 			if frame.Header.Flags != tt.flags {
 				t.Errorf("Flags = 0x%02x, want 0x%02x", frame.Header.Flags, tt.flags)
 			}
-			if frame.Header.Length != uint32(len(tt.payload)) {
+			if frame.Header.Length != uint32(len(tt.payload)) { //nosec G115 -- test only, payload sizes are small
 				t.Errorf("Length = %d, want %d", frame.Header.Length, len(tt.payload))
 			}
 			if !bytes.Equal(frame.Payload, tt.payload) {
@@ -422,7 +422,7 @@ func buildTestFrame(typ uint16, flags byte, payload []byte) []byte {
 	buf.WriteByte(byte(typ))
 
 	// Write length
-	length := uint32(len(payload))
+	length := uint32(len(payload)) //nosec G115 -- test helper
 	buf.WriteByte(byte(length >> 24))
 	buf.WriteByte(byte(length >> 16))
 	buf.WriteByte(byte(length >> 8))
@@ -450,7 +450,7 @@ func buildTestFrameWithMagic(magic string, typ uint16, flags byte, payload []byt
 	buf.WriteByte(byte(typ >> 8))
 	buf.WriteByte(byte(typ))
 
-	length := uint32(len(payload))
+	length := uint32(len(payload)) //nosec G115 -- test helper
 	buf.WriteByte(byte(length >> 24))
 	buf.WriteByte(byte(length >> 16))
 	buf.WriteByte(byte(length >> 8))
@@ -475,7 +475,7 @@ func buildTestFrameWithVersion(version byte, typ uint16, flags byte, payload []b
 	buf.WriteByte(byte(typ >> 8))
 	buf.WriteByte(byte(typ))
 
-	length := uint32(len(payload))
+	length := uint32(len(payload)) //nosec G115 -- test helper
 	buf.WriteByte(byte(length >> 24))
 	buf.WriteByte(byte(length >> 16))
 	buf.WriteByte(byte(length >> 8))
@@ -525,7 +525,7 @@ func buildTestFrameWithCRC(typ uint16, flags byte, payload []byte, crc uint32) [
 	buf.WriteByte(byte(typ >> 8))
 	buf.WriteByte(byte(typ))
 
-	length := uint32(len(payload))
+	length := uint32(len(payload)) //nosec G115 -- test helper
 	buf.WriteByte(byte(length >> 24))
 	buf.WriteByte(byte(length >> 16))
 	buf.WriteByte(byte(length >> 8))

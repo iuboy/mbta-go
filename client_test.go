@@ -38,6 +38,7 @@ func TestNewClientWithVersionPriority(t *testing.T) {
 
 	if client == nil {
 		t.Fatal("NewClient() should not return nil")
+		return
 	}
 
 	if len(client.cfg.Versions) != 1 {

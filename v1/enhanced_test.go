@@ -9,6 +9,8 @@ import (
 	"github.com/iuboy/mbta-go/core"
 )
 
+const testAgentID = "test-agent"
+
 // TestNewEnhancedRouter tests creating a new EnhancedRouter.
 func TestNewEnhancedRouter(t *testing.T) {
 	sink := &mockEventSink{}
@@ -16,6 +18,7 @@ func TestNewEnhancedRouter(t *testing.T) {
 
 	if router == nil {
 		t.Fatal("NewEnhancedRouter should not return nil")
+		return
 	}
 	if router.sink == nil {
 		t.Error("sink should not be nil")
@@ -35,13 +38,13 @@ func TestEnhancedRouterOnSignalBatchEmptyBatch(t *testing.T) {
 		Signals: []*core.SignalRecord{},
 	}
 
-	err := router.OnSignalBatch(ctx, "test-agent", batch)
+	err := router.OnSignalBatch(ctx, testAgentID, batch)
 	if err != nil {
 		t.Errorf("OnSignalBatch with empty batch error = %v", err)
 	}
 
 	// Check that no agent queue was created for empty batch
-	_, exists := router.GetAgentQueue("test-agent")
+	_, exists := router.GetAgentQueue(testAgentID)
 	if exists {
 		t.Error("Agent queue should not be created for empty batch")
 	}
@@ -66,13 +69,13 @@ func TestEnhancedRouterOnSignalBatchSuccess(t *testing.T) {
 		},
 	}
 
-	err := router.OnSignalBatch(ctx, "test-agent", batch)
+	err := router.OnSignalBatch(ctx, testAgentID, batch)
 	if err != nil {
 		t.Errorf("OnSignalBatch error = %v", err)
 	}
 
 	// Check that agent queue was created
-	aq, exists := router.GetAgentQueue("test-agent")
+	aq, exists := router.GetAgentQueue(testAgentID)
 	if !exists {
 		t.Fatal("Agent queue should be created after successful routing")
 	}
@@ -97,14 +100,14 @@ func TestEnhancedRouterOnSignalBatchCriticalPressure(t *testing.T) {
 		},
 	}
 
-	err := router.OnSignalBatch(ctx, "test-agent", batch)
+	err := router.OnSignalBatch(ctx, testAgentID, batch)
 	// Should return error indicating throttling
 	if err == nil {
 		t.Error("OnSignalBatch with critical pressure should return error")
 	}
 
 	// Check that agent queue was not created due to throttling
-	_, exists := router.GetAgentQueue("test-agent")
+	_, exists := router.GetAgentQueue(testAgentID)
 	if exists {
 		t.Error("Agent queue should not be created when throttling")
 	}
@@ -130,13 +133,13 @@ func TestEnhancedRouterOnSignalBatchSinkError(t *testing.T) {
 		},
 	}
 
-	err := router.OnSignalBatch(ctx, "test-agent", batch)
+	err := router.OnSignalBatch(ctx, testAgentID, batch)
 	if err != expectedErr {
 		t.Errorf("OnSignalBatch error = %v, want %v", err, expectedErr)
 	}
 
 	// Check that agent queue was not created when sink failed
-	_, exists := router.GetAgentQueue("test-agent")
+	_, exists := router.GetAgentQueue(testAgentID)
 	if exists {
 		t.Error("Agent queue should not be created when sink fails")
 	}
@@ -161,7 +164,7 @@ func TestEnhancedRouterOnSignalBatchWithResult(t *testing.T) {
 		},
 	}
 
-	result, err := router.OnSignalBatchWithResult(ctx, "test-agent", batch)
+	result, err := router.OnSignalBatchWithResult(ctx, testAgentID, batch)
 	if err != nil {
 		t.Errorf("OnSignalBatchWithResult error = %v", err)
 	}
@@ -193,7 +196,7 @@ func TestEnhancedRouterOnSignalBatchWithResultCriticalPressure(t *testing.T) {
 		},
 	}
 
-	result, err := router.OnSignalBatchWithResult(ctx, "test-agent", batch)
+	result, err := router.OnSignalBatchWithResult(ctx, testAgentID, batch)
 	if err != nil {
 		t.Errorf("OnSignalBatchWithResult with critical pressure should not error, got %v", err)
 	}
@@ -218,7 +221,7 @@ func TestEnhancedRouterOnPressure(t *testing.T) {
 	}
 	router := NewEnhancedRouter(sink)
 
-	pressure := router.OnPressure("test-agent")
+	pressure := router.OnPressure(testAgentID)
 	if pressure != core.PressureDegraded {
 		t.Errorf("OnPressure = %s, want %s", pressure, core.PressureDegraded)
 	}
@@ -237,7 +240,7 @@ func TestEnhancedRouterGetAgentQueue(t *testing.T) {
 	router := NewEnhancedRouter(sink)
 
 	// Initially, no queue exists
-	_, exists := router.GetAgentQueue("test-agent")
+	_, exists := router.GetAgentQueue(testAgentID)
 	if exists {
 		t.Error("Agent queue should not exist initially")
 	}
@@ -249,14 +252,14 @@ func TestEnhancedRouterGetAgentQueue(t *testing.T) {
 			{SignalType: "log"},
 		},
 	}
-	_ = router.OnSignalBatch(ctx, "test-agent", batch)
+	_ = router.OnSignalBatch(ctx, testAgentID, batch)
 
 	// Now queue should exist
-	aq, exists := router.GetAgentQueue("test-agent")
+	aq, exists := router.GetAgentQueue(testAgentID)
 	if !exists {
 		t.Fatal("Agent queue should exist after routing")
 	}
-	if aq.AgentID != "test-agent" {
+	if aq.AgentID != testAgentID {
 		t.Errorf("AgentID = %s, want 'test-agent'", aq.AgentID)
 	}
 }
@@ -274,7 +277,7 @@ func TestEnhancedRouterGetEnqueueResult(t *testing.T) {
 	router := NewEnhancedRouter(sink)
 
 	// Before any routing
-	result := router.GetEnqueueResult("test-agent")
+	result := router.GetEnqueueResult(testAgentID)
 	if result.Status != core.ACKStatusAccepted {
 		t.Errorf("Initial Status = %s, want %s", result.Status, core.ACKStatusAccepted)
 	}
@@ -286,9 +289,9 @@ func TestEnhancedRouterGetEnqueueResult(t *testing.T) {
 			{SignalType: "log"},
 		},
 	}
-	_ = router.OnSignalBatch(ctx, "test-agent", batch)
+	_ = router.OnSignalBatch(ctx, testAgentID, batch)
 
-	result = router.GetEnqueueResult("test-agent")
+	result = router.GetEnqueueResult(testAgentID)
 	if result.Status != core.ACKStatusDurable {
 		t.Errorf("After routing Status = %s, want %s", result.Status, core.ACKStatusDurable)
 	}
@@ -358,7 +361,7 @@ func TestEnhancedRouterConcurrentRouting(t *testing.T) {
 	done := make(chan bool, 10)
 	for i := 0; i < 10; i++ {
 		go func(id int) {
-			agentID := "test-agent"
+			agentID := testAgentID
 			_ = router.OnSignalBatch(ctx, agentID, batch)
 			done <- true
 		}(i)
@@ -370,7 +373,7 @@ func TestEnhancedRouterConcurrentRouting(t *testing.T) {
 	}
 
 	// Verify queue exists and has correct count
-	aq, exists := router.GetAgentQueue("test-agent")
+	aq, exists := router.GetAgentQueue(testAgentID)
 	if !exists {
 		t.Fatal("Agent queue should exist after concurrent routing")
 	}

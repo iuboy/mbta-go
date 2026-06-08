@@ -64,7 +64,7 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 
 	// Step 1: Compress
 	processed := batchPayload
-	if params.Compression == "gzip" {
+	if params.Compression == CompressionGzip {
 		var buf bytes.Buffer
 		w := gzip.NewWriter(&buf)
 		if _, err := w.Write(batchPayload); err != nil {
@@ -83,7 +83,7 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 	env.Payload = base64.StdEncoding.EncodeToString(processed)
 
 	// Step 4: HMAC
-	if params.HMACAlgo == "sha256" {
+	if params.HMACAlgo == HMACAlgoSHA256 {
 		signingBytes := CanonicalSigningString(env)
 		mac := computeHMACSHA256(params.HMACKey, signingBytes)
 		env.MAC = base64.StdEncoding.EncodeToString(mac)
@@ -145,7 +145,7 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 	// ...
 
 	// Decompress
-	if env.Compression == "gzip" {
+	if env.Compression == CompressionGzip {
 		r, err := gzip.NewReader(bytes.NewReader(raw))
 		if err != nil {
 			return nil, fmt.Errorf("gzip reader: %w", err)

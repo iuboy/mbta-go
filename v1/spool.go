@@ -41,7 +41,13 @@ type Spool struct {
 
 // New creates or opens a spool in the given directory.
 func New(dir string) (*Spool, error) {
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	// Validate directory to prevent path traversal.
+	cleanDir := filepath.Clean(dir)
+	if cleanDir != dir {
+		return nil, fmt.Errorf("spool directory path contains suspicious elements: %s", dir)
+	}
+
+	if err := os.MkdirAll(cleanDir, 0700); err != nil {
 		return nil, fmt.Errorf("create spool dir: %w", err)
 	}
 
@@ -132,17 +138,23 @@ func (s *Spool) Len() int {
 
 func (s *Spool) load() error {
 	recordsPath := filepath.Join(s.dir, "records.json")
-	if data, err := os.ReadFile(recordsPath); err == nil {
+	data, err := os.ReadFile(recordsPath) // #nosec G304 -- s.dir validated in New()
+	if err == nil {
 		if err := json.Unmarshal(data, &s.records); err != nil {
 			return fmt.Errorf("unmarshal records: %w", err)
 		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read records: %w", err)
 	}
 
 	batchesPath := filepath.Join(s.dir, "batches.json")
-	if data, err := os.ReadFile(batchesPath); err == nil {
+	data, err = os.ReadFile(batchesPath) // #nosec G304 -- s.dir validated in New()
+	if err == nil {
 		if err := json.Unmarshal(data, &s.batches); err != nil {
 			return fmt.Errorf("unmarshal batches: %w", err)
 		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read batches: %w", err)
 	}
 
 	return nil
@@ -153,7 +165,7 @@ func (s *Spool) flushRecords() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.dir, "records.json"), data, 0600)
+	return os.WriteFile(filepath.Join(s.dir, "records.json"), data, 0600) // #nosec G304
 }
 
 func (s *Spool) flushBatches() error {
@@ -161,7 +173,7 @@ func (s *Spool) flushBatches() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.dir, "batches.json"), data, 0600)
+	return os.WriteFile(filepath.Join(s.dir, "batches.json"), data, 0600) // #nosec G304
 }
 
 func (s *Spool) flushAll() error {

@@ -97,9 +97,12 @@ func (h *hashStreamPicker) rebuildIndices() {
 }
 
 func hashKey(key string, buckets int) int {
+	if buckets <= 0 {
+		return 0
+	}
 	h := fnv.New32a()
-	h.Write([]byte(key))
-	return int(h.Sum32() % uint32(buckets))
+	_, _ = h.Write([]byte(key))
+	return int(h.Sum32() % uint32(buckets)) // #nosec G115 -- buckets > 0 and bounded by stream count
 }
 
 func sortInts(a []int) {

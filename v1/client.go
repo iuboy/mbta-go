@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,7 +46,7 @@ type Client struct {
 
 	// ackHandler is called when an ACK is received from the server.
 	// The handler receives the chunkID and ack_mode (e.g. "durable", "accepted").
-	ackHandler func(chunkID, ackMode string)
+	ackHandler atomic.Pointer[func(chunkID, ackMode string)]
 
 	cancelACK context.CancelFunc
 }
@@ -264,7 +265,14 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 // SetACKHandler registers a callback invoked when the server acknowledges a batch.
 // The handler receives (chunkID, ackMode) where ackMode is "durable", "accepted", etc.
 func (c *Client) SetACKHandler(h func(chunkID, ackMode string)) {
-	c.ackHandler = h
+	c.ackHandler.Store(&h)
+}
+
+func (c *Client) loadACKHandler() func(chunkID, ackMode string) {
+	if p := c.ackHandler.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // Close sends a CLOSE frame and shuts down.
@@ -278,6 +286,18 @@ func (c *Client) Close() error {
 		if payload, err := json.Marshal(closeMsg); err == nil {
 			_ = core.Write(c.controlStr, core.TypeClose, core.FlagControl, payload)
 		}
+	}
+
+	// Reset inflight counters so stale state does not block future sends.
+	c.inflight.Reset()
+
+	// Clear sensitive material from memory.
+	c.config.Token = ""
+	if c.keys != nil {
+		for i := range c.keys.HMACKey {
+			c.keys.HMACKey[i] = 0
+		}
+		c.keys = nil
 	}
 
 	if c.conn != nil {
