@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,11 +21,16 @@ func (c *Client) sendHello() error {
 		InstanceID:    uuid.Must(uuid.NewV7()).String(),
 		StartedAtUnix: time.Now().Unix(),
 	}
-	payload, _ := json.Marshal(hello)
+	payload, err := json.Marshal(hello)
+	if err != nil {
+		return fmt.Errorf("marshal hello: %w", err)
+	}
 	if err := core.Write(c.controlStr, core.TypeHello, core.FlagControl, payload); err != nil {
 		return err
 	}
-	_ = c.sm.Transition(core.StateHelloSent)
+	if err := c.sm.Transition(core.StateHelloSent); err != nil {
+		slog.Warn("state transition failed", "to", core.StateHelloSent, "error", err)
+	}
 	return nil
 }
 
@@ -35,7 +41,9 @@ func (c *Client) recvHelloAck() (*core.HelloAckMessage, error) {
 	}
 	if f.Header.Type == core.TypeError {
 		var errMsg core.ErrorMessage
-		_ = json.Unmarshal(f.Payload, &errMsg)
+		if uerr := json.Unmarshal(f.Payload, &errMsg); uerr != nil {
+			slog.Debug("failed to decode error frame", "error", uerr)
+		}
 		return nil, fmt.Errorf("server error: %s", errMsg.Reason)
 	}
 	if f.Header.Type != core.TypeHelloAck {
@@ -66,11 +74,16 @@ func (c *Client) sendAuth() error {
 		SessionID: c.sessionID,
 		AuthNonce: uuid.Must(uuid.NewV7()).String(),
 	}
-	payload, _ := json.Marshal(auth)
+	payload, err := json.Marshal(auth)
+	if err != nil {
+		return fmt.Errorf("marshal auth: %w", err)
+	}
 	if err := core.Write(c.controlStr, core.TypeAuth, core.FlagControl, payload); err != nil {
 		return err
 	}
-	_ = c.sm.Transition(core.StateAuthSent)
+	if err := c.sm.Transition(core.StateAuthSent); err != nil {
+		slog.Warn("state transition failed", "to", core.StateAuthSent, "error", err)
+	}
 	return nil
 }
 
@@ -101,12 +114,16 @@ func (c *Client) recvAuthResult() error {
 		}
 
 		c.conn.SetAuthed(true)
-		_ = c.sm.Transition(core.StateReady)
+		if err := c.sm.Transition(core.StateReady); err != nil {
+			slog.Warn("state transition failed", "to", core.StateReady, "error", err)
+		}
 		return nil
 
 	case core.TypeAuthFail:
 		var failMsg core.AuthFailMessage
-		_ = json.Unmarshal(f.Payload, &failMsg)
+		if uerr := json.Unmarshal(f.Payload, &failMsg); uerr != nil {
+			slog.Debug("failed to decode auth_fail frame", "error", uerr)
+		}
 		return fmt.Errorf("auth failed: %s (%s)", failMsg.Reason, failMsg.Code)
 
 	default:

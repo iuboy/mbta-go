@@ -68,7 +68,9 @@ func (h *ConnectionHandler) HandleConnection(ctx context.Context) error {
 	h.controlStr = s
 	defer h.controlStr.Close()
 
-	_ = h.sm.Transition(core.ServerStateControlWait)
+	if err := h.sm.Transition(core.ServerStateControlWait); err != nil {
+		slog.Warn("state transition failed", "from", h.sm.State(), "to", core.ServerStateControlWait, "error", err)
+	}
 
 	// Handle control stream messages
 	if err := h.handleControlStream(ctx); err != nil {
@@ -129,7 +131,9 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 	h.agentID = msg.AgentID
 	h.sessionID = uuid.Must(uuid.NewV7()).String()
 
-	_ = h.sm.Transition(core.ServerStateHelloReceived)
+	if err := h.sm.Transition(core.ServerStateHelloReceived); err != nil {
+		slog.Warn("state transition failed", "session", h.sessionID, "to", core.ServerStateHelloReceived, "error", err)
+	}
 
 	// Negotiate capabilities
 	result := core.Negotiate(msg.Capabilities, h.config.Policy)
@@ -157,12 +161,17 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 		},
 	}
 
-	ackPayload, _ := json.Marshal(helloAck)
+	ackPayload, err := json.Marshal(helloAck)
+	if err != nil {
+		return fmt.Errorf("marshal hello_ack: %w", err)
+	}
 	if err := h.writeControl(core.TypeHelloAck, core.FlagControl, ackPayload); err != nil {
 		return fmt.Errorf("write hello_ack: %w", err)
 	}
 
-	_ = h.sm.Transition(core.ServerStateAuthWait)
+	if err := h.sm.Transition(core.ServerStateAuthWait); err != nil {
+		slog.Warn("state transition failed", "session", h.sessionID, "to", core.ServerStateAuthWait, "error", err)
+	}
 	slog.Info("hello processed", "agent", h.agentID, "session", h.sessionID)
 	return nil
 }
@@ -210,12 +219,17 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 		HMACKey:       keys.HMACKeyBase64(),
 		ExpiresAtUnix: time.Now().Add(24 * time.Hour).Unix(),
 	}
-	okPayload, _ := json.Marshal(authOK)
+	okPayload, err := json.Marshal(authOK)
+	if err != nil {
+		return fmt.Errorf("marshal auth_ok: %w", err)
+	}
 	if err := h.writeControl(core.TypeAuthOK, core.FlagControl, okPayload); err != nil {
 		return fmt.Errorf("write auth_ok: %w", err)
 	}
 
-	_ = h.sm.Transition(core.ServerStateReady)
+	if err := h.sm.Transition(core.ServerStateReady); err != nil {
+		slog.Warn("state transition failed", "session", h.sessionID, "to", core.ServerStateReady, "error", err)
+	}
 	h.conn.SetAuthed(true)
 
 	if h.config.Metrics != nil {
@@ -237,8 +251,14 @@ func (h *ConnectionHandler) handlePing(payload []byte) {
 		Nonce:      msg.Nonce,
 		Status:     "ok",
 	}
-	pongPayload, _ := json.Marshal(pong)
-	_ = h.writeControl(core.TypePong, core.FlagControl, pongPayload)
+	pongPayload, err := json.Marshal(pong)
+	if err != nil {
+		slog.Warn("marshal pong failed", "error", err)
+		return
+	}
+	if err := h.writeControl(core.TypePong, core.FlagControl, pongPayload); err != nil {
+		slog.Debug("write pong failed", "error", err)
+	}
 }
 
 func (h *ConnectionHandler) acceptDataStreams(ctx context.Context) {
@@ -393,8 +413,14 @@ func (h *ConnectionHandler) sendAck(seq uint64, chunkID string, count int, ackMo
 		AckMode:    ackMode,
 		ReceivedAt: time.Now().UnixMilli(),
 	}
-	payload, _ := json.Marshal(ack)
-	_ = h.writeControl(core.TypeAck, core.FlagData, payload)
+	payload, err := json.Marshal(ack)
+	if err != nil {
+		slog.Warn("marshal ack failed", "error", err)
+		return
+	}
+	if err := h.writeControl(core.TypeAck, core.FlagData, payload); err != nil {
+		slog.Debug("write ack failed", "session", h.sessionID, "error", err)
+	}
 }
 
 func (h *ConnectionHandler) sendNack(seq uint64, code, reason string, retryable bool) {
@@ -404,8 +430,14 @@ func (h *ConnectionHandler) sendNack(seq uint64, code, reason string, retryable 
 		Reason:    reason,
 		Retryable: retryable,
 	}
-	payload, _ := json.Marshal(nack)
-	_ = h.writeControl(core.TypeNack, core.FlagData, payload)
+	payload, err := json.Marshal(nack)
+	if err != nil {
+		slog.Warn("marshal nack failed", "error", err)
+		return
+	}
+	if err := h.writeControl(core.TypeNack, core.FlagData, payload); err != nil {
+		slog.Debug("write nack failed", "session", h.sessionID, "error", err)
+	}
 
 	if h.config.Metrics != nil {
 		h.config.Metrics.BatchesNackedTotal.Inc()
@@ -418,8 +450,14 @@ func (h *ConnectionHandler) sendThrottle(retryDelayMs int, code, reason string) 
 		Code:         code,
 		Reason:       reason,
 	}
-	payload, _ := json.Marshal(throttle)
-	_ = h.writeControl(core.TypeThrottle, core.FlagData, payload)
+	payload, err := json.Marshal(throttle)
+	if err != nil {
+		slog.Warn("marshal throttle failed", "error", err)
+		return
+	}
+	if err := h.writeControl(core.TypeThrottle, core.FlagData, payload); err != nil {
+		slog.Debug("write throttle failed", "session", h.sessionID, "error", err)
+	}
 
 	if h.config.Metrics != nil {
 		h.config.Metrics.BatchesNackedTotal.Inc()
@@ -432,8 +470,14 @@ func (h *ConnectionHandler) sendAuthFail(code, reason string, retryable bool) {
 		Reason:    reason,
 		Retryable: retryable,
 	}
-	payload, _ := json.Marshal(fail)
-	_ = h.writeControl(core.TypeAuthFail, core.FlagControl, payload)
+	payload, err := json.Marshal(fail)
+	if err != nil {
+		slog.Warn("marshal auth_fail failed", "error", err)
+		return
+	}
+	if err := h.writeControl(core.TypeAuthFail, core.FlagControl, payload); err != nil {
+		slog.Debug("write auth_fail failed", "session", h.sessionID, "error", err)
+	}
 }
 
 func (h *ConnectionHandler) sendError(reason string, fatal bool) {
@@ -443,6 +487,12 @@ func (h *ConnectionHandler) sendError(reason string, fatal bool) {
 		Fatal:     fatal,
 		Retryable: !fatal,
 	}
-	payload, _ := json.Marshal(errMsg)
-	_ = h.writeControl(core.TypeError, core.FlagControl, payload)
+	payload, err := json.Marshal(errMsg)
+	if err != nil {
+		slog.Warn("marshal error frame failed", "error", err)
+		return
+	}
+	if err := h.writeControl(core.TypeError, core.FlagControl, payload); err != nil {
+		slog.Debug("write error frame failed", "session", h.sessionID, "error", err)
+	}
 }

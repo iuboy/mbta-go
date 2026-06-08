@@ -90,7 +90,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // Connect dials the server and completes the HELLO/AUTH handshake.
 func (c *Client) Connect(ctx context.Context) error {
 	// Dial QUIC
-	_ = c.sm.Transition(core.StateConnecting)
+	if err := c.sm.Transition(core.StateConnecting); err != nil {
+		slog.Warn("state transition failed", "to", core.StateConnecting, "error", err)
+	}
 
 	conn, err := Dial(ctx, c.config.Transport)
 	if err != nil {
@@ -104,7 +106,9 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("open control stream: %w", err)
 	}
 	c.controlStr = ctrlStr
-	_ = c.sm.Transition(core.StateControlStreamOpen)
+	if err := c.sm.Transition(core.StateControlStreamOpen); err != nil {
+		slog.Warn("state transition failed", "to", core.StateControlStreamOpen, "error", err)
+	}
 
 	// Send HELLO
 	if err := c.sendHello(); err != nil {
@@ -118,7 +122,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	c.sessionID = helloAck.SessionID
-	_ = c.sm.Transition(core.StateHelloAcked)
+	if err := c.sm.Transition(core.StateHelloAcked); err != nil {
+		slog.Warn("state transition failed", "to", core.StateHelloAcked, "error", err)
+	}
 
 	// Update window from HELLO_ACK
 	c.window.Update(
@@ -269,8 +275,9 @@ func (c *Client) Close() error {
 
 	if c.controlStr != nil {
 		closeMsg := core.CloseMessage{Code: "shutdown", Reason: "client closing"}
-		payload, _ := json.Marshal(closeMsg)
-		_ = core.Write(c.controlStr, core.TypeClose, core.FlagControl, payload)
+		if payload, err := json.Marshal(closeMsg); err == nil {
+			_ = core.Write(c.controlStr, core.TypeClose, core.FlagControl, payload)
+		}
 	}
 
 	if c.conn != nil {
