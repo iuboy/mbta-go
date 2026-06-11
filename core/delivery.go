@@ -50,6 +50,7 @@ type ReplayCache struct {
 	mu      sync.Mutex
 	entries map[string]*ReplayEntry // key: agent_id + chunk_id
 	maxSize int
+	order   []string // FIFO insertion order for bounded eviction
 }
 
 const defaultReplayMaxSize = 50000
@@ -59,6 +60,7 @@ func NewReplayCache() *ReplayCache {
 	return &ReplayCache{
 		entries: make(map[string]*ReplayEntry),
 		maxSize: defaultReplayMaxSize,
+		order:   make([]string, 0, defaultReplayMaxSize),
 	}
 }
 
@@ -69,7 +71,7 @@ func Key(agentID, chunkID string) string {
 
 // SeenOrAdd checks if a key has been seen. Returns the entry if so.
 // If not seen, creates a new Processing entry and returns nil.
-// Evicts oldest Processing entries when the cache exceeds maxSize.
+// When the cache exceeds maxSize, evicts the oldest entry regardless of status.
 func (rc *ReplayCache) SeenOrAdd(key string) *ReplayEntry {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
@@ -78,17 +80,16 @@ func (rc *ReplayCache) SeenOrAdd(key string) *ReplayEntry {
 		return e
 	}
 
-	// Evict Processing entries when over capacity to prevent unbounded growth.
-	if len(rc.entries) >= rc.maxSize {
-		for k, v := range rc.entries {
-			if v.Status == ReplayProcessing {
-				delete(rc.entries, k)
-				break
-			}
-		}
+	// Evict oldest entry (FIFO) when over capacity.
+	// This guarantees bounded memory regardless of entry status.
+	for len(rc.entries) >= rc.maxSize && len(rc.order) > 0 {
+		oldest := rc.order[0]
+		rc.order = rc.order[1:]
+		delete(rc.entries, oldest)
 	}
 
 	rc.entries[key] = &ReplayEntry{Status: ReplayProcessing}
+	rc.order = append(rc.order, key)
 	return nil
 }
 

@@ -133,6 +133,9 @@ func VerifyHMACSHA256(key []byte, env *SecureEnvelope) bool {
 	return hmac.Equal(got, expected)
 }
 
+// MaxDecompressedSize limits decompressed payload to 100 MB to prevent zip-bomb attacks.
+const MaxDecompressedSize = 100 * 1024 * 1024
+
 // Open decodes and decompresses an envelope's payload.
 func Open(env *SecureEnvelope) ([]byte, error) {
 	// Base64 decode
@@ -151,9 +154,15 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip reader", err)
 		}
 		defer r.Close()
-		decompressed, err := io.ReadAll(r)
+
+		// Limit decompressed size to prevent zip-bomb OOM
+		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
+		decompressed, err := io.ReadAll(lr)
 		if err != nil {
 			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip decompress", err)
+		}
+		if lr.N == 0 {
+			return nil, NewError(NumEnvelope, ErrEnvelope, fmt.Sprintf("decompressed payload exceeds %d bytes limit", MaxDecompressedSize))
 		}
 		return decompressed, nil
 	}
