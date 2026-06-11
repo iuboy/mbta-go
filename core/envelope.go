@@ -68,10 +68,10 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 		var buf bytes.Buffer
 		w := gzip.NewWriter(&buf)
 		if _, err := w.Write(batchPayload); err != nil {
-			return nil, fmt.Errorf("gzip compress: %w", err)
+			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip compress", err)
 		}
 		if err := w.Close(); err != nil {
-			return nil, fmt.Errorf("gzip close: %w", err)
+			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip close", err)
 		}
 		processed = buf.Bytes()
 	}
@@ -138,7 +138,7 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 	// Base64 decode
 	raw, err := base64.StdEncoding.DecodeString(env.Payload)
 	if err != nil {
-		return nil, fmt.Errorf("base64 decode payload: %w", err)
+		return nil, WrapError(NumEnvelope, ErrEnvelope, "base64 decode payload", err)
 	}
 
 	// Decrypt (when encryption enabled)
@@ -148,12 +148,12 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 	if env.Compression == CompressionGzip {
 		r, err := gzip.NewReader(bytes.NewReader(raw))
 		if err != nil {
-			return nil, fmt.Errorf("gzip reader: %w", err)
+			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip reader", err)
 		}
 		defer r.Close()
 		decompressed, err := io.ReadAll(r)
 		if err != nil {
-			return nil, fmt.Errorf("gzip decompress: %w", err)
+			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip decompress", err)
 		}
 		return decompressed, nil
 	}
@@ -170,7 +170,7 @@ func EncodeEnvelope(env *SecureEnvelope) ([]byte, error) {
 func DecodeEnvelope(data []byte) (*SecureEnvelope, error) {
 	var env SecureEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
-		return nil, fmt.Errorf("decode envelope: %w", err)
+		return nil, WrapError(NumEnvelope, ErrEnvelope, "decode envelope", err)
 	}
 	return &env, nil
 }

@@ -137,7 +137,7 @@ func (sm *StateMachine) Transition(next State) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("invalid transition %s -> %s", sm.state, next)
+	return NewError(NumSession, ErrSession, fmt.Sprintf("invalid transition %s -> %s", sm.state, next))
 }
 
 // ServerMachine is a thread-safe server-side state machine.
@@ -198,7 +198,7 @@ func (sm *ServerMachine) Transition(next ServerState) error {
 	return nil
 
 invalid:
-	return fmt.Errorf("invalid server transition %s -> %s", sm.state, next)
+	return NewError(NumSession, ErrSession, fmt.Sprintf("invalid server transition %s -> %s", sm.state, next))
 }
 
 // Policy controls which capabilities the server accepts and which algorithms it prefers.
@@ -286,10 +286,10 @@ func Negotiate(clientCaps []string, policy Policy) NegotiateResult {
 // ValidateHello checks the HELLO message is valid for v1.
 func ValidateHello(agentID string, version int) error {
 	if agentID == "" {
-		return fmt.Errorf("agent_id is required")
+		return NewError(NumValidation, ErrValidation, "agent_id is required")
 	}
 	if version != 1 {
-		return fmt.Errorf("unsupported version %d", version)
+		return NewError(NumVersion, ErrVersion, fmt.Sprintf("unsupported version %d", version))
 	}
 	return nil
 }

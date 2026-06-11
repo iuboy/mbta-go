@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -50,7 +51,8 @@ type ConnectionHandler struct {
 	agentID    string
 	sessionID  string
 	controlStr *quic.Stream
-	controlMu  sync.Mutex // protects concurrent writes to controlStr
+	controlMu  sync.Mutex // protects concurrent writes to controlWriter
+	controlW   io.Writer  // control stream writer (set to controlStr in production)
 
 	acceptOnce    sync.Once     // ensures acceptDataStreams starts only once
 	streamSem     chan struct{} // limits concurrent data-stream goroutines
@@ -68,12 +70,13 @@ func (h *ConnectionHandler) HandleConnection(ctx context.Context) error {
 	// Accept the control stream
 	s, role, err := h.conn.AcceptStream(ctx)
 	if err != nil {
-		return fmt.Errorf("accept control stream: %w", err)
+		return core.WrapError(core.NumStream, core.ErrStream, "accept control stream", err)
 	}
 	if role != core.StreamRoleControl {
-		return fmt.Errorf("first stream must be control, got %s", role)
+		return core.NewError(core.NumProtocol, core.ErrProtocol, fmt.Sprintf("first stream must be control, got %s", role))
 	}
 	h.controlStr = s
+	h.controlW = s
 	defer h.controlStr.Close()
 
 	if err := h.sm.Transition(core.ServerStateControlWait); err != nil {
@@ -92,7 +95,7 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 	for {
 		f, err := core.Read(h.controlStr, core.DefaultLimits())
 		if err != nil {
-			return fmt.Errorf("read frame: %w", err)
+			return core.WrapError(core.NumProtocol, core.ErrProtocol, "read frame", err)
 		}
 
 		switch f.Header.Type {
@@ -114,7 +117,7 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 				slog.Debug("unexpected control message after auth", "type", f.Header.Type)
 			} else {
 				h.sendError(fmt.Sprintf("unexpected message type 0x%04x before auth", f.Header.Type), true)
-				return fmt.Errorf("unexpected message type 0x%04x", f.Header.Type)
+				return core.NewError(core.NumProtocol, core.ErrProtocol, fmt.Sprintf("unexpected message type 0x%04x", f.Header.Type))
 			}
 		}
 
@@ -128,7 +131,7 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 func (h *ConnectionHandler) handleHello(payload []byte) error {
 	var msg core.HelloMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {
-		return fmt.Errorf("decode hello: %w", err)
+		return core.WrapError(core.NumProtocol, core.ErrProtocol, "decode hello", err)
 	}
 
 	if err := msg.Validate(); err != nil {
@@ -171,10 +174,10 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 
 	ackPayload, err := json.Marshal(helloAck)
 	if err != nil {
-		return fmt.Errorf("marshal hello_ack: %w", err)
+		return core.WrapError(core.NumProtocol, core.ErrProtocol, "marshal hello_ack", err)
 	}
 	if err := h.writeControl(core.TypeHelloAck, core.FlagControl, ackPayload); err != nil {
-		return fmt.Errorf("write hello_ack: %w", err)
+		return core.WrapError(core.NumStream, core.ErrStream, "write hello_ack", err)
 	}
 
 	if err := h.sm.Transition(core.ServerStateAuthWait); err != nil {
@@ -187,7 +190,7 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	var msg core.AuthMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {
-		return fmt.Errorf("decode auth: %w", err)
+		return core.WrapError(core.NumProtocol, core.ErrProtocol, "decode auth", err)
 	}
 
 	if err := msg.Validate(); err != nil {
@@ -199,7 +202,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	if msg.AgentID != h.agentID {
 		slog.Warn("auth agent_id mismatch", "session", h.sessionID, "hello_agent", h.agentID, "auth_agent", msg.AgentID)
 		h.sendAuthFail("invalid_auth", "authentication failed", false)
-		return fmt.Errorf("agent_id mismatch")
+		return core.NewError(core.NumAuth, core.ErrAuth, "agent_id mismatch")
 	}
 
 	// Token validation
@@ -227,14 +230,14 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 		SessionID:     h.sessionID,
 		KeyID:         keys.KeyID,
 		HMACKey:       keys.HMACKeyBase64(),
-		ExpiresAtUnix: time.Now().Add(24 * time.Hour).Unix(),
+		ExpiresAtUnix: time.Now().Add(core.DefaultSessionTTL).Unix(),
 	}
 	okPayload, err := json.Marshal(authOK)
 	if err != nil {
-		return fmt.Errorf("marshal auth_ok: %w", err)
+		return core.WrapError(core.NumProtocol, core.ErrProtocol, "marshal auth_ok", err)
 	}
 	if err := h.writeControl(core.TypeAuthOK, core.FlagControl, okPayload); err != nil {
-		return fmt.Errorf("write auth_ok: %w", err)
+		return core.WrapError(core.NumStream, core.ErrStream, "write auth_ok", err)
 	}
 
 	if err := h.sm.Transition(core.ServerStateReady); err != nil {
@@ -253,6 +256,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 func (h *ConnectionHandler) handlePing(payload []byte) {
 	var msg core.PingMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {
+		slog.Debug("invalid ping payload", "error", err)
 		return
 	}
 
@@ -426,7 +430,7 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 func (h *ConnectionHandler) writeControl(typ uint16, flags byte, payload []byte) error {
 	h.controlMu.Lock()
 	defer h.controlMu.Unlock()
-	return core.Write(h.controlStr, typ, flags, payload)
+	return core.Write(h.controlW, typ, flags, payload)
 }
 
 func (h *ConnectionHandler) sendAck(seq uint64, chunkID string, count int, ackMode string) {

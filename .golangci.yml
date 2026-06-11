@@ -3,6 +3,7 @@ run:
 
 linters:
   enable:
+    # 默认启用
     - gosec
     - goconst
     - staticcheck
@@ -10,6 +11,48 @@ linters:
     - unused
     - ineffassign
     - typecheck
+
+    # 代码质量
+    - revive
+    - gocritic
+    - gocognit
+    - maintidx
+    - godox
+    - unconvert
+    - prealloc
+    - predeclared
+
+    # 正确性 / 安全
+    - errname
+    - exhaustive
+    - nilerr
+    - sloglint
+    - noctx
+
+    # 代码风格
+    - misspell
+    - whitespace
+
+linters-settings:
+  gocognit:
+    min-complexity: 30
+
+  revive:
+    rules:
+      - name: exported
+      - name: unhandled-error
+
+  gocritic:
+    enabled-checks:
+      - hugeParam
+      - rangeExprCopy
+      - rangeValCopy
+
+  exhaustive:
+    default-signifies-exhaustive: true
+
+  sloglint:
+    no-mixed-args: true
 
 issues:
   exclude-rules:
@@ -21,3 +64,30 @@ issues:
     - linters: [gosec]
       text: "G115"
       path: _test\.go
+    # G402: TLS InsecureSkipVerify — intentionally used in examples and tests
+    - linters: [gosec]
+      text: "G402"
+      path: (examples|v1/transport\.go)
+    # G104: error not checked — best-effort cleanup in defer/close paths
+    - linters: [gosec]
+      text: "G104"
+    # G304: file path from variable — validated by callers
+    - linters: [gosec]
+      text: "G304"
+    # test files: relax rules
+    - linters: [gocognit, maintidx, gocritic, revive]
+      path: _test\.go
+    # examples: relax rules
+    - linters: [errcheck, revive]
+      path: examples/
+    # placeholder implementations (v2, ntls): suppress unused-parameter
+    - linters: [revive]
+      text: "unused-parameter"
+      path: (v2/|ntls/)
+    # hugeParam: existing API contract, changing to pointer is a breaking change
+    - linters: [gocritic]
+      text: "hugeParam"
+    # wrappers implementing interface: unused-parameter is intentional (no-op)
+    - linters: [revive]
+      text: "unused-parameter"
+      path: client\.go

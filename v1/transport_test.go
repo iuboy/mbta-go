@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"crypto/tls"
+	"strings"
 	"testing"
 	"time"
 )
@@ -184,7 +185,7 @@ func TestConnOpenDataStreamBeforeAuth(t *testing.T) {
 		t.Error("OpenDataStream before auth should return error")
 	}
 
-	expectedMsg := "cannot open data stream before auth"
+	expectedMsg := "[2002 ERR_STREAM] cannot open data stream before auth"
 	if err.Error() != expectedMsg {
 		t.Errorf("Error message = %q, want %q", err.Error(), expectedMsg)
 	}
@@ -232,7 +233,7 @@ func TestClientAuthModes(t *testing.T) {
 			_, err := buildServerTLS(cfg)
 			if err != nil {
 				// Expected to fail on cert loading
-				if err.Error() != "load server cert/key: open dummy.pem: no such file or directory" {
+				if !strings.Contains(err.Error(), "load server cert/key") {
 					t.Errorf("Unexpected error: %v", err)
 				}
 			}

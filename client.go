@@ -66,13 +66,20 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 
 	for _, opt := range opts {
 		if err := opt(cfg); err != nil {
-			return nil, fmt.Errorf("client option error: %w", err)
+			return nil, core.WrapError(core.NumConfig, core.ErrConfig, "client option", err)
 		}
 	}
 
 	// Validate at least one version is specified
 	if len(cfg.Versions) == 0 {
-		return nil, fmt.Errorf("at least one version must be specified")
+		return nil, core.NewError(core.NumConfig, core.ErrConfig, "at least one version must be specified")
+	}
+
+	if cfg.AgentID == "" {
+		return nil, core.NewError(core.NumConfig, core.ErrConfig, "AgentID is required")
+	}
+	if cfg.Server == "" {
+		return nil, core.NewError(core.NumConfig, core.ErrConfig, "Server address is required")
 	}
 
 	c := &Client{
@@ -108,12 +115,12 @@ func Dial(ctx context.Context, server, agentID, token string, opts ...ClientOpti
 
 	client, err := NewClient(allOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("mbta dial: create client: %w", err)
+		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "dial create", err)
 	}
 
 	if err := client.Connect(ctx); err != nil {
 		_ = client.Close()
-		return nil, fmt.Errorf("mbta dial: connect: %w", err)
+		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "dial connect", err)
 	}
 
 	return client, nil
@@ -157,7 +164,7 @@ func (c *Client) initClients() error {
 
 	// Ensure at least one client was initialized
 	if len(c.clients) == 0 {
-		return fmt.Errorf("no clients initialized (check version-specific configs)")
+		return core.NewError(core.NumConfig, core.ErrConfig, "no clients initialized (check version-specific configs)")
 	}
 
 	return nil
@@ -195,7 +202,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	// All versions failed
-	return fmt.Errorf("all versions failed to connect (last error: %w)", lastErr)
+	return core.WrapError(core.NumTransport, core.ErrTransport, "all versions failed to connect", lastErr)
 }
 
 // SendBatch sends a batch using the active connection.
@@ -208,7 +215,7 @@ func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, so
 	c.mu.RUnlock()
 
 	if !ok || current == "" {
-		return "", fmt.Errorf("not connected (call Connect first)")
+		return "", core.NewError(core.NumSession, core.ErrSession, "not connected (call Connect first)")
 	}
 
 	// The underlying client must handle writes on a closed connection gracefully.
@@ -231,6 +238,9 @@ func (c *Client) Close() error {
 
 	c.current = ""
 	c.cfg.Token = ""
+	c.cfg.V1Creds = nil
+	c.cfg.V2Creds = nil
+	c.cfg.NTLSCreds = nil
 
 	if len(errs) > 0 {
 		return fmt.Errorf("close errors: %v", errs)
@@ -279,7 +289,7 @@ func (c *Client) ActiveVersion() string {
 // initV1Client initializes the V1 client wrapper.
 func (c *Client) initV1Client() (versionedClient, error) {
 	if c.cfg.V1Creds == nil {
-		return nil, fmt.Errorf("v1 credentials not provided")
+		return nil, core.NewError(core.NumCredential, core.ErrCredential, "v1 credentials not provided")
 	}
 
 	cfg := v1.ClientConfig{
@@ -303,7 +313,7 @@ func (c *Client) initV1Client() (versionedClient, error) {
 // initV2Client initializes the V2 client wrapper.
 func (c *Client) initV2Client() (versionedClient, error) {
 	if c.cfg.V2Creds == nil {
-		return nil, fmt.Errorf("v2 GM credentials not provided")
+		return nil, core.NewError(core.NumCredential, core.ErrCredential, "v2 GM credentials not provided")
 	}
 
 	cfg := v2.ClientConfig{
@@ -327,7 +337,7 @@ func (c *Client) initV2Client() (versionedClient, error) {
 // initNTLSClient initializes the NTLS client wrapper.
 func (c *Client) initNTLSClient() (versionedClient, error) {
 	if c.cfg.NTLSCreds == nil {
-		return nil, fmt.Errorf("ntls credentials not provided")
+		return nil, core.NewError(core.NumCredential, core.ErrCredential, "ntls credentials not provided")
 	}
 
 	// Convert ClientCredentials to ClientConfig
@@ -436,7 +446,7 @@ func WithVersionPriority(versions []string) ClientOption {
 			case Version1, Version2, VersionNTLS:
 				// Valid
 			default:
-				return fmt.Errorf("invalid version: %s", v)
+				return core.NewError(core.NumVersion, core.ErrVersion, fmt.Sprintf("invalid version: %s", v))
 			}
 		}
 		cc.Versions = versions

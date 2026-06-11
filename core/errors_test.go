@@ -1,6 +1,8 @@
 package core
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -231,5 +233,122 @@ func TestErrorCodeFormats(t *testing.T) {
 				t.Errorf("Error code should not contain spaces, got %q", code)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Error 类型测试
+// ---------------------------------------------------------------------------
+
+func TestMBTAError_Error(t *testing.T) {
+	e := NewError(NumConfig, ErrConfig, "invalid config")
+	want := "[1000 ERR_CONFIG] invalid config"
+	if got := e.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestMBTAError_ErrorWrapped(t *testing.T) {
+	inner := fmt.Errorf("listen failed")
+	e := WrapError(NumTransport, ErrTransport, "dial QUIC", inner)
+	want := "[2000 ERR_TRANSPORT] dial QUIC: listen failed"
+	if got := e.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestMBTAError_Unwrap(t *testing.T) {
+	inner := fmt.Errorf("base error")
+	e := WrapError(NumTLS, ErrTLS, "tls failed", inner)
+	if !errors.Is(e, inner) {
+		t.Error("Unwrap should return inner error")
+	}
+}
+
+func TestMBTAError_Is(t *testing.T) {
+	e1 := NewError(NumAuth, ErrAuth, "auth failed")
+	e2 := NewError(NumAuth, ErrAuth, "different message")
+	e3 := NewError(NumTransport, ErrTransport, "transport")
+
+	if !errors.Is(e1, e2) {
+		t.Error("same NumCode should match via errors.Is")
+	}
+	if errors.Is(e1, e3) {
+		t.Error("different NumCode should not match")
+	}
+}
+
+func TestMBTAError_IsWrapped(t *testing.T) {
+	inner := fmt.Errorf("connection refused")
+	e := WrapError(NumTransport, ErrTransport, "dial", inner)
+
+	if !errors.Is(e, NewError(NumTransport, ErrTransport, "")) {
+		t.Error("wrapped error should match by NumCode")
+	}
+	if !errors.Is(e, inner) {
+		t.Error("wrapped error should match inner via errors.Is")
+	}
+}
+
+func TestGetErrorCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"standard error", fmt.Errorf("plain error"), 0},
+		{"mbta error", NewError(NumSpool, ErrSpool, "spool failed"), NumSpool},
+		{"wrapped mbta", WrapError(NumAuth, ErrAuth, "auth", fmt.Errorf("bad token")), NumAuth},
+		{"double wrapped", fmt.Errorf("outer: %w", WrapError(NumBatch, ErrBatch, "batch", fmt.Errorf("inner"))), NumBatch},
+		{"nil", nil, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetErrorCode(tt.err); got != tt.want {
+				t.Errorf("GetErrorCode() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetErrorCodeString(t *testing.T) {
+	e := WrapError(NumEnvelope, ErrEnvelope, "gzip failed", fmt.Errorf("compress error"))
+	if got := GetErrorCodeString(e); got != ErrEnvelope {
+		t.Errorf("GetErrorCodeString() = %q, want %q", got, ErrEnvelope)
+	}
+	if got := GetErrorCodeString(fmt.Errorf("plain")); got != "" {
+		t.Errorf("GetErrorCodeString(plain) = %q, want empty", got)
+	}
+}
+
+func TestNumCodeRanges(t *testing.T) {
+	tests := []struct {
+		code int
+		min  int
+		max  int
+		cat  string
+	}{
+		{NumConfig, 1000, 1099, "config"},
+		{NumCredential, 1000, 1099, "config"},
+		{NumTransport, 2000, 2099, "transport"},
+		{NumTLS, 2000, 2099, "transport"},
+		{NumStream, 2000, 2099, "transport"},
+		{NumHandshake, 3000, 3099, "protocol"},
+		{NumAuth, 3000, 3099, "protocol"},
+		{NumSession, 3000, 3099, "protocol"},
+		{NumProtocol, 3000, 3099, "protocol"},
+		{NumBatch, 4000, 4099, "data"},
+		{NumEnvelope, 4000, 4099, "data"},
+		{NumValidation, 4000, 4099, "data"},
+		{NumHMAC, 4000, 4099, "data"},
+		{NumWindowFull, 5000, 5099, "flow"},
+		{NumThrottle, 5000, 5099, "flow"},
+		{NumSpool, 6000, 6099, "storage"},
+		{NumVersion, 7000, 7099, "version"},
+	}
+	for _, tt := range tests {
+		if tt.code < tt.min || tt.code > tt.max {
+			t.Errorf("%s (%d) not in range %d-%d (%s)", tt.cat, tt.code, tt.min, tt.max, tt.cat)
+		}
 	}
 }

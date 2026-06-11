@@ -71,6 +71,46 @@ func TestNewClientNoVersions(t *testing.T) {
 	}
 }
 
+// TestNewClientMissingAgentID tests that NewClient rejects empty AgentID.
+func TestNewClientMissingAgentID(t *testing.T) {
+	creds := v1.ClientCredentials{
+		ServerName: "example.com",
+	}
+
+	_, err := NewClient(
+		WithVersionPriority([]string{Version1}),
+		WithServer("example.com:8080"),
+		WithV1Credentials(creds),
+		// AgentID intentionally omitted
+	)
+	if err == nil {
+		t.Error("expected error for missing AgentID")
+	}
+	if core.GetErrorCode(err) != core.NumConfig {
+		t.Errorf("error code = %d, want %d", core.GetErrorCode(err), core.NumConfig)
+	}
+}
+
+// TestNewClientMissingServer tests that NewClient rejects empty Server.
+func TestNewClientMissingServer(t *testing.T) {
+	creds := v1.ClientCredentials{
+		ServerName: "example.com",
+	}
+
+	_, err := NewClient(
+		WithVersionPriority([]string{Version1}),
+		WithAgent("test-agent", "test-host", "test-token"),
+		WithV1Credentials(creds),
+		// Server intentionally omitted
+	)
+	if err == nil {
+		t.Error("expected error for missing Server")
+	}
+	if core.GetErrorCode(err) != core.NumConfig {
+		t.Errorf("error code = %d, want %d", core.GetErrorCode(err), core.NumConfig)
+	}
+}
+
 // TestClientSendBatchBeforeConnect tests SendBatch before Connect.
 func TestClientSendBatchBeforeConnect(t *testing.T) {
 	creds := v1.ClientCredentials{
@@ -79,6 +119,8 @@ func TestClientSendBatchBeforeConnect(t *testing.T) {
 
 	client, err := NewClient(
 		WithVersionPriority([]string{Version1}),
+		WithServer("example.com:8080"),
+		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
 	)
 	if err != nil {
@@ -100,6 +142,8 @@ func TestClientCloseBeforeConnect(t *testing.T) {
 
 	client, err := NewClient(
 		WithVersionPriority([]string{Version1}),
+		WithServer("example.com:8080"),
+		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
 	)
 	if err != nil {
@@ -124,6 +168,8 @@ func TestClientActiveVersion(t *testing.T) {
 
 	client, err := NewClient(
 		WithVersionPriority([]string{Version1}),
+		WithServer("example.com:8080"),
+		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
 	)
 	if err != nil {
@@ -143,6 +189,8 @@ func TestClientState(t *testing.T) {
 
 	client, err := NewClient(
 		WithVersionPriority([]string{Version1}),
+		WithServer("example.com:8080"),
+		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
 	)
 	if err != nil {
@@ -163,6 +211,7 @@ func TestWithServer(t *testing.T) {
 
 	client, err := NewClient(
 		WithServer("example.com:8080"),
+		WithAgent("test-agent", "test-host", "test-token"),
 		WithVersionPriority([]string{Version1}),
 		WithV1Credentials(creds),
 	)
@@ -183,6 +232,7 @@ func TestWithAgent(t *testing.T) {
 
 	client, err := NewClient(
 		WithAgent("agent-1", "host-1", "token-123"),
+		WithServer("example.com:8080"),
 		WithVersionPriority([]string{Version1}),
 		WithV1Credentials(creds),
 	)
@@ -259,6 +309,8 @@ func TestClientConcurrency(t *testing.T) {
 
 	client, err := NewClient(
 		WithVersionPriority([]string{Version1}),
+		WithServer("example.com:8080"),
+		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
 	)
 	if err != nil {

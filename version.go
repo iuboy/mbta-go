@@ -12,6 +12,12 @@
 //   - ALPN negotiation for protocol version selection
 package mbta
 
+import (
+	"fmt"
+
+	"github.com/iuboy/mbta-go/core"
+)
+
 // Version represents an MBTA protocol version.
 type Version interface {
 	// Name returns the version name ("v1", "v2", "ntls").
@@ -70,7 +76,7 @@ type UnsupportedVersionError struct {
 }
 
 func (e *UnsupportedVersionError) Error() string {
-	return "unsupported mbta version: " + e.Version
+	return fmt.Sprintf("[%d %s] unsupported mbta version: %s", core.NumVersion, core.ErrVersion, e.Version)
 }
 
 // IsUnsupportedVersion checks if an error is an UnsupportedVersionError.

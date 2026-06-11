@@ -143,6 +143,10 @@ func (w *Window) Update(maxBatches int, maxEvents int, maxBytes int64) {
 // CanSend checks whether a batch of the given size fits in the window.
 // A max of 0 means that dimension is paused (no sending allowed).
 func (w *Window) CanSend(inf *Inflight, events int, bytes int64) bool {
+	if w == nil || inf == nil {
+		return false
+	}
+
 	w.mu.Lock()
 	winBatches := w.maxInflightBatches
 	winEvents := w.maxInflightEvents

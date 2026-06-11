@@ -11,7 +11,8 @@ type mockStream struct {
 	idx int
 }
 
-func (m *mockStream) Index() int { return m.idx }
+func (m *mockStream) Index() int                  { return m.idx }
+func (m *mockStream) Write(_ []byte) (int, error) { return 0, nil }
 
 func TestSingleStream(t *testing.T) {
 	ds := &mockStream{idx: 0}

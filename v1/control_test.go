@@ -2,301 +2,199 @@ package v1
 
 import (
 	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
 )
 
-// TestAckMessageStructure tests AckMessage structure.
-func TestAckMessageStructure(t *testing.T) {
-	ack := core.AckMessage{
-		Seq:     1,
-		ChunkID: "test-chunk",
-		Count:   10,
-		AckMode: "durable",
+// TestHandleAck verifies that handleAck removes inflight tracking
+// and invokes the registered ACK handler callback.
+func TestHandleAck(t *testing.T) {
+	c := &Client{
+		inflight:   &core.Inflight{},
+		pendingAcks: sync.Map{},
 	}
 
-	data, err := json.Marshal(ack)
-	if err != nil {
-		t.Fatalf("Marshal AckMessage failed: %v", err)
-	}
-
-	var decoded core.AckMessage
-	err = json.Unmarshal(data, &decoded)
-	if err != nil {
-		t.Fatalf("Unmarshal AckMessage failed: %v", err)
-	}
-
-	if decoded.Seq != 1 {
-		t.Errorf("Seq = %d, want 1", decoded.Seq)
-	}
-	if decoded.ChunkID != "test-chunk" {
-		t.Errorf("ChunkID = %s, want 'test-chunk'", decoded.ChunkID)
-	}
-	if decoded.Count != 10 {
-		t.Errorf("Count = %d, want 10", decoded.Count)
-	}
-	if decoded.AckMode != "durable" {
-		t.Errorf("AckMode = %s, want 'durable'", decoded.AckMode)
-	}
-}
-
-// TestNackMessageStructure tests NackMessage structure.
-func TestNackMessageStructure(t *testing.T) {
-	nack := core.NackMessage{
-		Seq:       1,
-		ChunkID:   "test-chunk",
-		Code:      "ERR_INVALID_FRAME",
-		Reason:    "Frame validation failed",
-		Retryable: true,
-	}
-
-	data, err := json.Marshal(nack)
-	if err != nil {
-		t.Fatalf("Marshal NackMessage failed: %v", err)
-	}
-
-	var decoded core.NackMessage
-	err = json.Unmarshal(data, &decoded)
-	if err != nil {
-		t.Fatalf("Unmarshal NackMessage failed: %v", err)
-	}
-
-	if decoded.Seq != 1 {
-		t.Errorf("Seq = %d, want 1", decoded.Seq)
-	}
-	if decoded.ChunkID != "test-chunk" {
-		t.Errorf("ChunkID = %s, want 'test-chunk'", decoded.ChunkID)
-	}
-	if decoded.Code != "ERR_INVALID_FRAME" {
-		t.Errorf("Code = %s, want 'ERR_INVALID_FRAME'", decoded.Code)
-	}
-	if !decoded.Retryable {
-		t.Error("Retryable should be true")
-	}
-}
-
-// TestWindowMessageStructure tests WindowMessage structure.
-func TestWindowMessageStructure(t *testing.T) {
-	win := core.WindowMessage{
-		MaxInflightBatches: 100,
-		MaxInflightEvents:  10000,
-		MaxInflightBytes:   16 * 1024 * 1024,
-	}
-
-	data, err := json.Marshal(win)
-	if err != nil {
-		t.Fatalf("Marshal WindowMessage failed: %v", err)
-	}
-
-	var decoded core.WindowMessage
-	err = json.Unmarshal(data, &decoded)
-	if err != nil {
-		t.Fatalf("Unmarshal WindowMessage failed: %v", err)
-	}
-
-	if decoded.MaxInflightBatches != 100 {
-		t.Errorf("MaxInflightBatches = %d, want 100", decoded.MaxInflightBatches)
-	}
-	if decoded.MaxInflightEvents != 10000 {
-		t.Errorf("MaxInflightEvents = %d, want 10000", decoded.MaxInflightEvents)
-	}
-	if decoded.MaxInflightBytes != 16*1024*1024 {
-		t.Errorf("MaxInflightBytes = %d, want %d", decoded.MaxInflightBytes, 16*1024*1024)
-	}
-}
-
-// TestThrottleMessageStructure tests ThrottleMessage structure.
-func TestThrottleMessageStructure(t *testing.T) {
-	throt := core.ThrottleMessage{
-		RetryDelayMs: 5000,
-		Reason:       "Server overloaded",
-	}
-
-	data, err := json.Marshal(throt)
-	if err != nil {
-		t.Fatalf("Marshal ThrottleMessage failed: %v", err)
-	}
-
-	var decoded core.ThrottleMessage
-	err = json.Unmarshal(data, &decoded)
-	if err != nil {
-		t.Fatalf("Unmarshal ThrottleMessage failed: %v", err)
-	}
-
-	if decoded.RetryDelayMs != 5000 {
-		t.Errorf("RetryDelayMs = %d, want 5000", decoded.RetryDelayMs)
-	}
-	if decoded.Reason != "Server overloaded" {
-		t.Errorf("Reason = %s, want 'Server overloaded'", decoded.Reason)
-	}
-}
-
-// TestCloseMessageStructure tests CloseMessage structure.
-func TestCloseMessageStructure(t *testing.T) {
-	close := core.CloseMessage{
-		Code:   "shutdown",
-		Reason: "Client closing",
-	}
-
-	data, err := json.Marshal(close)
-	if err != nil {
-		t.Fatalf("Marshal CloseMessage failed: %v", err)
-	}
-
-	var decoded core.CloseMessage
-	err = json.Unmarshal(data, &decoded)
-	if err != nil {
-		t.Fatalf("Unmarshal CloseMessage failed: %v", err)
-	}
-
-	if decoded.Code != "shutdown" {
-		t.Errorf("Code = %s, want 'shutdown'", decoded.Code)
-	}
-	if decoded.Reason != "Client closing" {
-		t.Errorf("Reason = %s, want 'Client closing'", decoded.Reason)
-	}
-}
-
-// TestErrorMessageStructure tests ErrorMessage structure.
-func TestErrorMessageStructure(t *testing.T) {
-	errMsg := core.ErrorMessage{
-		Code:   "ERR_AUTH_FAILED",
-		Reason: "Invalid token",
-	}
-
-	data, err := json.Marshal(errMsg)
-	if err != nil {
-		t.Fatalf("Marshal ErrorMessage failed: %v", err)
-	}
-
-	var decoded core.ErrorMessage
-	err = json.Unmarshal(data, &decoded)
-	if err != nil {
-		t.Fatalf("Unmarshal ErrorMessage failed: %v", err)
-	}
-
-	if decoded.Code != "ERR_AUTH_FAILED" {
-		t.Errorf("Code = %s, want 'ERR_AUTH_FAILED'", decoded.Code)
-	}
-	if decoded.Reason != "Invalid token" {
-		t.Errorf("Reason = %s, want 'Invalid token'", decoded.Reason)
-	}
-}
-
-// TestPendingBatchStructure tests pendingBatch structure.
-func TestPendingBatchStructure(t *testing.T) {
-	pb := &pendingBatch{
+	// Simulate a pending batch
+	chunkID := "chunk-123"
+	c.inflight.Add(10, 1024)
+	c.pendingAcks.Store(chunkID, &pendingBatch{
 		Seq:    1,
 		Events: 10,
 		Bytes:  1024,
-		SentAt: testTimeNow(),
+		SentAt: time.Now(),
+	})
+
+	// Register ACK handler to capture callback
+	var called atomic.Int32
+	handler := func(cid, mode string) {
+		if cid != chunkID {
+			t.Errorf("handler chunkID = %q, want %q", cid, chunkID)
+		}
+		if mode != "durable" {
+			t.Errorf("handler mode = %q, want durable", mode)
+		}
+		called.Add(1)
+	}
+	c.ackHandler.Store(&handler)
+
+	// Build ACK payload
+	ack := core.AckMessage{
+		Seq:        1,
+		ChunkID:    chunkID,
+		Count:      10,
+		AckMode:    "durable",
+		ReceivedAt: time.Now().UnixMilli(),
+	}
+	payload, err := json.Marshal(ack)
+	if err != nil {
+		t.Fatalf("marshal ack: %v", err)
 	}
 
-	if pb.Seq == 0 {
-		t.Error("Seq should be set")
-	}
-	if pb.Events == 0 {
-		t.Error("Events should be set")
-	}
-	if pb.Bytes == 0 {
-		t.Error("Bytes should be set")
-	}
-	if pb.SentAt.IsZero() {
-		t.Error("SentAt should be set")
-	}
-}
+	c.handleAck(payload)
 
-// testTimeNow returns a fixed time for testing.
-func testTimeNow() time.Time {
-	return time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-}
-
-// TestControlMessageTypes tests various control message types.
-func TestControlMessageTypes(t *testing.T) {
-	tests := []struct {
-		name    string
-		marshal func() ([]byte, error)
-	}{
-		{
-			name: "AckMessage",
-			marshal: func() ([]byte, error) {
-				return json.Marshal(core.AckMessage{Seq: 1, ChunkID: "chunk-1", AckMode: "durable"})
-			},
-		},
-		{
-			name: "NackMessage",
-			marshal: func() ([]byte, error) {
-				return json.Marshal(core.NackMessage{Seq: 1, ChunkID: "chunk-1", Code: "ERR_INVALID"})
-			},
-		},
-		{
-			name: "WindowMessage",
-			marshal: func() ([]byte, error) {
-				return json.Marshal(core.WindowMessage{MaxInflightBatches: 100})
-			},
-		},
-		{
-			name: "ThrottleMessage",
-			marshal: func() ([]byte, error) {
-				return json.Marshal(core.ThrottleMessage{RetryDelayMs: 5000})
-			},
-		},
-		{
-			name: "CloseMessage",
-			marshal: func() ([]byte, error) {
-				return json.Marshal(core.CloseMessage{Code: "shutdown"})
-			},
-		},
-		{
-			name: "ErrorMessage",
-			marshal: func() ([]byte, error) {
-				return json.Marshal(core.ErrorMessage{Code: "ERR_AUTH", Reason: "Failed"})
-			},
-		},
+	// Verify inflight was decremented
+	batches, events, bytes := c.inflight.Snapshot()
+	if batches != 0 {
+		t.Errorf("inflight batches = %d, want 0", batches)
+	}
+	if events != 0 {
+		t.Errorf("inflight events = %d, want 0", events)
+	}
+	if bytes != 0 {
+		t.Errorf("inflight bytes = %d, want 0", bytes)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			data, err := tt.marshal()
-			if err != nil {
-				t.Errorf("Marshal %s failed: %v", tt.name, err)
-			}
+	// Verify handler was called
+	if called.Load() != 1 {
+		t.Errorf("handler called %d times, want 1", called.Load())
+	}
 
-			// Verify JSON is valid (not empty)
-			if len(data) == 0 {
-				t.Errorf("Marshal %s produced empty JSON", tt.name)
-			}
-		})
+	// Verify pendingAck was removed
+	if _, ok := c.pendingAcks.Load(chunkID); ok {
+		t.Error("pendingAck should be removed after ACK")
 	}
 }
 
-// TestAckModeValues tests common ACK mode values.
-func TestAckModeValues(t *testing.T) {
-	modes := []string{"durable", "accepted", "nack", "throttle"}
+// TestHandleAck_InvalidPayload verifies that handleAck silently ignores malformed JSON.
+func TestHandleAck_InvalidPayload(t *testing.T) {
+	c := &Client{
+		inflight:    &core.Inflight{},
+		pendingAcks: sync.Map{},
+	}
 
-	for _, mode := range modes {
-		t.Run(mode, func(t *testing.T) {
-			ack := core.AckMessage{
-				Seq:     1,
-				ChunkID: "chunk-1",
-				AckMode: mode,
-			}
+	c.inflight.Add(5, 512)
+	c.handleAck([]byte("not json"))
 
-			data, err := json.Marshal(ack)
-			if err != nil {
-				t.Errorf("Marshal ACK with mode %s failed: %v", mode, err)
-			}
+	// Inflight should not change on invalid payload
+	_, events, _ := c.inflight.Snapshot()
+	if events != 5 {
+		t.Errorf("inflight events = %d after invalid payload, want 5", events)
+	}
+}
 
-			var decoded core.AckMessage
-			if err := json.Unmarshal(data, &decoded); err != nil {
-				t.Errorf("Unmarshal ACK with mode %s failed: %v", mode, err)
-			}
+// TestHandleNack verifies that handleNack removes inflight tracking
+// and invokes the handler with "nack" mode.
+func TestHandleNack(t *testing.T) {
+	c := &Client{
+		inflight:    &core.Inflight{},
+		pendingAcks: sync.Map{},
+	}
 
-			if decoded.AckMode != mode {
-				t.Errorf("AckMode = %s, want %s", decoded.AckMode, mode)
-			}
-		})
+	chunkID := "chunk-nack"
+	c.inflight.Add(3, 256)
+	c.pendingAcks.Store(chunkID, &pendingBatch{
+		Seq:    2,
+		Events: 3,
+		Bytes:  256,
+		SentAt: time.Now(),
+	})
+
+	var called atomic.Int32
+	handler := func(cid, mode string) {
+		if mode != "nack" {
+			t.Errorf("handler mode = %q, want nack", mode)
+		}
+		called.Add(1)
+	}
+	c.ackHandler.Store(&handler)
+
+	nack := core.NackMessage{
+		Seq:       2,
+		ChunkID:   chunkID,
+		Code:      "ERR_BATCH_TOO_LARGE",
+		Reason:    "batch exceeds limit",
+		Retryable: true,
+	}
+	payload, _ := json.Marshal(nack)
+
+	c.handleNack(payload)
+
+	if called.Load() != 1 {
+		t.Errorf("handler called %d times, want 1", called.Load())
+	}
+
+	_, events, _ := c.inflight.Snapshot()
+	if events != 0 {
+		t.Errorf("inflight events = %d after NACK, want 0", events)
+	}
+}
+
+// TestHandleWindow verifies that handleWindow updates flow-control limits.
+func TestHandleWindow(t *testing.T) {
+	c := &Client{
+		window: core.NewWindow(100, 10000, 16*1024*1024),
+	}
+
+	win := core.WindowMessage{
+		MaxInflightBatches: 50,
+		MaxInflightEvents:  5000,
+		MaxInflightBytes:   8 * 1024 * 1024,
+	}
+	payload, _ := json.Marshal(win)
+
+	c.handleWindow(payload)
+
+	batches, events, bytes := c.window.Snapshot()
+	if batches != 50 {
+		t.Errorf("max batches = %d, want 50", batches)
+	}
+	if events != 5000 {
+		t.Errorf("max events = %d, want 5000", events)
+	}
+	if bytes != 8*1024*1024 {
+		t.Errorf("max bytes = %d, want %d", bytes, 8*1024*1024)
+	}
+}
+
+// TestHandleThrottle verifies that handleThrottle applies backoff.
+func TestHandleThrottle(t *testing.T) {
+	c := &Client{
+		throttle: &core.ThrottleState{},
+	}
+
+	if c.throttle.Active() {
+		t.Error("throttle should not be active initially")
+	}
+
+	throt := core.ThrottleMessage{
+		RetryDelayMs: 5000,
+		Code:         "ERR_RATE_LIMITED",
+		Reason:       "too many requests",
+	}
+	payload, _ := json.Marshal(throt)
+
+	c.handleThrottle(payload)
+
+	if !c.throttle.Active() {
+		t.Error("throttle should be active after THROTTLE message")
+	}
+
+	wait := c.throttle.WaitDuration()
+	if wait == 0 {
+		t.Error("WaitDuration should be > 0")
 	}
 }

@@ -64,16 +64,47 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 
 	for _, opt := range opts {
 		if err := opt(cfg); err != nil {
-			return nil, fmt.Errorf("server option error: %w", err)
+			return nil, core.WrapError(core.NumConfig, core.ErrConfig, "server option", err)
 		}
 	}
 
 	// Validate at least one version is enabled
 	if !cfg.EnableV1 && !cfg.EnableV2 && !cfg.EnableNTLS {
-		return nil, fmt.Errorf("at least one version must be enabled")
+		return nil, core.NewError(core.NumConfig, core.ErrConfig, "at least one version must be enabled")
 	}
 
 	return &Server{cfg: cfg}, nil
+}
+
+// startVersion launches a single version server inside an errgroup.
+// Extracted from Start to reduce cognitive complexity.
+func (s *Server) startVersion(g *errgroup.Group, ctx context.Context, versionName string) {
+	var initFn func() error
+	var startFn func(ctx context.Context) error
+
+	switch versionName {
+	case Version1:
+		initFn = s.initV1Server
+		startFn = func(ctx context.Context) error { return s.v1Server.Start(ctx) }
+	case Version2:
+		initFn = s.initV2Server
+		startFn = func(ctx context.Context) error { return s.v2Server.Start(ctx) }
+	case VersionNTLS:
+		initFn = s.initNTLSServer
+		startFn = func(ctx context.Context) error { return s.ntlsServer.Start(ctx) }
+	default:
+		return
+	}
+
+	g.Go(func() error {
+		if err := initFn(); err != nil {
+			return core.WrapError(core.NumConfig, core.ErrConfig, fmt.Sprintf("init %s", versionName), err)
+		}
+		if err := startFn(ctx); err != nil {
+			return core.WrapError(core.NumTransport, core.ErrTransport, versionName, err)
+		}
+		return nil
+	})
 }
 
 // Start starts all enabled version servers concurrently.
@@ -82,59 +113,23 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
-		return fmt.Errorf("server already started")
+		return core.NewError(core.NumSession, core.ErrSession, "server already started")
 	}
 	s.started = true
 	s.mu.Unlock()
 
 	g, ctx := errgroup.WithContext(ctx)
 
-	// Start V1 server
 	if s.cfg.EnableV1 {
-		g.Go(func() error {
-			if s.v1Server == nil {
-				if err := s.initV1Server(); err != nil {
-					return fmt.Errorf("init v1: %w", err)
-				}
-			}
-			if err := s.v1Server.Start(ctx); err != nil {
-				return fmt.Errorf("v1: %w", err)
-			}
-			return nil
-		})
+		s.startVersion(g, ctx, Version1)
 	}
-
-	// Start V2 server
 	if s.cfg.EnableV2 {
-		g.Go(func() error {
-			if s.v2Server == nil {
-				if err := s.initV2Server(); err != nil {
-					return fmt.Errorf("init v2: %w", err)
-				}
-			}
-			if err := s.v2Server.Start(ctx); err != nil {
-				return fmt.Errorf("v2: %w", err)
-			}
-			return nil
-		})
+		s.startVersion(g, ctx, Version2)
 	}
-
-	// Start NTLS server
 	if s.cfg.EnableNTLS {
-		g.Go(func() error {
-			if s.ntlsServer == nil {
-				if err := s.initNTLSServer(); err != nil {
-					return fmt.Errorf("init ntls: %w", err)
-				}
-			}
-			if err := s.ntlsServer.Start(ctx); err != nil {
-				return fmt.Errorf("ntls: %w", err)
-			}
-			return nil
-		})
+		s.startVersion(g, ctx, VersionNTLS)
 	}
 
-	// Wait for all servers to complete or context cancellation
 	if err := g.Wait(); err != nil {
 		s.mu.Lock()
 		s.started = false

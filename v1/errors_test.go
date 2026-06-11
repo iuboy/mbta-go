@@ -10,18 +10,16 @@ func TestErrNoStreams(t *testing.T) {
 	if ErrNoStreams == nil {
 		t.Error("ErrNoStreams should not be nil")
 	}
-	expectedMsg := "no data streams available"
+	expectedMsg := "[2002 ERR_STREAM] no data streams available"
 	if ErrNoStreams.Error() != expectedMsg {
 		t.Errorf("ErrNoStreams.Error() = %q, want %q", ErrNoStreams.Error(), expectedMsg)
 	}
 }
 
-// TestErrNoStreamsIsError tests that ErrNoStreams is an error.
+// TestErrNoStreamsIsError tests that ErrNoStreams implements error interface.
 func TestErrNoStreamsIsError(t *testing.T) {
-	var err error = ErrNoStreams
-	if err == nil {
-		t.Error("ErrNoStreams should be an error")
-	}
+	// ErrNoStreams is a *core.Error which implements error.
+	var _ error = ErrNoStreams
 }
 
 // TestErrNoStreamsComparison tests error comparison.

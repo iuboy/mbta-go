@@ -16,13 +16,13 @@ import (
 
 // ClientConfig holds configuration for an MBTA client.
 type ClientConfig struct {
-	Transport    QUICClientConfig
-	AgentID      string
-	Hostname     string
-	Token        string
-	Capabilities []string
-	SpoolDir     string
-	PickStrategy string // "single" or "hash"
+	Transport    QUICClientConfig // QUIC connection settings
+	AgentID      string           // unique agent identifier
+	Hostname     string           // agent hostname (sent in HELLO)
+	Token        string           // authentication token
+	Capabilities []string         // negotiated capabilities (e.g. gzip, hmac-sha256)
+	SpoolDir     string           // directory for durable event spooling (empty disables spool)
+	PickStrategy string           // stream selection strategy: "single" or "hash"
 }
 
 // Client is an MBTA agent that connects to a server and sends event batches.
@@ -40,6 +40,11 @@ type Client struct {
 	picker     StreamPicker
 	controlStr *quic.Stream
 	sessionID  string
+
+	// sendMu serializes SendBatch calls so that the throttle/window check
+	// and the actual write happen atomically. Without this lock, concurrent
+	// callers can both pass the window check and exceed inflight limits.
+	sendMu sync.Mutex
 
 	// pendingAcks tracks chunk_id -> batch info for ACK correlation.
 	pendingAcks sync.Map // chunkID -> pendingBatch
@@ -64,7 +69,8 @@ type quicStreamWrapper struct {
 	idx    int
 }
 
-func (w *quicStreamWrapper) Index() int { return w.idx }
+func (w *quicStreamWrapper) Index() int                  { return w.idx }
+func (w *quicStreamWrapper) Write(p []byte) (int, error) { return w.stream.Write(p) }
 
 // NewClient creates a new MBTA client.
 func NewClient(cfg ClientConfig) (*Client, error) {
@@ -80,7 +86,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.SpoolDir != "" {
 		s, err := New(cfg.SpoolDir)
 		if err != nil {
-			return nil, fmt.Errorf("open spool: %w", err)
+			return nil, core.WrapError(core.NumSpool, core.ErrSpool, "open spool", err)
 		}
 		c.spool = s
 	}
@@ -97,14 +103,14 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	conn, err := Dial(ctx, c.config.Transport)
 	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+		return core.WrapError(core.NumTransport, core.ErrTransport, "dial", err)
 	}
 	c.conn = conn
 
 	// Open control stream
 	ctrlStr, err := conn.OpenControlStream(ctx)
 	if err != nil {
-		return fmt.Errorf("open control stream: %w", err)
+		return core.WrapError(core.NumStream, core.ErrStream, "open control stream", err)
 	}
 	c.controlStr = ctrlStr
 	if err := c.sm.Transition(core.StateControlStreamOpen); err != nil {
@@ -113,13 +119,13 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Send HELLO
 	if err := c.sendHello(); err != nil {
-		return fmt.Errorf("hello: %w", err)
+		return core.WrapError(core.NumHandshake, core.ErrHandshake, "hello", err)
 	}
 
 	// Receive HELLO_ACK
 	helloAck, err := c.recvHelloAck()
 	if err != nil {
-		return fmt.Errorf("hello_ack: %w", err)
+		return core.WrapError(core.NumHandshake, core.ErrHandshake, "hello_ack", err)
 	}
 
 	c.sessionID = helloAck.SessionID
@@ -136,12 +142,12 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Send AUTH
 	if err := c.sendAuth(); err != nil {
-		return fmt.Errorf("auth: %w", err)
+		return core.WrapError(core.NumHandshake, core.ErrHandshake, "auth", err)
 	}
 
 	// Receive AUTH_OK/FAIL
 	if err := c.recvAuthResult(); err != nil {
-		return fmt.Errorf("auth_result: %w", err)
+		return core.WrapError(core.NumHandshake, core.ErrHandshake, "auth_result", err)
 	}
 
 	// Start ACK reader — derive from ctx so readControlLoop exits when
@@ -154,7 +160,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	if c.picker == nil {
 		ds, err := c.conn.OpenDataStream(ctx)
 		if err != nil {
-			return fmt.Errorf("open data stream: %w", err)
+			return core.WrapError(core.NumStream, core.ErrStream, "open data stream", err)
 		}
 		c.picker = NewSingleStream(&quicStreamWrapper{stream: ds, idx: 0})
 	}
@@ -166,13 +172,20 @@ func (c *Client) Connect(ctx context.Context) error {
 // SendBatch sends a SignalBatch through the MBTA protocol.
 // Returns the chunkID assigned to this batch for ACK correlation, or an error.
 func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string) (string, error) {
+	if signalBatch == nil {
+		return "", core.NewError(core.NumBatch, core.ErrBatch, "batch must not be nil")
+	}
+
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
 	if c.sm.State() != core.StateReady {
-		return "", fmt.Errorf("client not ready, state=%s", c.sm.State())
+		return "", fmt.Errorf("%w, state=%s", ErrNotReady, c.sm.State())
 	}
 
 	// Check throttle
 	if c.throttle.Active() {
-		return "", fmt.Errorf("throttled, retry after %v", c.throttle.WaitDuration())
+		return "", fmt.Errorf("%w, retry after %v", ErrThrottled, c.throttle.WaitDuration())
 	}
 
 	seq := c.seq.Next()
@@ -181,7 +194,7 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	// Marshal SignalBatch to JSON for embedding in BatchMessage
 	batchJSON, err := json.Marshal(signalBatch)
 	if err != nil {
-		return "", fmt.Errorf("marshal signal batch: %w", err)
+		return "", core.WrapError(core.NumBatch, core.ErrBatch, "marshal signal batch", err)
 	}
 
 	batch := core.BatchMessage{
@@ -193,15 +206,16 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	}
 	batchPayload, err := json.Marshal(batch)
 	if err != nil {
-		return "", fmt.Errorf("marshal batch: %w", err)
+		return "", core.WrapError(core.NumBatch, core.ErrBatch, "marshal batch", err)
 	}
 
 	batchBytes := int64(len(batchPayload))
 	batchEvents := len(signalBatch.Signals)
 
-	// Check window
+	// Check window — protected by sendMu so concurrent callers cannot
+	// both pass and exceed inflight limits.
 	if !c.window.CanSend(c.inflight, batchEvents, batchBytes) {
-		return "", fmt.Errorf("window full, cannot send batch")
+		return "", ErrWindowFull
 	}
 
 	// Build envelope
@@ -229,27 +243,26 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 
 	env, err := core.Build(params, batchPayload)
 	if err != nil {
-		return "", fmt.Errorf("build envelope: %w", err)
+		return "", core.WrapError(core.NumEnvelope, core.ErrEnvelope, "build envelope", err)
 	}
 
 	envPayload, err := json.Marshal(env)
 	if err != nil {
-		return "", fmt.Errorf("marshal envelope: %w", err)
+		return "", core.WrapError(core.NumEnvelope, core.ErrEnvelope, "marshal envelope", err)
 	}
 
 	// Pick stream
 	ds, err := c.picker.Pick(batch)
 	if err != nil {
-		return "", fmt.Errorf("pick stream: %w", err)
+		return "", core.WrapError(core.NumBatch, core.ErrBatch, "pick stream", err)
 	}
 
 	// Write frame
-	w := ds.(*quicStreamWrapper).stream
-	if err := core.Write(w, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
-		return "", fmt.Errorf("write batch: %w", err)
+	if err := core.Write(ds, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
+		return "", core.WrapError(core.NumBatch, core.ErrBatch, "write batch", err)
 	}
 
-	// Track inflight
+	// Track inflight — still under sendMu, so the window check remains valid.
 	c.inflight.Add(batchEvents, batchBytes)
 	c.pendingAcks.Store(chunkID, &pendingBatch{
 		Seq:    seq,

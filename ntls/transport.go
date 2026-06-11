@@ -10,7 +10,6 @@ package ntls
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/iuboy/mbta-go/core"
 )
@@ -51,14 +50,14 @@ type Server struct {
 // NewServer creates an NTLS MBTA server.
 func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Address == "" {
-		return nil, fmt.Errorf("address required")
+		return nil, core.NewError(core.NumConfig, core.ErrConfig, "address required")
 	}
 	return &Server{config: cfg}, nil
 }
 
 // Start begins listening for TCP connections with NTLS/TLCP.
 func (s *Server) Start(ctx context.Context) error {
-	return fmt.Errorf("ntls server not yet implemented (requires NTLS/TLCP library)")
+	return core.NewError(core.NumConfig, core.ErrConfig, "ntls server not yet implemented (requires NTLS/TLCP library)")
 }
 
 // Close shuts down the server.
@@ -91,19 +90,19 @@ type Client struct {
 // NewClient creates an NTLS MBTA client.
 func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Server == "" {
-		return nil, fmt.Errorf("server address required")
+		return nil, core.NewError(core.NumCredential, core.ErrCredential, "server address required")
 	}
 	return &Client{config: cfg}, nil
 }
 
 // Connect establishes NTLS connection.
 func (c *Client) Connect(ctx context.Context) error {
-	return fmt.Errorf("ntls client not yet implemented (requires NTLS/TLCP library)")
+	return core.NewError(core.NumConfig, core.ErrConfig, "ntls client not yet implemented (requires NTLS/TLCP library)")
 }
 
 // SendBatch sends a signal batch.
 func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
-	return "", fmt.Errorf("ntls send not yet implemented")
+	return "", core.NewError(core.NumConfig, core.ErrConfig, "ntls send not yet implemented")
 }
 
 // Close closes the connection.

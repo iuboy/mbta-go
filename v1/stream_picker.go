@@ -2,6 +2,7 @@ package v1
 
 import (
 	"hash/fnv"
+	"io"
 	"sync"
 
 	"github.com/iuboy/mbta-go/core"
@@ -9,6 +10,7 @@ import (
 
 // DataStream represents an opened QUIC data stream with an integer index.
 type DataStream interface {
+	io.Writer
 	Index() int
 }
 

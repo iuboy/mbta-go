@@ -2,7 +2,6 @@ package v1
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -56,7 +55,7 @@ func (r *EnhancedRouter) OnSignalBatchWithResult(ctx context.Context, agentID st
 			Status:      core.ACKStatusThrottle,
 			EventsCount: len(batch.Signals),
 			Pressure:    pressure,
-			Error:       fmt.Errorf("queue pressure critical, throttling"),
+			Error:       core.NewError(core.NumThrottle, core.ErrThrottle, "queue pressure critical, throttling"),
 		}, nil
 	}
 

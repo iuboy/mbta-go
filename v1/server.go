@@ -2,7 +2,6 @@ package v1
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -38,7 +37,7 @@ func NewServer(cfg ServerConfig) *Server {
 func (s *Server) Start(ctx context.Context) error {
 	l, err := Listen(ctx, s.config.Transport)
 	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+		return core.WrapError(core.NumTransport, core.ErrTransport, "listen", err)
 	}
 	s.listener = l
 	slog.Info("MBTA server listening", "addr", l.Addr(), "server_id", s.config.ServerID)
@@ -49,7 +48,7 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Accept(ctx context.Context) (*ConnectionHandler, error) {
 	conn, err := s.listener.Accept(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("accept: %w", err)
+		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "accept", err)
 	}
 
 	handler := NewConnectionHandler(ConnectionHandlerConfig{

@@ -23,7 +23,7 @@ func (c *Client) sendHello() error {
 	}
 	payload, err := json.Marshal(hello)
 	if err != nil {
-		return fmt.Errorf("marshal hello: %w", err)
+		return core.WrapError(core.NumProtocol, core.ErrProtocol, "marshal hello", err)
 	}
 	if err := core.Write(c.controlStr, core.TypeHello, core.FlagControl, payload); err != nil {
 		return err
@@ -44,10 +44,10 @@ func (c *Client) recvHelloAck() (*core.HelloAckMessage, error) {
 		if uerr := json.Unmarshal(f.Payload, &errMsg); uerr != nil {
 			slog.Debug("failed to decode error frame", "error", uerr)
 		}
-		return nil, fmt.Errorf("server error: %s", errMsg.Reason)
+		return nil, core.NewError(core.NumHandshake, core.ErrHandshake, fmt.Sprintf("server error: %s", errMsg.Reason))
 	}
 	if f.Header.Type != core.TypeHelloAck {
-		return nil, fmt.Errorf("expected HELLO_ACK, got 0x%04x", f.Header.Type)
+		return nil, core.NewError(core.NumProtocol, core.ErrProtocol, fmt.Sprintf("expected HELLO_ACK, got 0x%04x", f.Header.Type))
 	}
 
 	var ack core.HelloAckMessage
@@ -76,7 +76,7 @@ func (c *Client) sendAuth() error {
 	}
 	payload, err := json.Marshal(auth)
 	if err != nil {
-		return fmt.Errorf("marshal auth: %w", err)
+		return core.WrapError(core.NumProtocol, core.ErrProtocol, "marshal auth", err)
 	}
 	if err := core.Write(c.controlStr, core.TypeAuth, core.FlagControl, payload); err != nil {
 		return err
@@ -104,7 +104,7 @@ func (c *Client) recvAuthResult() error {
 		if okMsg.HMACKey != "" {
 			hmacKey, err := decodeBase64Key(okMsg.HMACKey, 32)
 			if err != nil {
-				return fmt.Errorf("decode hmac key: %w", err)
+				return core.WrapError(core.NumAuth, core.ErrAuth, "decode hmac key", err)
 			}
 			c.keys = &core.SessionKeys{
 				KeyID:    okMsg.KeyID,
@@ -124,20 +124,20 @@ func (c *Client) recvAuthResult() error {
 		if uerr := json.Unmarshal(f.Payload, &failMsg); uerr != nil {
 			slog.Debug("failed to decode auth_fail frame", "error", uerr)
 		}
-		return fmt.Errorf("auth failed: %s (%s)", failMsg.Reason, failMsg.Code)
+		return core.NewError(core.NumAuth, core.ErrAuth, fmt.Sprintf("auth failed: %s (%s)", failMsg.Reason, failMsg.Code))
 
 	default:
-		return fmt.Errorf("expected AUTH_OK/FAIL, got 0x%04x", f.Header.Type)
+		return core.NewError(core.NumProtocol, core.ErrProtocol, fmt.Sprintf("expected AUTH_OK/FAIL, got 0x%04x", f.Header.Type))
 	}
 }
 
 func decodeBase64Key(b64 string, expectedLen int) ([]byte, error) {
 	key, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
-		return nil, fmt.Errorf("base64 decode: %w", err)
+		return nil, core.WrapError(core.NumAuth, core.ErrAuth, "base64 decode", err)
 	}
 	if len(key) != expectedLen {
-		return nil, fmt.Errorf("key length %d, expected %d", len(key), expectedLen)
+		return nil, core.NewError(core.NumAuth, core.ErrAuth, fmt.Sprintf("key length %d, expected %d", len(key), expectedLen))
 	}
 	return key, nil
 }

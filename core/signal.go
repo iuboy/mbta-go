@@ -13,11 +13,11 @@ type SignalBatch struct {
 // Validate 校验 SignalBatch 必填字段。
 func (b *SignalBatch) Validate() error {
 	if len(b.Signals) == 0 {
-		return fmt.Errorf("signals must not be empty")
+		return NewError(NumValidation, ErrValidation, "signals must not be empty")
 	}
 	for i, s := range b.Signals {
 		if s.SignalType == "" {
-			return fmt.Errorf("signal[%d]: signal_type is required", i)
+			return NewError(NumValidation, ErrValidation, fmt.Sprintf("signal[%d]: signal_type is required", i))
 		}
 	}
 	return nil

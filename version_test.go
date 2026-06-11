@@ -141,8 +141,8 @@ func TestParseALPNInvalid(t *testing.T) {
 func TestUnsupportedVersionError(t *testing.T) {
 	err := &UnsupportedVersionError{Version: "v3"}
 
-	if err.Error() != "unsupported mbta version: v3" {
-		t.Errorf("Error() = %q, want 'unsupported mbta version: v3'", err.Error())
+	if err.Error() != "[7000 ERR_VERSION] unsupported mbta version: v3" {
+		t.Errorf("Error() = %q, want '[7000 ERR_VERSION] unsupported mbta version: v3'", err.Error())
 	}
 
 	if !IsUnsupportedVersion(err) {

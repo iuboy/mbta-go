@@ -47,7 +47,7 @@ func TestDecodeBase64KeyWrongLength(t *testing.T) {
 		t.Error("Expected error for wrong key length, got nil")
 	}
 
-	expectedMsg := "key length 32, expected 16"
+	expectedMsg := "[3001 ERR_AUTH] key length 32, expected 16"
 	if err.Error() != expectedMsg {
 		t.Errorf("Error message = %q, want %q", err.Error(), expectedMsg)
 	}

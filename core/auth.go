@@ -3,11 +3,13 @@ package core
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// DefaultSessionTTL is the default time-to-live for authenticated sessions.
+const DefaultSessionTTL = 24 * time.Hour
 
 // TokenValidator verifies an agent token and returns its identity.
 type TokenValidator interface {
@@ -16,13 +18,13 @@ type TokenValidator interface {
 
 // AgentIdentity is returned on successful token authentication.
 type AgentIdentity struct {
-	AgentID     string
-	Permissions []string
-	ExpiresAt   time.Time
+	AgentID     string     // unique agent identifier
+	Permissions []string  // granted permissions
+	ExpiresAt   time.Time // token expiration time
 }
 
 // ErrInvalidToken is returned when token validation fails.
-var ErrInvalidToken = fmt.Errorf("invalid token")
+var ErrInvalidToken = NewError(NumAuth, ErrAuth, "invalid token")
 
 // StaticTokenValidator validates tokens against a static map (dev/test use).
 type StaticTokenValidator struct {
@@ -42,7 +44,7 @@ func (v *StaticTokenValidator) Validate(token string) (*AgentIdentity, error) {
 	}
 	return &AgentIdentity{
 		AgentID:   agentID,
-		ExpiresAt: time.Now().Add(24 * time.Hour),
+		ExpiresAt: time.Now().Add(DefaultSessionTTL),
 	}, nil
 }
 
@@ -57,7 +59,7 @@ type SessionKeys struct {
 func GenerateSessionKeys() (*SessionKeys, error) {
 	hmacKey := make([]byte, 32)
 	if _, err := rand.Read(hmacKey); err != nil {
-		return nil, fmt.Errorf("generate HMAC key: %w", err)
+		return nil, WrapError(NumHMAC, ErrHMAC, "generate HMAC key", err)
 	}
 
 	return &SessionKeys{
