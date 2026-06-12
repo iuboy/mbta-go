@@ -225,6 +225,17 @@ func TestBatchMessageValidate(t *testing.T) {
 			wantErr: true,
 			errSub:  "batch must not be empty",
 		},
+		{
+			name:    "chunk_id too long",
+			msg:     BatchMessage{Seq: 1, ChunkID: strings.Repeat("a", 257), Batch: []byte("{}")},
+			wantErr: true,
+			errSub:  "chunk_id exceeds maximum length",
+		},
+		{
+			name:    "chunk_id at max length",
+			msg:     BatchMessage{Seq: 1, ChunkID: strings.Repeat("a", 256), Batch: []byte("{}")},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

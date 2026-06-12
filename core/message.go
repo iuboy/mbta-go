@@ -117,6 +117,9 @@ func (m *BatchMessage) Validate() error {
 	if m.ChunkID == "" {
 		return NewError(NumValidation, ErrValidation, "chunk_id is required")
 	}
+	if len(m.ChunkID) > 256 {
+		return NewError(NumValidation, ErrValidation, "chunk_id exceeds maximum length of 256")
+	}
 	if len(m.Batch) == 0 {
 		return NewError(NumValidation, ErrValidation, "batch must not be empty")
 	}

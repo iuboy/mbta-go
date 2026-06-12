@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,9 +31,10 @@ func TestProcessBatch_SessionExpired(t *testing.T) {
 		},
 		agentID:   "agent-expired",
 		sessionID: "s-expired",
-		// 设置过期时间为 1 小时前
-		expiresAt: func() atomic.Int64 { v := atomic.Int64{}; v.Store(time.Now().Add(-1 * time.Hour).Unix()); return v }(),
 	}
+
+	// 设置过期时间为 1 小时前
+	h.expiresAt.Store(time.Now().Add(-1 * time.Hour).Unix())
 
 	signalBatch := &core.SignalBatch{
 		Signals: []*core.SignalRecord{
@@ -64,6 +64,9 @@ func TestProcessBatch_SessionExpired(t *testing.T) {
 	f, _ := core.Read(bytes.NewReader(buf.Bytes()), core.DefaultLimits())
 
 	h.processBatch(context.Background(), nil, f.Payload)
+
+	// 设置过期时间为 1 小时前
+	h.expiresAt.Store(time.Now().Add(-1 * time.Hour).Unix())
 
 	// 过期会话的 batch 不应投递到 sink
 	if len(sink.batches) != 0 {
@@ -105,9 +108,10 @@ func TestProcessBatch_SessionNotExpired(t *testing.T) {
 		},
 		agentID:   "agent-valid",
 		sessionID: "s-valid",
-		// 设置过期时间为 1 小时后
-		expiresAt: func() atomic.Int64 { v := atomic.Int64{}; v.Store(time.Now().Add(1 * time.Hour).Unix()); return v }(),
 	}
+
+	// 设置过期时间为 1 小时后
+	h.expiresAt.Store(time.Now().Add(1 * time.Hour).Unix())
 
 	signalBatch := &core.SignalBatch{
 		Signals: []*core.SignalRecord{

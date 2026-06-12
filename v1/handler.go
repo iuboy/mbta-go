@@ -422,7 +422,7 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 		// envelope 无法解码时 seq/chunkID 未知，发送 ERROR 而非 NACK。
 		// 零值 NACK 会导致客户端 pendingAcks 无法清理，最终 inflight 死锁。
 		slog.Debug("invalid envelope", "session", h.sessionID, "error", err)
-			h.sendError(core.CodeDecodeFailed, "invalid_envelope", false)
+		h.sendError(core.CodeDecodeFailed, "invalid_envelope", false)
 		return
 	}
 
@@ -450,6 +450,13 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 		return
 	}
 
+	// Enforce batch size limits early — before JSON unmarshal allocates memory.
+	if len(batchPayload) > maxBatchBytes {
+		h.sendNack(env.Seq, env.ChunkID, "batch_too_large",
+			fmt.Sprintf("batch payload %d bytes exceeds limit %d", len(batchPayload), maxBatchBytes), false)
+		return
+	}
+
 	// Decode batch message (protocol metadata wrapper)
 	var batchMsg core.BatchMessage
 	if err := json.Unmarshal(batchPayload, &batchMsg); err != nil {
@@ -459,13 +466,6 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 
 	if err := batchMsg.Validate(); err != nil {
 		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "batch_validation", err.Error(), false)
-		return
-	}
-
-	// Enforce batch size limits to prevent resource exhaustion.
-	if len(batchPayload) > maxBatchBytes {
-		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "batch_too_large",
-			fmt.Sprintf("batch payload %d bytes exceeds limit %d", len(batchPayload), maxBatchBytes), false)
 		return
 	}
 

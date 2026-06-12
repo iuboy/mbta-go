@@ -247,6 +247,8 @@ func (c *Client) initV1Client() (versionedClient, error) {
 
 // initV2Client initializes the V2 client wrapper.
 func (c *Client) initV2Client() (versionedClient, error) {
+	slog.Warn("v2 protocol is not yet implemented — all operations will return errors")
+
 	if c.cfg.V2Creds == nil {
 		return nil, core.NewError(core.NumCredential, core.ErrCredential, "v2 GM credentials not provided")
 	}
@@ -271,6 +273,8 @@ func (c *Client) initV2Client() (versionedClient, error) {
 
 // initNTLSClient initializes the NTLS client wrapper.
 func (c *Client) initNTLSClient() (versionedClient, error) {
+	slog.Warn("ntls protocol is not yet implemented — all operations will return errors")
+
 	if c.cfg.NTLSCreds == nil {
 		return nil, core.NewError(core.NumCredential, core.ErrCredential, "ntls credentials not provided")
 	}
@@ -315,9 +319,11 @@ func (w *v2ClientWrapper) Connect(ctx context.Context) error { return w.client.C
 func (w *v2ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	return w.client.SendBatch(ctx, batch, tag, source)
 }
-func (w *v2ClientWrapper) Close() error                     { return w.client.Close() }
-func (w *v2ClientWrapper) State() string                    { return w.client.State().String() }
-func (w *v2ClientWrapper) SetACKHandler(ACKHandler)         {} // v2 not yet implemented
+func (w *v2ClientWrapper) Close() error    { return w.client.Close() }
+func (w *v2ClientWrapper) State() string   { return w.client.State().String() }
+func (w *v2ClientWrapper) SetACKHandler(ACKHandler) {
+	slog.Warn("SetACKHandler ignored: v2 ACK handling not yet implemented")
+}
 
 type ntlsClientWrapper struct {
 	client *ntls.Client
@@ -327,9 +333,11 @@ func (w *ntlsClientWrapper) Connect(ctx context.Context) error { return w.client
 func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	return w.client.SendBatch(ctx, batch, tag, source)
 }
-func (w *ntlsClientWrapper) Close() error                     { return w.client.Close() }
-func (w *ntlsClientWrapper) State() string                    { return w.client.State().String() }
-func (w *ntlsClientWrapper) SetACKHandler(ACKHandler)         {} // ntls not yet implemented
+func (w *ntlsClientWrapper) Close() error    { return w.client.Close() }
+func (w *ntlsClientWrapper) State() string   { return w.client.State().String() }
+func (w *ntlsClientWrapper) SetACKHandler(ACKHandler) {
+	slog.Warn("SetACKHandler ignored: ntls ACK handling not yet implemented")
+}
 
 // Client Options (functional options pattern)
 

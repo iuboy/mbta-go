@@ -110,9 +110,11 @@ func WithMaxSize(bytes int64) SpoolOption {
 //   1. 仅 flush dirty records（增量写入）
 //   2. 使用 append-only 格式 + 定期 compaction
 //   3. 使用更高效的序列化格式（如 msgpack 或 protobuf）
+//
 // When flushInterval > 0, writes are buffered and flushed periodically by a
 // background goroutine. When flushInterval == 0, every mutation flushes
-// synchronously to disk (legacy behaviour).
+// synchronously to disk using the same "marshal under lock, write outside lock"
+// pattern as the buffered path — no file I/O is performed while holding the mutex.
 type Spool struct {
 	mu      sync.Mutex
 	dir     string
@@ -179,29 +181,30 @@ func New(dir string, opts ...SpoolOption) (*Spool, error) {
 // Put stores a new event record.
 func (s *Spool) Put(rec Record) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Disk protection: check size before write.
 	if s.maxSize > 0 && s.estimatedSize() >= s.maxSize {
+		s.mu.Unlock()
 		return core.NewError(core.NumSpool, core.ErrSpool, "spool size limit exceeded")
 	}
 
 	s.records[rec.RecordID] = &rec
 
 	if s.flushInterval == 0 {
-		return s.flushRecords()
+		return s.syncAndUnlock(s.flushRecordsLocked, s.flushBatchesLocked, true, false)
 	}
 	s.markDirty(true, false)
+	s.mu.Unlock()
 	return nil
 }
 
 // PutBatch stores multiple records and creates a batch.
 func (s *Spool) PutBatch(records []Record, batch Batch) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Disk protection: check size before write.
 	if s.maxSize > 0 && s.estimatedSize() >= s.maxSize {
+		s.mu.Unlock()
 		return core.NewError(core.NumSpool, core.ErrSpool, "spool size limit exceeded")
 	}
 
@@ -211,39 +214,40 @@ func (s *Spool) PutBatch(records []Record, batch Batch) error {
 	s.batches[batch.ChunkID] = &batch
 
 	if s.flushInterval == 0 {
-		return s.flushAll()
+		return s.syncAndUnlock(s.flushRecordsLocked, s.flushBatchesLocked, true, true)
 	}
 	s.markDirty(true, true)
+	s.mu.Unlock()
 	return nil
 }
 
 // DeleteRecords removes records after durable ACK.
 func (s *Spool) DeleteRecords(ids []string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	for _, id := range ids {
 		delete(s.records, id)
 	}
 
 	if s.flushInterval == 0 {
-		return s.flushRecords()
+		return s.syncAndUnlock(s.flushRecordsLocked, nil, true, false)
 	}
 	s.markDirty(true, false)
+	s.mu.Unlock()
 	return nil
 }
 
 // DeleteBatch removes a batch entry.
 func (s *Spool) DeleteBatch(chunkID string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	delete(s.batches, chunkID)
 
 	if s.flushInterval == 0 {
-		return s.flushBatches()
+		return s.syncAndUnlock(nil, s.flushBatchesLocked, false, true)
 	}
 	s.markDirty(false, true)
+	s.mu.Unlock()
 	return nil
 }
 
@@ -349,7 +353,7 @@ func (s *Spool) Close() error {
 	// Final synchronous flush.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.flushAll()
+	return s.flushAllLocked()
 }
 
 // markDirty sets the dirty flags. Must be called with s.mu held.
@@ -445,6 +449,60 @@ func (s *Spool) flushIfNeeded() {
 	}
 }
 
+// syncAndUnlock is the synchronous mode flush: marshal under lock, write outside lock.
+// Caller must hold s.mu. On return, s.mu is NOT held (even on error).
+// marshalRec/marshalBat functions capture the serialized data under lock.
+// This eliminates file I/O while holding the mutex.
+func (s *Spool) syncAndUnlock(marshalRec, marshalBat func() ([]byte, error), dirtyRec, dirtyBat bool) error {
+	var recordsData, batchesData []byte
+	var err error
+
+	if marshalRec != nil {
+		recordsData, err = marshalRec()
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if marshalBat != nil {
+		batchesData, err = marshalBat()
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	s.mu.Unlock()
+
+	// Write outside the lock.
+	if recordsData != nil {
+		if err := writeFileAtomic(filepath.Join(s.dir, "records.json"), recordsData, 0600); err != nil {
+			s.mu.Lock()
+			s.markDirty(dirtyRec, dirtyBat)
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if batchesData != nil {
+		if err := writeFileAtomic(filepath.Join(s.dir, "batches.json"), batchesData, 0600); err != nil {
+			s.mu.Lock()
+			s.markDirty(dirtyRec, dirtyBat)
+			s.mu.Unlock()
+			return err
+		}
+	}
+	return nil
+}
+
+// flushRecordsLocked marshals records while the lock is held. Must be called with s.mu held.
+func (s *Spool) flushRecordsLocked() ([]byte, error) {
+	return json.Marshal(s.records)
+}
+
+// flushBatchesLocked marshals batches while the lock is held. Must be called with s.mu held.
+func (s *Spool) flushBatchesLocked() ([]byte, error) {
+	return json.Marshal(s.batches)
+}
+
 func (s *Spool) load() error {
 	recordsPath := filepath.Join(s.dir, "records.json")
 	data, err := os.ReadFile(recordsPath) // #nosec G304 -- s.dir validated in New()
@@ -469,27 +527,22 @@ func (s *Spool) load() error {
 	return nil
 }
 
-func (s *Spool) flushRecords() error {
-	data, err := json.Marshal(s.records)
+// flushAllLocked flushes both records and batches. Must be called with s.mu held.
+// Used by Close() which manages its own lock lifecycle — does I/O while holding
+// the lock for simplicity since Close is a one-shot operation during shutdown.
+func (s *Spool) flushAllLocked() error {
+	recData, err := json.Marshal(s.records)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(filepath.Join(s.dir, "records.json"), data, 0600)
-}
-
-func (s *Spool) flushBatches() error {
-	data, err := json.Marshal(s.batches)
+	batData, err := json.Marshal(s.batches)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(filepath.Join(s.dir, "batches.json"), data, 0600)
-}
-
-func (s *Spool) flushAll() error {
-	if err := s.flushRecords(); err != nil {
+	if err := writeFileAtomic(filepath.Join(s.dir, "records.json"), recData, 0600); err != nil {
 		return err
 	}
-	return s.flushBatches()
+	return writeFileAtomic(filepath.Join(s.dir, "batches.json"), batData, 0600)
 }
 
 // estimatedSize returns a rough estimate of the spool's memory footprint in bytes.
