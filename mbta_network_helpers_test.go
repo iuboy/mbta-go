@@ -104,27 +104,40 @@ func (s *MBTANetworkTestSuite) handshakeAndAuth(
 	controlStream, err := conn.OpenStreamSync(ctx)
 	require.NoError(s.T(), err, "OpenStreamSync 失败")
 
+	agentID := "test-network-agent"
+
 	// 发送 HELLO
 	helloMsg := map[string]interface{}{
-		"version":        "1.0",
+		"version":        1,
 		"capabilities":   []string{"batch", "ack", "window", "ping"},
-		"agent_id":       "test-network-agent",
+		"agent_id":       agentID,
 		"max_batch_size": 1048576,
 	}
 	helloData, _ := json.Marshal(helloMsg)
-	require.NoError(s.T(), writeTestFrame(controlStream, core.TypeHello, flagControl, helloData))
+	require.NoError(s.T(), writeTestFrame(controlStream, core.TypeHello, core.FlagControl, helloData))
 
-	// 接收 HELLO_ACK
-	_, _, _, err = readTestFrameWithTimeout(controlStream, 10*time.Second)
+	// 接收 HELLO_ACK，提取 challenge_nonce 和 session_id
+	_, _, ackPayload, err := readTestFrameWithTimeout(controlStream, 10*time.Second)
 	require.NoError(s.T(), err, "接收 HELLO_ACK 失败")
+
+	var helloAck map[string]interface{}
+	require.NoError(s.T(), json.Unmarshal(ackPayload, &helloAck))
+	challengeNonce, _ := helloAck["challenge_nonce"].(string)
+	sessionID, _ := helloAck["session_id"].(string)
+
+	// 计算 HMAC challenge-response
+	authNonce := core.ComputeChallengeResponse(token, challengeNonce, core.HMACAlgoSHA256)
 
 	// 发送 AUTH
 	authMsg := map[string]interface{}{
-		"token":     token,
-		"timestamp": time.Now().Unix(),
+		"token":      token,
+		"agent_id":   agentID,
+		"session_id": sessionID,
+		"auth_nonce": authNonce,
+		"timestamp":  time.Now().Unix(),
 	}
 	authData, _ := json.Marshal(authMsg)
-	require.NoError(s.T(), writeTestFrame(controlStream, core.TypeAuth, flagControl, authData))
+	require.NoError(s.T(), writeTestFrame(controlStream, core.TypeAuth, core.FlagControl, authData))
 
 	// 接收 AUTH_OK（跳过可能穿插的 WINDOW 帧）
 	_, _, err = readTestFrameOfType(controlStream, core.TypeAuthOK, 10*time.Second)
@@ -149,7 +162,7 @@ func (s *MBTANetworkTestSuite) sendBatchAndMeasureACK(
 	require.NoError(s.T(), err, "OpenUniStreamSync 失败")
 
 	start := time.Now()
-	require.NoError(s.T(), writeTestFrame(dataStream, core.TypeBatch, flagData, batchData), "写入 BATCH 失败")
+	require.NoError(s.T(), writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData), "写入 BATCH 失败")
 	require.NoError(s.T(), dataStream.Close(), "关闭数据流失败")
 
 	// 等待 ACK（通过控制流）
@@ -182,7 +195,7 @@ func (s *MBTANetworkTestSuite) measureRTT(
 		pingData, _ := json.Marshal(pingMsg)
 
 		start := time.Now()
-		require.NoError(s.T(), writeTestFrame(controlStream, core.TypePing, flagControl, pingData))
+		require.NoError(s.T(), writeTestFrame(controlStream, core.TypePing, core.FlagControl, pingData))
 
 		// 自定义重试循环：跳过非 PONG 帧（WINDOW 等），无次数限制
 		deadline := time.Now().Add(30 * time.Second)

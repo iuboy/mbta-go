@@ -83,7 +83,7 @@ func (s *MBTAProtocolTestSuite) TestClientToServerHelloHandshake() {
 	helloData, err := json.Marshal(helloMsg)
 	require.NoError(s.T(), err)
 
-	err = writeTestFrame(controlStream, core.TypeHello, flagControl, helloData)
+	err = writeTestFrame(controlStream, core.TypeHello, core.FlagControl, helloData)
 	require.NoError(s.T(), err)
 
 	// 等待 HELLO_ACK
@@ -136,7 +136,7 @@ func (s *MBTAProtocolTestSuite) TestClientToServerBatchTransmission() {
 	batchData, err := json.Marshal(batchMsg)
 	require.NoError(s.T(), err)
 
-	err = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+	err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 	require.NoError(s.T(), err)
 
 	s.T().Log("BATCH 数据发送成功")
@@ -171,7 +171,7 @@ func (s *MBTAProtocolTestSuite) TestClientToServerMultipleBatches() {
 		batchMsg := createTestBatch(50, fmt.Sprintf("test-batch-%03d", i))
 		batchData, _ := json.Marshal(batchMsg)
 
-		err = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+		err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 		require.NoError(s.T(), err)
 
 		s.T().Logf("BATCH %d 发送成功", i)
@@ -201,10 +201,10 @@ func (s *MBTAProtocolTestSuite) TestClientToServerErrorRecovery() {
 
 	// 发送带有错误 CRC 的帧（手动构造以篡改 CRC）
 	invalidData := []byte("invalid batch data")
-	hdr := make([]byte, frameHdrSz)
-	copy(hdr[0:4], frameMagic)
-	hdr[4] = frameVersion
-	hdr[5] = flagData
+	hdr := make([]byte, core.HeaderSz)
+	copy(hdr[0:4], core.Magic)
+	hdr[4] = core.Version
+	hdr[5] = core.FlagData
 	binary.BigEndian.PutUint16(hdr[6:8], core.TypeBatch)
 	binary.BigEndian.PutUint32(hdr[8:12], uint32(len(invalidData)))
 	binary.BigEndian.PutUint32(hdr[12:16], 0x12345678) // 故意错误的 CRC
@@ -273,7 +273,7 @@ func (s *MBTAProtocolTestSuite) TestServerToClientThrottle() {
 		batchMsg := createTestBatch(1000, fmt.Sprintf("heavy-batch-%d", i))
 		batchData, _ := json.Marshal(batchMsg)
 
-		err = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+		err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 		if err != nil {
 			s.T().Log("触发节流机制")
 			break
@@ -340,7 +340,7 @@ func (s *MBTAProtocolTestSuite) TestInteroperabilityVersionCompatibility() {
 		}
 
 		helloData, _ := json.Marshal(helloMsg)
-		_ = writeTestFrame(controlStream, core.TypeHello, flagControl, helloData)
+		_ = writeTestFrame(controlStream, core.TypeHello, core.FlagControl, helloData)
 
 		// 等待响应
 		_, _, _, err = readTestFrameWithTimeout(controlStream, 3*time.Second)
@@ -371,7 +371,7 @@ func (s *MBTAProtocolTestSuite) TestInteroperabilityConnectionMigration() {
 	dataStream, _ := conn.OpenUniStreamSync(ctx)
 	batchMsg := createTestBatch(10, "migration-test")
 	batchData, _ := json.Marshal(batchMsg)
-	_ = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+	_ = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 	dataStream.Close()
 
 	s.T().Log("连接迁移基础测试完成")
@@ -394,7 +394,7 @@ func (s *MBTAProtocolTestSuite) TestInteroperabilityReconnection() {
 	dataStream, _ := conn.OpenUniStreamSync(ctx)
 	batchMsg := createTestBatch(10, seq)
 	batchData, _ := json.Marshal(batchMsg)
-	_ = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+	_ = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 
 	// 模拟连接断开
 	_ = conn.CloseWithError(0, "test disconnect")
@@ -411,7 +411,7 @@ func (s *MBTAProtocolTestSuite) TestInteroperabilityReconnection() {
 	dataStream2, _ := conn2.OpenUniStreamSync(ctx)
 	batchMsg2 := createTestBatch(10, seq+"-reconnect")
 	batchData2, _ := json.Marshal(batchMsg2)
-	_ = writeTestFrame(dataStream2, core.TypeBatch, flagData, batchData2)
+	_ = writeTestFrame(dataStream2, core.TypeBatch, core.FlagData, batchData2)
 	dataStream2.Close()
 
 	s.T().Log("重连机制测试完成")
@@ -447,7 +447,7 @@ func (s *MBTAProtocolTestSuite) TestInteroperabilityConcurrentStreams() {
 			batchMsg := createTestBatch(20, fmt.Sprintf("concurrent-batch-%d", batchNum))
 			batchData, _ := json.Marshal(batchMsg)
 
-			err = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+			err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 			if err != nil {
 				s.T().Logf("Batch %d 发送失败: %v", batchNum, err)
 				return
@@ -479,7 +479,7 @@ func (s *MBTAProtocolTestSuite) TestInteroperabilityPingPong() {
 	}
 	pingData, _ := json.Marshal(pingMsg)
 
-	err = writeTestFrame(controlStream, core.TypePing, flagControl, pingData)
+	err = writeTestFrame(controlStream, core.TypePing, core.FlagControl, pingData)
 	require.NoError(s.T(), err)
 
 	// 等待 PONG
@@ -501,30 +501,43 @@ func (s *MBTAProtocolTestSuite) handshakeAndAuthenticate(ctx context.Context, co
 	controlStream, err := conn.OpenStreamSync(ctx)
 	require.NoError(s.T(), err)
 
+	agentID := "test-agent-001"
+
 	// 发送 HELLO
 	helloMsg := map[string]interface{}{
-		"version":        "1.0",
+		"version":        1,
 		"capabilities":   []string{"batch", "ack", "window", "ping"},
-		"agent_id":       "test-agent-001",
+		"agent_id":       agentID,
 		"max_batch_size": 1048576,
 	}
 
 	helloData, _ := json.Marshal(helloMsg)
-	err = writeTestFrame(controlStream, core.TypeHello, flagControl, helloData)
+	err = writeTestFrame(controlStream, core.TypeHello, core.FlagControl, helloData)
 	require.NoError(s.T(), err)
 
-	// 接收 HELLO_ACK
-	_, _, _, err = readTestFrameWithTimeout(controlStream, 5*time.Second)
+	// 接收 HELLO_ACK，提取 challenge_nonce 和 session_id
+	_, _, ackPayload, err := readTestFrameWithTimeout(controlStream, 5*time.Second)
 	require.NoError(s.T(), err)
+
+	var helloAck map[string]interface{}
+	require.NoError(s.T(), json.Unmarshal(ackPayload, &helloAck))
+	challengeNonce, _ := helloAck["challenge_nonce"].(string)
+	sessionID, _ := helloAck["session_id"].(string)
+
+	// 计算 HMAC challenge-response
+	authNonce := core.ComputeChallengeResponse(token, challengeNonce, core.HMACAlgoSHA256)
 
 	// 发送 AUTH
 	authMsg := map[string]interface{}{
-		"token":     token,
-		"timestamp": time.Now().Unix(),
+		"token":      token,
+		"agent_id":   agentID,
+		"session_id": sessionID,
+		"auth_nonce": authNonce,
+		"timestamp":  time.Now().Unix(),
 	}
 
 	authData, _ := json.Marshal(authMsg)
-	err = writeTestFrame(controlStream, core.TypeAuth, flagControl, authData)
+	err = writeTestFrame(controlStream, core.TypeAuth, core.FlagControl, authData)
 	require.NoError(s.T(), err)
 
 	// 接收 AUTH_OK

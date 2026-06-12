@@ -34,11 +34,14 @@ type MBTATestServer struct {
 
 // MBTAClientConnection 客户端连接
 type MBTAClientConnection struct {
-	conn          *quic.Conn
-	controlStream *quic.Stream // 存储指向流的指针
-	authenticated bool
-	windowSize    uint32
-	mu            sync.Mutex
+	conn           *quic.Conn
+	controlStream  *quic.Stream // 存储指向流的指针
+	authenticated  bool
+	windowSize     uint32
+	mu             sync.Mutex
+	agentID        string
+	sessionID      string
+	challengeNonce string
 }
 
 // NewMBTATestServer 创建测试服务器
@@ -233,15 +236,26 @@ func (s *MBTATestServer) handleHello(client *MBTAClientConnection, data []byte) 
 		return
 	}
 
-	fmt.Printf("HELLO from agent: %s, version: %s\n",
-		helloMsg["agent_id"], helloMsg["version"])
+	agentID, _ := helloMsg["agent_id"].(string)
+	fmt.Printf("HELLO from agent: %s, version: %s\n", agentID, helloMsg["version"])
+
+	// 生成 challenge_nonce 和 session_id
+	challengeNonce := fmt.Sprintf("challenge-%d", time.Now().UnixNano())
+	sessionID := fmt.Sprintf("session-%d", time.Now().UnixNano())
+
+	client.mu.Lock()
+	client.agentID = agentID
+	client.challengeNonce = challengeNonce
+	client.sessionID = sessionID
+	client.mu.Unlock()
 
 	// 发送 HELLO_ACK
 	ackMsg := map[string]interface{}{
 		"version":               "1.0",
 		"selected_capabilities": []string{"batch", "ack"},
-		"session_id":            fmt.Sprintf("session-%d", time.Now().UnixNano()),
+		"session_id":            sessionID,
 		"server_time":           time.Now().Unix(),
+		"challenge_nonce":       challengeNonce,
 	}
 
 	ackData, _ := json.Marshal(ackMsg)
@@ -251,7 +265,7 @@ func (s *MBTATestServer) handleHello(client *MBTAClientConnection, data []byte) 
 	client.mu.Unlock()
 
 	if stream != nil {
-		err := writeTestFrame(stream, core.TypeHelloAck, flagControl, ackData)
+		err := writeTestFrame(stream, core.TypeHelloAck, core.FlagControl, ackData)
 		if err != nil {
 			fmt.Printf("Write frame error: %v\n", err)
 		}
@@ -267,13 +281,25 @@ func (s *MBTATestServer) handleAuth(client *MBTAClientConnection, data []byte) {
 		return
 	}
 
-	token, ok := authMsg["token"].(string)
-	if !ok {
-		s.sendToClient(client, core.TypeAuthFail, map[string]interface{}{
-			"error_code": 0x01,
-			"reason":     "missing token",
-		})
-		return
+	token, _ := authMsg["token"].(string)
+	authNonce, _ := authMsg["auth_nonce"].(string)
+
+	client.mu.Lock()
+	challengeNonce := client.challengeNonce
+	sessionID := client.sessionID
+	client.mu.Unlock()
+
+	// 验证 HMAC challenge-response
+	if challengeNonce != "" {
+		expected := core.ComputeChallengeResponse(token, challengeNonce, core.HMACAlgoSHA256)
+		if authNonce != expected {
+			s.sendToClient(client, core.TypeAuthFail, map[string]interface{}{
+				"error_code": 0x01,
+				"reason":     "auth_nonce HMAC verification failed",
+			})
+			fmt.Println("Authentication failed: challenge mismatch")
+			return
+		}
 	}
 
 	// 简单的 token 验证
@@ -283,7 +309,7 @@ func (s *MBTATestServer) handleAuth(client *MBTAClientConnection, data []byte) {
 		client.mu.Unlock()
 
 		s.sendToClient(client, core.TypeAuthOK, map[string]interface{}{
-			"session_id":   fmt.Sprintf("session-%d", time.Now().UnixNano()),
+			"session_id":   sessionID,
 			"server_time":  time.Now().Unix(),
 			"capabilities": []string{"window", "throttle"},
 		})
@@ -310,7 +336,7 @@ func (s *MBTATestServer) sendToClient(client *MBTAClientConnection, msgType uint
 	client.mu.Unlock()
 
 	if stream != nil {
-		if err := writeTestFrame(stream, msgType, flagControl, data); err != nil {
+		if err := writeTestFrame(stream, msgType, core.FlagControl, data); err != nil {
 			// 客户端正常断开产生的错误无需打印
 			if err.Error() != "Application error 0x0 (remote)" {
 				fmt.Printf("Write frame error: %v\n", err)

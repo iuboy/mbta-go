@@ -280,23 +280,25 @@ func (s *Spool) Len() int {
 
 // Sync flushes any dirty data to disk immediately.
 // Call this when durability is required before returning to the caller.
+// Snapshot is taken under the lock; I/O happens outside the lock (same pattern as flushIfNeeded).
 func (s *Spool) Sync() error {
 	s.mu.Lock()
 	if !s.dirty {
 		s.mu.Unlock()
 		return nil
 	}
+
 	dirtyRec := s.dirtyRecords
 	dirtyBat := s.dirtyBatches
 	s.dirty = false
 	s.dirtyRecords = false
 	s.dirtyBatches = false
-	s.mu.Unlock()
 
+	var recordsData, batchesData []byte
+	var err error
 	if dirtyRec {
-		if err := s.flushRecords(); err != nil {
-			// Restore dirty flag on failure.
-			s.mu.Lock()
+		recordsData, err = json.Marshal(s.records)
+		if err != nil {
 			s.dirty = true
 			s.dirtyRecords = true
 			s.mu.Unlock()
@@ -304,7 +306,28 @@ func (s *Spool) Sync() error {
 		}
 	}
 	if dirtyBat {
-		if err := s.flushBatches(); err != nil {
+		batchesData, err = json.Marshal(s.batches)
+		if err != nil {
+			s.dirty = true
+			s.dirtyBatches = true
+			s.mu.Unlock()
+			return err
+		}
+	}
+	s.mu.Unlock()
+
+	// Write outside the lock (writeFileAtomic is already atomic).
+	if recordsData != nil {
+		if err := writeFileAtomic(filepath.Join(s.dir, "records.json"), recordsData, 0600); err != nil {
+			s.mu.Lock()
+			s.dirty = true
+			s.dirtyRecords = true
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if batchesData != nil {
+		if err := writeFileAtomic(filepath.Join(s.dir, "batches.json"), batchesData, 0600); err != nil {
 			s.mu.Lock()
 			s.dirty = true
 			s.dirtyBatches = true

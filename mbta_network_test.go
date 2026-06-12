@@ -74,7 +74,7 @@ func (s *MBTANetworkTestSuite) TestLargePayloadUnderBandwidthLimit() {
 	require.NoError(s.T(), err)
 
 	start := time.Now()
-	require.NoError(s.T(), writeTestFrame(dataStream, core.TypeBatch, flagData, batchData))
+	require.NoError(s.T(), writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData))
 	require.NoError(s.T(), dataStream.Close())
 
 	// 等待 ACK
@@ -217,7 +217,7 @@ func (s *MBTANetworkTestSuite) TestBandwidthDrop() {
 	ds1, err := client.conn.OpenUniStreamSync(ctx)
 	require.NoError(s.T(), err)
 	start1 := time.Now()
-	require.NoError(s.T(), writeTestFrame(ds1, core.TypeBatch, flagData, batchData1))
+	require.NoError(s.T(), writeTestFrame(ds1, core.TypeBatch, core.FlagData, batchData1))
 	require.NoError(s.T(), ds1.Close())
 	_, _, err = readTestFrameOfType(client.controlStream, core.TypeAck, 30*time.Second)
 	rtt1 := time.Since(start1)
@@ -235,7 +235,7 @@ func (s *MBTANetworkTestSuite) TestBandwidthDrop() {
 	ds2, err := client.conn.OpenUniStreamSync(ctx)
 	require.NoError(s.T(), err)
 	start2 := time.Now()
-	require.NoError(s.T(), writeTestFrame(ds2, core.TypeBatch, flagData, batchData2))
+	require.NoError(s.T(), writeTestFrame(ds2, core.TypeBatch, core.FlagData, batchData2))
 	require.NoError(s.T(), ds2.Close())
 	_, _, err = readTestFrameOfType(client.controlStream, core.TypeAck, 60*time.Second)
 	rtt2 := time.Since(start2)
@@ -348,7 +348,7 @@ func (s *MBTANetworkTestSuite) TestSlowReceiver() {
 	require.NoError(s.T(), err)
 
 	start := time.Now()
-	require.NoError(s.T(), writeTestFrame(dataStream, core.TypeBatch, flagData, batchData))
+	require.NoError(s.T(), writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData))
 	require.NoError(s.T(), dataStream.Close())
 
 	// 等待 ACK
@@ -422,7 +422,7 @@ func (s *MBTANetworkTestSuite) TestStressUnderAdverseNetwork() {
 			s.T().Logf("batch %03d: OpenUniStreamSync 失败: %v", i, err)
 			continue
 		}
-		if err := writeTestFrame(dataStream, core.TypeBatch, flagData, batchData); err != nil {
+		if err := writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData); err != nil {
 			s.T().Logf("batch %03d: writeTestFrame 失败: %v", i, err)
 			dataStream.Close()
 			continue

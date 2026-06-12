@@ -6,6 +6,8 @@ import (
 	"hash/crc32"
 	"io"
 	"time"
+
+	"github.com/iuboy/mbta-go/core"
 )
 
 const (
@@ -15,25 +17,12 @@ const (
 	TestServerPort = 15150
 )
 
-// Wire-level frame constants — must match core/frame.go exactly.
-const (
-	frameMagic   = "MBTA"
-	frameVersion byte = 0x01
-	frameHdrSz        = 16 // 4 magic + 1 version + 1 flags + 2 type + 4 length + 4 crc32
-)
-
-// Frame flags — must match core/frame.go.
-const (
-	flagControl byte = 0x02
-	flagData    byte = 0x04
-)
-
 // writeTestFrame writes a single MBTA frame using the canonical wire format
 // (identical to core.Write). Used by E2E tests that operate at the QUIC level.
 func writeTestFrame(stream io.Writer, typ uint16, flags byte, payload []byte) error {
-	hdr := make([]byte, frameHdrSz)
-	copy(hdr[0:4], frameMagic)
-	hdr[4] = frameVersion
+	hdr := make([]byte, core.HeaderSz)
+	copy(hdr[0:4], core.Magic)
+	hdr[4] = core.Version
 	hdr[5] = flags
 	binary.BigEndian.PutUint16(hdr[6:8], typ)
 	binary.BigEndian.PutUint32(hdr[8:12], uint32(len(payload)))
@@ -59,17 +48,17 @@ func readTestFrameWithTimeout(stream io.Reader, timeout time.Duration) (typ uint
 		defer func() { _ = ds.SetReadDeadline(time.Time{}) }()
 	}
 
-	hdr := make([]byte, frameHdrSz)
+	hdr := make([]byte, core.HeaderSz)
 	if _, err := io.ReadFull(stream, hdr); err != nil {
 		return 0, 0, nil, err
 	}
 
 	// Validate magic
-	if string(hdr[0:4]) != frameMagic {
+	if string(hdr[0:4]) != core.Magic {
 		return 0, 0, nil, ErrInvalidFrame
 	}
 	// Validate version
-	if hdr[4] != frameVersion {
+	if hdr[4] != core.Version {
 		return 0, 0, nil, ErrInvalidVersion
 	}
 

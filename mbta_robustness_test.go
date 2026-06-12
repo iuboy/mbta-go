@@ -173,10 +173,10 @@ func (s *MBTARobustnessTestSuite) TestMalformedFrameHeader() {
 	// 测试 1: 错误的版本号
 	s.T().Log("测试错误版本号...")
 	{
-		hdr := make([]byte, frameHdrSz)
-		copy(hdr[0:4], frameMagic)
+		hdr := make([]byte, core.HeaderSz)
+		copy(hdr[0:4], core.Magic)
 		hdr[4] = 0xFF // 错误的版本
-		hdr[5] = flagControl
+		hdr[5] = core.FlagControl
 		binary.BigEndian.PutUint16(hdr[6:8], core.TypeHello)
 		binary.BigEndian.PutUint32(hdr[8:12], 0)
 		binary.BigEndian.PutUint32(hdr[12:16], 0x12345678)
@@ -190,10 +190,10 @@ func (s *MBTARobustnessTestSuite) TestMalformedFrameHeader() {
 	// 测试 2: 无效的消息类型
 	s.T().Log("测试无效消息类型...")
 	{
-		hdr := make([]byte, frameHdrSz)
-		copy(hdr[0:4], frameMagic)
-		hdr[4] = frameVersion
-		hdr[5] = flagControl
+		hdr := make([]byte, core.HeaderSz)
+		copy(hdr[0:4], core.Magic)
+		hdr[4] = core.Version
+		hdr[5] = core.FlagControl
 		binary.BigEndian.PutUint16(hdr[6:8], 0xFF) // 无效的消息类型
 		binary.BigEndian.PutUint32(hdr[8:12], 0)
 		binary.BigEndian.PutUint32(hdr[12:16], 0x12345678)
@@ -206,10 +206,10 @@ func (s *MBTARobustnessTestSuite) TestMalformedFrameHeader() {
 	// 测试 3: 超大的长度（可能的溢出攻击）
 	s.T().Log("测试超大长度...")
 	{
-		hdr := make([]byte, frameHdrSz)
-		copy(hdr[0:4], frameMagic)
-		hdr[4] = frameVersion
-		hdr[5] = flagData
+		hdr := make([]byte, core.HeaderSz)
+		copy(hdr[0:4], core.Magic)
+		hdr[4] = core.Version
+		hdr[5] = core.FlagData
 		binary.BigEndian.PutUint16(hdr[6:8], core.TypeBatch)
 		binary.BigEndian.PutUint32(hdr[8:12], math.MaxUint32) // 超大长度
 		binary.BigEndian.PutUint32(hdr[12:16], 0x12345678)
@@ -238,13 +238,13 @@ func (s *MBTARobustnessTestSuite) TestCorruptedCRC() {
 	batchData, _ := json.Marshal(batch)
 
 	// 构建正常的帧，然后故意破坏 CRC
-	frameBuf := make([]byte, frameHdrSz+len(batchData))
-	copy(frameBuf[0:4], frameMagic)
-	frameBuf[4] = frameVersion
-	frameBuf[5] = flagData
+	frameBuf := make([]byte, core.HeaderSz+len(batchData))
+	copy(frameBuf[0:4], core.Magic)
+	frameBuf[4] = core.Version
+	frameBuf[5] = core.FlagData
 	binary.BigEndian.PutUint16(frameBuf[6:8], core.TypeBatch)
 	binary.BigEndian.PutUint32(frameBuf[8:12], uint32(len(batchData)))
-	copy(frameBuf[frameHdrSz:], batchData)
+	copy(frameBuf[core.HeaderSz:], batchData)
 
 	// 故意破坏 CRC 字段（offset 12:16）
 	binary.BigEndian.PutUint32(frameBuf[12:16], 0xDEADBEEF)
@@ -279,10 +279,10 @@ func (s *MBTARobustnessTestSuite) TestTruncatedPayload() {
 	}
 
 	// 构建帧头，声明大的 payload 长度
-	buf := make([]byte, frameHdrSz)
-	copy(buf[0:4], frameMagic)
-	buf[4] = frameVersion
-	buf[5] = flagData
+	buf := make([]byte, core.HeaderSz)
+	copy(buf[0:4], core.Magic)
+	buf[4] = core.Version
+	buf[5] = core.FlagData
 	binary.BigEndian.PutUint16(buf[6:8], core.TypeBatch)
 	binary.BigEndian.PutUint32(buf[8:12], uint32(len(largePayload)))
 	binary.BigEndian.PutUint32(buf[12:16], 0) // dummy CRC
@@ -313,7 +313,7 @@ func (s *MBTARobustnessTestSuite) TestInvalidJSONPayload() {
 
 	// 发送无效的 JSON
 	invalidJSON := []byte("{invalid json data")
-	err = writeTestFrame(dataStream, core.TypeBatch, flagData, invalidJSON)
+	err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, invalidJSON)
 	require.NoError(s.T(), err)
 
 	s.T().Log("发送无效 JSON 的 BATCH")
@@ -337,7 +337,7 @@ func (s *MBTARobustnessTestSuite) TestEmptyPayload() {
 	dataStream, _ := conn.OpenUniStreamSync(ctx)
 
 	// 发送空 payload
-	err = writeTestFrame(dataStream, core.TypeBatch, flagData, []byte{})
+	err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, []byte{})
 	require.NoError(s.T(), err)
 
 	s.T().Log("发送空 payload的帧")
@@ -378,7 +378,7 @@ func (s *MBTARobustnessTestSuite) TestMaxFrameSize() {
 				payload[i] = byte(i % 256)
 			}
 
-			err = writeTestFrame(dataStream, core.TypeBatch, flagData, payload)
+			err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, payload)
 			if err != nil {
 				s.T().Logf("大小 %d 字节: 发送失败 (预期) - %v", size, err)
 			} else {
@@ -421,7 +421,7 @@ func (s *MBTARobustnessTestSuite) TestOverflowSequenceNumber() {
 		}
 
 		batchData, _ := json.Marshal(batch)
-		err = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+		err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 		if err != nil {
 			s.T().Logf("序列号 %s: 发送失败 - %v", seq, err)
 		} else {
@@ -453,7 +453,7 @@ func (s *MBTARobustnessTestSuite) TestNegativeValues() {
 	}
 
 	batchData, _ := json.Marshal(batch)
-	err = writeTestFrame(controlStream, core.TypeBatch, flagData, batchData)
+	err = writeTestFrame(controlStream, core.TypeBatch, core.FlagData, batchData)
 	if err == nil {
 		s.T().Log("发送包含负数的 BATCH")
 
@@ -497,7 +497,7 @@ func (s *MBTARobustnessTestSuite) TestSpecialCharacters() {
 		batch["events"] = events
 
 		batchData, _ := json.Marshal(batch)
-		err = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+		err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 		if err != nil {
 			s.T().Logf("特殊字符测试失败: %v", err)
 		} else {
@@ -528,7 +528,7 @@ func (s *MBTARobustnessTestSuite) TestBufferOverflowAttack() {
 	attackPayload := make([]byte, 1024*1024*100) // 100MB
 
 	dataStream, _ := conn.OpenUniStreamSync(ctx)
-	err = writeTestFrame(dataStream, core.TypeBatch, flagData, attackPayload)
+	err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, attackPayload)
 	dataStream.Close()
 
 	if err != nil {
@@ -564,7 +564,7 @@ func (s *MBTARobustnessTestSuite) TestFloodAttack() {
 
 		smallBatch := createTestBatch(1, fmt.Sprintf("flood-%d", i))
 		batchData, _ := json.Marshal(smallBatch)
-		err = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+		err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 		if err != nil {
 			dataStream.Close()
 			s.T().Logf("发送被限制: %v (第%d个)", err, i)
@@ -606,7 +606,7 @@ func (s *MBTARobustnessTestSuite) TestProtocolViolationAttack() {
 	dataStream, _ := conn.OpenUniStreamSync(ctx)
 	batch := createTestBatch(10, "auth-attack-001")
 	batchData, _ := json.Marshal(batch)
-	err = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+	err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 	if err != nil {
 		s.T().Logf("认证前发送BATCH被阻止: %v", err)
 	} else {
@@ -616,7 +616,7 @@ func (s *MBTARobustnessTestSuite) TestProtocolViolationAttack() {
 	// 攻击 2: 发送未知消息类型
 	s.T().Log("攻击2: 发送未知消息类型")
 	unknownMsg := []byte("unknown message")
-	err = writeTestFrame(controlStream, 0x0099, flagControl, unknownMsg) // 未知类型
+	err = writeTestFrame(controlStream, 0x0099, core.FlagControl, unknownMsg) // 未知类型
 	if err != nil {
 		s.T().Logf("未知消息类型被阻止: %v", err)
 	} else {
@@ -630,7 +630,7 @@ func (s *MBTARobustnessTestSuite) TestProtocolViolationAttack() {
 		"timestamp": time.Now().Unix(),
 	}
 	authData, _ := json.Marshal(authMsg)
-	err = writeTestFrame(dataStream, core.TypeAuth, flagControl, authData)
+	err = writeTestFrame(dataStream, core.TypeAuth, core.FlagControl, authData)
 	if err != nil {
 		s.T().Logf("数据流发送控制消息被阻止: %v", err)
 	} else {
@@ -657,13 +657,13 @@ func (s *MBTARobustnessTestSuite) TestReplayAttack() {
 
 	// 发送第一次（正常）
 	dataStream1, _ := conn.OpenUniStreamSync(ctx)
-	err = writeTestFrame(dataStream1, core.TypeBatch, flagData, batchData)
+	err = writeTestFrame(dataStream1, core.TypeBatch, core.FlagData, batchData)
 	assert.NoError(s.T(), err)
 	s.T().Log("第一次发送 BATCH")
 
 	// 尝试用相同的 chunk_id 重放（攻击）
 	dataStream2, _ := conn.OpenUniStreamSync(ctx)
-	err = writeTestFrame(dataStream2, core.TypeBatch, flagData, batchData)
+	err = writeTestFrame(dataStream2, core.TypeBatch, core.FlagData, batchData)
 	assert.NoError(s.T(), err)
 	s.T().Log("第二次发送相同 BATCH（重放攻击）")
 
@@ -747,7 +747,7 @@ func (s *MBTARobustnessTestSuite) TestHighFrequencyTransmission() {
 
 		batch := createTestBatch(10, fmt.Sprintf("freq-%d", transmitCount))
 		batchData, _ := json.Marshal(batch)
-		err = writeTestFrame(dataStream, core.TypeBatch, flagData, batchData)
+		err = writeTestFrame(dataStream, core.TypeBatch, core.FlagData, batchData)
 		if err != nil {
 			dataStream.Close()
 			s.T().Logf("发送被限制: %v", err)
@@ -799,7 +799,7 @@ func (s *MBTARobustnessTestSuite) TestLongRunningConnection() {
 			"sequence":  keepAliveCount,
 		}
 		pingData, _ := json.Marshal(pingMsg)
-		err := writeTestFrame(controlStream, core.TypePing, flagControl, pingData)
+		err := writeTestFrame(controlStream, core.TypePing, core.FlagControl, pingData)
 		if err != nil {
 			s.T().Logf("长连接中断: %v", err)
 			break
@@ -828,7 +828,7 @@ func (s *MBTARobustnessTestSuite) sendBatch(stream io.Writer, batch map[string]i
 		return err
 	}
 
-	return writeTestFrame(stream, core.TypeBatch, flagData, batchData)
+	return writeTestFrame(stream, core.TypeBatch, core.FlagData, batchData)
 }
 
 // createTestBatches 创建测试批次
@@ -855,30 +855,43 @@ func (s *MBTARobustnessTestSuite) handshakeAndAuthenticate(ctx context.Context, 
 	controlStream, err := conn.OpenStreamSync(ctx)
 	require.NoError(s.T(), err)
 
+	agentID := "test-agent-001"
+
 	// 发送 HELLO
 	helloMsg := map[string]interface{}{
-		"version":        "1.0",
+		"version":        1,
 		"capabilities":   []string{"batch", "ack", "window", "ping"},
-		"agent_id":       "test-agent-001",
+		"agent_id":       agentID,
 		"max_batch_size": 1048576,
 	}
 
 	helloData, _ := json.Marshal(helloMsg)
-	err = writeTestFrame(controlStream, core.TypeHello, flagControl, helloData)
+	err = writeTestFrame(controlStream, core.TypeHello, core.FlagControl, helloData)
 	require.NoError(s.T(), err)
 
-	// 接收 HELLO_ACK
-	_, _, _, err = readTestFrameWithTimeout(controlStream, 5*time.Second)
+	// 接收 HELLO_ACK，提取 challenge_nonce 和 session_id
+	_, _, ackPayload, err := readTestFrameWithTimeout(controlStream, 5*time.Second)
 	require.NoError(s.T(), err)
+
+	var helloAck map[string]interface{}
+	require.NoError(s.T(), json.Unmarshal(ackPayload, &helloAck))
+	challengeNonce, _ := helloAck["challenge_nonce"].(string)
+	sessionID, _ := helloAck["session_id"].(string)
+
+	// 计算 HMAC challenge-response
+	authNonce := core.ComputeChallengeResponse(token, challengeNonce, core.HMACAlgoSHA256)
 
 	// 发送 AUTH
 	authMsg := map[string]interface{}{
-		"token":     token,
-		"timestamp": time.Now().Unix(),
+		"token":      token,
+		"agent_id":   agentID,
+		"session_id": sessionID,
+		"auth_nonce": authNonce,
+		"timestamp":  time.Now().Unix(),
 	}
 
 	authData, _ := json.Marshal(authMsg)
-	err = writeTestFrame(controlStream, core.TypeAuth, flagControl, authData)
+	err = writeTestFrame(controlStream, core.TypeAuth, core.FlagControl, authData)
 	require.NoError(s.T(), err)
 
 	// 接收 AUTH_OK
