@@ -116,7 +116,8 @@ func nowUnixMs() int64 {
 // CanonicalSigningString builds the deterministic HMAC input.
 func CanonicalSigningString(env *SecureEnvelope) []byte {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "mbta-v1\n")
+	fmt.Fprintf(&buf, "mbta-v%d\n", env.EnvelopeVersion)
+	fmt.Fprintf(&buf, "envelope_version=%d\n", env.EnvelopeVersion)
 	fmt.Fprintf(&buf, "message_type=%s\n", env.MessageType)
 	fmt.Fprintf(&buf, "session_id=%s\n", env.SessionID)
 	fmt.Fprintf(&buf, "key_id=%s\n", env.KeyID)

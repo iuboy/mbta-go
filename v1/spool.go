@@ -295,11 +295,20 @@ func (s *Spool) Sync() error {
 
 	if dirtyRec {
 		if err := s.flushRecords(); err != nil {
+			// Restore dirty flag on failure.
+			s.mu.Lock()
+			s.dirty = true
+			s.dirtyRecords = true
+			s.mu.Unlock()
 			return err
 		}
 	}
 	if dirtyBat {
 		if err := s.flushBatches(); err != nil {
+			s.mu.Lock()
+			s.dirty = true
+			s.dirtyBatches = true
+			s.mu.Unlock()
 			return err
 		}
 	}
@@ -352,6 +361,7 @@ func (s *Spool) flushLoop() {
 
 // flushIfNeeded flushes dirty data to disk.
 // Snapshot is taken under the lock; I/O happens outside the lock.
+// If I/O fails, dirty flags are restored so the next flush cycle retries.
 func (s *Spool) flushIfNeeded() {
 	s.mu.Lock()
 	if !s.dirty {
@@ -370,6 +380,8 @@ func (s *Spool) flushIfNeeded() {
 	if dirtyRec {
 		recordsData, err = json.Marshal(s.records)
 		if err != nil {
+			s.dirty = true
+			s.dirtyRecords = true
 			s.mu.Unlock()
 			slog.Error("flush: marshal records", "error", err)
 			return
@@ -378,6 +390,8 @@ func (s *Spool) flushIfNeeded() {
 	if dirtyBat {
 		batchesData, err = json.Marshal(s.batches)
 		if err != nil {
+			s.dirty = true
+			s.dirtyBatches = true
 			s.mu.Unlock()
 			slog.Error("flush: marshal batches", "error", err)
 			return
@@ -389,11 +403,21 @@ func (s *Spool) flushIfNeeded() {
 	if recordsData != nil {
 		if err := writeFileAtomic(filepath.Join(s.dir, "records.json"), recordsData, 0600); err != nil {
 			slog.Error("flush: write records", "error", err)
+			// Restore dirty flag so next flush cycle retries.
+			s.mu.Lock()
+			s.dirty = true
+			s.dirtyRecords = true
+			s.mu.Unlock()
 		}
 	}
 	if batchesData != nil {
 		if err := writeFileAtomic(filepath.Join(s.dir, "batches.json"), batchesData, 0600); err != nil {
 			slog.Error("flush: write batches", "error", err)
+			// Restore dirty flag so next flush cycle retries.
+			s.mu.Lock()
+			s.dirty = true
+			s.dirtyBatches = true
+			s.mu.Unlock()
 		}
 	}
 }

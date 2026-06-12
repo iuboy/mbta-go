@@ -137,6 +137,7 @@ func TestBuildEnvelope(t *testing.T) {
 // TestCanonicalSigningString tests the CanonicalSigningString function.
 func TestCanonicalSigningString(t *testing.T) {
 	env := &SecureEnvelope{
+		EnvelopeVersion: EnvelopeVersion,
 		MessageType:     "batch",
 		SessionID:       "sess-123",
 		KeyID:           "key-456",
@@ -157,6 +158,7 @@ func TestCanonicalSigningString(t *testing.T) {
 	// Verify format
 	expectedParts := []string{
 		"mbta-v1",
+		"envelope_version=1",
 		"message_type=batch",
 		"session_id=sess-123",
 		"key_id=key-456",
@@ -179,7 +181,7 @@ func TestCanonicalSigningString(t *testing.T) {
 
 	// Verify each field is on its own line (except payload which is last without trailing newline)
 	lines := strings.Split(signingStr, "\n")
-	if len(lines) != 13 { // 12 fields + header line
+	if len(lines) != 14 { // 13 fields + header line
 		t.Errorf("Expected 13 lines, got %d", len(lines))
 	}
 }

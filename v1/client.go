@@ -473,6 +473,7 @@ func (c *Client) heartbeatLoop(ctx context.Context) {
 			}
 			c.controlMu.Lock()
 			if err := core.Write(c.controlStr, core.TypePing, core.FlagControl, payload); err != nil {
+				c.controlMu.Unlock()
 				slog.Debug("write ping failed", "error", err)
 				return
 			}

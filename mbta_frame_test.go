@@ -11,156 +11,114 @@ import (
 const (
 	MBTAALPN = "mbta/1"
 
-	// Message types
-	HelloMessageType      = 0x01
-	HelloAckMessageType   = 0x02
-	AuthMessageType       = 0x03
-	AuthOkMessageType     = 0x04
-	AuthFailMessageType   = 0x05
-	BatchMessageType      = 0x10
-	AckMessageType        = 0x11
-	NackMessageType       = 0x12
-	PartialAckMessageType = 0x13
-	WindowMessageType     = 0x20
-	ThrottleMessageType   = 0x21
-	PingMessageType       = 0x30
-	PongMessageType       = 0x31
-	CloseMessageType      = 0x40
-
 	// Test ports
 	TestServerPort = 15150
 )
 
-// MBTAFrameHeader MBTA 帧（16字节）
-type MBTAFrameHeader struct {
-	Version     uint8
-	MessageType uint8
-	Flags       uint8
-	Reserved    [5]uint8
-	Length      uint32
-	CRC32       uint32
-	Payload     []byte // 关联的 payload 数据
-}
+// Wire-level frame constants — must match core/frame.go exactly.
+const (
+	frameMagic   = "MBTA"
+	frameVersion byte = 0x01
+	frameHdrSz        = 16 // 4 magic + 1 version + 1 flags + 2 type + 4 length + 4 crc32
+)
 
-// createMBTAFrame 创建 MBTA 帧
-func createMBTAFrame(messageType uint8, payload []byte) MBTAFrameHeader {
-	header := MBTAFrameHeader{
-		Version:     0x01, // MBTA v1
-		MessageType: messageType,
-		Flags:       0x00,
-		Length:      uint32(len(payload)),
-		Payload:     payload,
-	}
+// Frame flags — must match core/frame.go.
+const (
+	flagControl byte = 0x02
+	flagData    byte = 0x04
+)
 
-	// 计算 CRC32
-	crc := crc32.NewIEEE()
-	crc.Write(payload)
-	header.CRC32 = crc.Sum32()
+// writeTestFrame writes a single MBTA frame using the canonical wire format
+// (identical to core.Write). Used by E2E tests that operate at the QUIC level.
+func writeTestFrame(stream io.Writer, typ uint16, flags byte, payload []byte) error {
+	hdr := make([]byte, frameHdrSz)
+	copy(hdr[0:4], frameMagic)
+	hdr[4] = frameVersion
+	hdr[5] = flags
+	binary.BigEndian.PutUint16(hdr[6:8], typ)
+	binary.BigEndian.PutUint32(hdr[8:12], uint32(len(payload)))
+	binary.BigEndian.PutUint32(hdr[12:16], crc32.ChecksumIEEE(payload))
 
-	return header
-}
-
-// writeFrame 写入完整的帧（帧头 + payload）
-func writeFrame(stream io.Writer, header MBTAFrameHeader) error {
-	// 写入帧头（16字节）
-	buf := make([]byte, 16)
-	buf[0] = header.Version
-	buf[1] = header.MessageType
-	buf[2] = header.Flags
-	// Reserved [5]uint8 - 跳过
-	binary.BigEndian.PutUint32(buf[8:12], header.Length)
-	binary.BigEndian.PutUint32(buf[12:16], header.CRC32)
-
-	_, err := stream.Write(buf)
-	if err != nil {
+	if _, err := stream.Write(hdr); err != nil {
 		return err
 	}
-
-	// 写入 payload
-	if len(header.Payload) > 0 {
-		_, err = stream.Write(header.Payload)
-		if err != nil {
+	if len(payload) > 0 {
+		if _, err := stream.Write(payload); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
-// readFrameWithTimeout 读取帧（带真正的超时控制）
-// 通过 QUIC 流的 SetReadDeadline 实现超时，而非无限阻塞
-func readFrameWithTimeout(stream io.Reader, timeout time.Duration) (MBTAFrameHeader, []byte, error) {
-	// 设置 QUIC 流的读取截止时间（如果流支持）
+// readTestFrameWithTimeout reads a single MBTA frame with timeout control.
+// Uses the canonical wire format (identical to core.Read).
+func readTestFrameWithTimeout(stream io.Reader, timeout time.Duration) (typ uint16, flags byte, payload []byte, err error) {
+	// Set QUIC stream read deadline if supported.
 	if ds, ok := stream.(interface{ SetReadDeadline(time.Time) error }); ok {
 		_ = ds.SetReadDeadline(time.Now().Add(timeout))
-		defer func() { _ = ds.SetReadDeadline(time.Time{}) }() // 清除截止时间
+		defer func() { _ = ds.SetReadDeadline(time.Time{}) }()
 	}
 
-	// 读取帧头（16字节）
-	headerBuf := make([]byte, 16)
-	_, err := io.ReadFull(stream, headerBuf)
-	if err != nil {
-		return MBTAFrameHeader{}, nil, err
+	hdr := make([]byte, frameHdrSz)
+	if _, err := io.ReadFull(stream, hdr); err != nil {
+		return 0, 0, nil, err
 	}
 
-	header := MBTAFrameHeader{
-		Version:     headerBuf[0],
-		MessageType: headerBuf[1],
-		Flags:       headerBuf[2],
-		Length:      binary.BigEndian.Uint32(headerBuf[8:12]),
-		CRC32:       binary.BigEndian.Uint32(headerBuf[12:16]),
+	// Validate magic
+	if string(hdr[0:4]) != frameMagic {
+		return 0, 0, nil, ErrInvalidFrame
+	}
+	// Validate version
+	if hdr[4] != frameVersion {
+		return 0, 0, nil, ErrInvalidVersion
 	}
 
-	// 验证版本
-	if header.Version != 0x01 {
-		return header, nil, ErrInvalidVersion
-	}
+	parsedFlags := hdr[5]
+	parsedType := binary.BigEndian.Uint16(hdr[6:8])
+	length := binary.BigEndian.Uint32(hdr[8:12])
+	expectedCRC := binary.BigEndian.Uint32(hdr[12:16])
 
-	// 读取 payload
-	if header.Length > 0 {
-		payload := make([]byte, header.Length)
-		n, err := io.ReadFull(stream, payload)
-		if err != nil {
-			// 排空剩余声明的字节数，保证下一次读帧从正确边界开始
-			remaining := int64(header.Length) - int64(n)
+	// Read payload
+	data := make([]byte, length)
+	if length > 0 {
+		n, readErr := io.ReadFull(stream, data)
+		if readErr != nil {
+			// Drain remaining bytes to keep stream aligned.
+			remaining := int64(length) - int64(n)
 			if remaining > 0 {
 				_, _ = io.CopyN(io.Discard, stream, remaining)
 			}
-			return header, nil, err
+			return 0, 0, nil, readErr
 		}
-
-		// 验证 CRC
-		crc := crc32.NewIEEE()
-		crc.Write(payload)
-		if crc.Sum32() != header.CRC32 {
-			return header, nil, ErrCRCMismatch
-		}
-
-		return header, payload, nil
 	}
 
-	return header, []byte{}, nil
+	// Verify CRC32
+	if crc32.ChecksumIEEE(data) != expectedCRC {
+		return 0, 0, nil, ErrCRCMismatch
+	}
+
+	return parsedType, parsedFlags, data, nil
 }
 
-// readFrameOfType 读取帧直到找到期望的消息类型
-// 跳过中间的其他消息（如认证后自动发送的 WINDOW 更新）
-func readFrameOfType(stream io.Reader, expectedType uint8, timeout time.Duration) (MBTAFrameHeader, []byte, error) {
+// readTestFrameOfType reads frames until one matching the expected type is found.
+// Skips intermediate frames (e.g., WINDOW updates). Returns the first matching frame.
+func readTestFrameOfType(stream io.Reader, expectedType uint16, timeout time.Duration) (byte, []byte, error) {
 	deadline := time.Now().Add(timeout)
-	for i := 0; i < 64; i++ { // 最多跳过 64 个不匹配的帧（压力测试可能产生大量 WINDOW 帧）
+	for i := 0; i < 64; i++ {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return MBTAFrameHeader{}, nil, fmt.Errorf("timeout waiting for message type 0x%02x", expectedType)
+			return 0, nil, fmt.Errorf("timeout waiting for frame type 0x%04x", expectedType)
 		}
-		header, data, err := readFrameWithTimeout(stream, remaining)
+		typ, flags, data, err := readTestFrameWithTimeout(stream, remaining)
 		if err != nil {
-			return header, nil, err
+			return 0, nil, err
 		}
-		if header.MessageType == expectedType {
-			return header, data, nil
+		if typ == expectedType {
+			return flags, data, nil
 		}
-		// 跳过非期望的消息类型，继续读取
+		// Skip non-matching frame types.
 	}
-	return MBTAFrameHeader{}, nil, fmt.Errorf("too many unexpected frames while waiting for message type 0x%02x", expectedType)
+	return 0, nil, fmt.Errorf("too many unexpected frames while waiting for frame type 0x%04x", expectedType)
 }
 
 // Errors
@@ -170,7 +128,7 @@ var (
 	ErrInvalidFrame   = &ProtocolError{Code: 0x03, Message: "invalid frame format"}
 )
 
-// ProtocolError 协议错误
+// ProtocolError protocol error
 type ProtocolError struct {
 	Code    uint8
 	Message string

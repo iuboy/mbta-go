@@ -148,7 +148,10 @@ func (c *Client) handlePing(payload []byte) {
 		slog.Warn("marshal pong failed", "error", err)
 		return
 	}
-	if err := core.Write(c.controlStr, core.TypePong, core.FlagControl, pongPayload); err != nil {
+	c.controlMu.Lock()
+	err = core.Write(c.controlStr, core.TypePong, core.FlagControl, pongPayload)
+	c.controlMu.Unlock()
+	if err != nil {
 		slog.Debug("write pong failed", "error", err)
 	}
 }

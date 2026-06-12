@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
@@ -174,7 +175,7 @@ type Conn struct {
 	TLSState       tls.ConnectionState
 	controlClaimed bool
 	controlMu      sync.Mutex
-	authed         bool
+	authed         atomic.Bool
 }
 
 // Accept waits for and returns the next QUIC connection.
@@ -232,7 +233,7 @@ func (c *Conn) AcceptStream(ctx context.Context) (*quic.Stream, string, error) {
 
 // OpenDataStream opens a new data stream. Requires auth to be completed.
 func (c *Conn) OpenDataStream(ctx context.Context) (*quic.Stream, error) {
-	if !c.authed {
+	if !c.authed.Load() {
 		return nil, core.NewError(core.NumStream, core.ErrStream, "cannot open data stream before auth")
 	}
 	return c.QC.OpenStreamSync(ctx)
@@ -240,7 +241,7 @@ func (c *Conn) OpenDataStream(ctx context.Context) (*quic.Stream, error) {
 
 // SetAuthed marks the connection as authenticated.
 func (c *Conn) SetAuthed(authed bool) {
-	c.authed = authed
+	c.authed.Store(authed)
 }
 
 // CloseWithError closes the QUIC connection with an error code.

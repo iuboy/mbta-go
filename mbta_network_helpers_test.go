@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/iuboy/mbta-go/core"
 	quic "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -111,10 +112,10 @@ func (s *MBTANetworkTestSuite) handshakeAndAuth(
 		"max_batch_size": 1048576,
 	}
 	helloData, _ := json.Marshal(helloMsg)
-	require.NoError(s.T(), writeFrame(controlStream, createMBTAFrame(HelloMessageType, helloData)))
+	require.NoError(s.T(), writeTestFrame(controlStream, core.TypeHello, flagControl, helloData))
 
 	// 接收 HELLO_ACK
-	_, _, err = readFrameWithTimeout(controlStream, 10*time.Second)
+	_, _, _, err = readTestFrameWithTimeout(controlStream, 10*time.Second)
 	require.NoError(s.T(), err, "接收 HELLO_ACK 失败")
 
 	// 发送 AUTH
@@ -123,12 +124,12 @@ func (s *MBTANetworkTestSuite) handshakeAndAuth(
 		"timestamp": time.Now().Unix(),
 	}
 	authData, _ := json.Marshal(authMsg)
-	require.NoError(s.T(), writeFrame(controlStream, createMBTAFrame(AuthMessageType, authData)))
+	require.NoError(s.T(), writeTestFrame(controlStream, core.TypeAuth, flagControl, authData))
 
 	// 接收 AUTH_OK（跳过可能穿插的 WINDOW 帧）
-	authHeader, _, err := readFrameOfType(controlStream, uint8(AuthOkMessageType), 10*time.Second)
+	_, _, err = readTestFrameOfType(controlStream, core.TypeAuthOK, 10*time.Second)
 	require.NoError(s.T(), err, "接收 AUTH_OK 失败")
-	s.T().Logf("认证成功: msgType=0x%02x", authHeader.MessageType)
+	s.T().Log("认证成功")
 
 	return controlStream
 }
@@ -143,17 +144,16 @@ func (s *MBTANetworkTestSuite) sendBatchAndMeasureACK(
 	// 发送 BATCH
 	batch := createTestBatch(10, seq)
 	batchData, _ := json.Marshal(batch)
-	frame := createMBTAFrame(BatchMessageType, batchData)
 
 	dataStream, err := client.conn.OpenUniStreamSync(ctx)
 	require.NoError(s.T(), err, "OpenUniStreamSync 失败")
 
 	start := time.Now()
-	require.NoError(s.T(), writeFrame(dataStream, frame), "写入 BATCH 失败")
+	require.NoError(s.T(), writeTestFrame(dataStream, core.TypeBatch, flagData, batchData), "写入 BATCH 失败")
 	require.NoError(s.T(), dataStream.Close(), "关闭数据流失败")
 
 	// 等待 ACK（通过控制流）
-	_, ackData, err := readFrameOfType(client.controlStream, uint8(AckMessageType), timeout)
+	_, ackData, err := readTestFrameOfType(client.controlStream, core.TypeAck, timeout)
 	elapsed := time.Since(start)
 
 	require.NoError(s.T(), err, "等待 ACK 超时 (seq=%s)", seq)
@@ -166,7 +166,6 @@ func (s *MBTANetworkTestSuite) sendBatchAndMeasureACK(
 }
 
 // measureRTT 通过 PING/PONG 测量往返延迟
-// 使用自定义重试循环，不受 readFrameOfType 的 16 次限制
 func (s *MBTANetworkTestSuite) measureRTT(
 	controlStream *quic.Stream,
 	iterations int,
@@ -181,10 +180,9 @@ func (s *MBTANetworkTestSuite) measureRTT(
 			"sequence":  i,
 		}
 		pingData, _ := json.Marshal(pingMsg)
-		pingFrame := createMBTAFrame(PingMessageType, pingData)
 
 		start := time.Now()
-		require.NoError(s.T(), writeFrame(controlStream, pingFrame))
+		require.NoError(s.T(), writeTestFrame(controlStream, core.TypePing, flagControl, pingData))
 
 		// 自定义重试循环：跳过非 PONG 帧（WINDOW 等），无次数限制
 		deadline := time.Now().Add(30 * time.Second)
@@ -195,11 +193,11 @@ func (s *MBTANetworkTestSuite) measureRTT(
 			if remaining <= 0 {
 				break
 			}
-			header, _, err := readFrameWithTimeout(controlStream, remaining)
+			typ, _, _, err := readTestFrameWithTimeout(controlStream, remaining)
 			if err != nil {
 				break
 			}
-			if header.MessageType == uint8(PongMessageType) {
+			if typ == core.TypePong {
 				rtt = time.Since(start)
 				found = true
 				break

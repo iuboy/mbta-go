@@ -192,17 +192,21 @@ func handshake(t *testing.T, conn *quic.Conn, agentID, token string) (*quic.Stre
 	require.NoError(t, json.Unmarshal(f.Payload, &helloAck))
 	require.NotEmpty(t, helloAck.SessionID)
 
-	// Send AUTH — use server challenge nonce if provided
+	// Send AUTH — compute HMAC challenge-response
 	nonce := helloAck.ChallengeNonce
 	if nonce == "" {
 		nonce = "test-nonce" // fallback for legacy servers
+	}
+	algo := core.HMACAlgoSHA256
+	if helloAck.HMACAlgo != "" && helloAck.HMACAlgo != core.HMACAlgoNone {
+		algo = helloAck.HMACAlgo
 	}
 	auth := core.AuthMessage{
 		Token:     token,
 		AgentID:   agentID,
 		SessionID: helloAck.SessionID,
-		HMACAlgo:  "sha256",
-		AuthNonce: nonce,
+		HMACAlgo:  algo,
+		AuthNonce: core.ComputeChallengeResponse(token, nonce, algo),
 	}
 	authData, _ := json.Marshal(auth)
 	require.NoError(t, core.Write(cs, core.TypeAuth, core.FlagControl, authData))
@@ -283,18 +287,24 @@ func sendBatch(t *testing.T, conn *quic.Conn, sessionID string, hmacKey []byte, 
 }
 
 // readAck reads an ACK from the control stream with timeout.
-// After da3ebf5, ACK/NACK/Throttle are sent on the control stream, not the data stream.
+// Skips non-ACK frames (e.g. WINDOW updates) that may interleave.
 func readAck(t *testing.T, cs *quic.Stream) core.AckMessage {
 	t.Helper()
-	_ = cs.SetReadDeadline(time.Now().Add(10 * time.Second))
+	deadline := time.Now().Add(10 * time.Second)
+	_ = cs.SetReadDeadline(deadline)
 
-	f, err := core.Read(cs, core.DefaultLimits())
-	require.NoError(t, err)
-	assert.Equal(t, core.TypeAck, f.Header.Type)
-
-	var ack core.AckMessage
-	require.NoError(t, json.Unmarshal(f.Payload, &ack))
-	return ack
+	for time.Now().Before(deadline) {
+		f, err := core.Read(cs, core.DefaultLimits())
+		require.NoError(t, err)
+		if f.Header.Type == core.TypeAck {
+			var ack core.AckMessage
+			require.NoError(t, json.Unmarshal(f.Payload, &ack))
+			return ack
+		}
+		// Skip WINDOW, THROTTLE, and other non-ACK frames
+	}
+	t.Fatal("timed out waiting for ACK")
+	return core.AckMessage{}
 }
 
 // ---------------------------------------------------------------------------
@@ -505,17 +515,21 @@ func tryHandshake(t *testing.T, conn *quic.Conn, agentID, token string) (*quic.S
 	var helloAck core.HelloAckMessage
 	require.NoError(t, json.Unmarshal(f.Payload, &helloAck))
 
-	// Send AUTH — use server challenge nonce if provided
+	// Send AUTH — compute HMAC challenge-response
 	nonce := helloAck.ChallengeNonce
 	if nonce == "" {
 		nonce = "test-nonce" // fallback for legacy servers
+	}
+	algo := core.HMACAlgoSHA256
+	if helloAck.HMACAlgo != "" && helloAck.HMACAlgo != core.HMACAlgoNone {
+		algo = helloAck.HMACAlgo
 	}
 	auth := core.AuthMessage{
 		Token:     token,
 		AgentID:   agentID,
 		SessionID: helloAck.SessionID,
-		HMACAlgo:  "sha256",
-		AuthNonce: nonce,
+		HMACAlgo:  algo,
+		AuthNonce: core.ComputeChallengeResponse(token, nonce, algo),
 	}
 	authData, _ := json.Marshal(auth)
 	require.NoError(t, core.Write(cs, core.TypeAuth, core.FlagControl, authData))

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/iuboy/mbta-go/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -69,17 +70,15 @@ func (s *MBTANetworkTestSuite) TestLargePayloadUnderBandwidthLimit() {
 	batchData, _ := json.Marshal(batch)
 	s.T().Logf("实际 payload 大小: %d 字节", len(batchData))
 
-	frame := createMBTAFrame(BatchMessageType, batchData)
-
 	dataStream, err := client.conn.OpenUniStreamSync(ctx)
 	require.NoError(s.T(), err)
 
 	start := time.Now()
-	require.NoError(s.T(), writeFrame(dataStream, frame))
+	require.NoError(s.T(), writeTestFrame(dataStream, core.TypeBatch, flagData, batchData))
 	require.NoError(s.T(), dataStream.Close())
 
 	// 等待 ACK
-	_, _, err = readFrameOfType(client.controlStream, uint8(AckMessageType), 60*time.Second)
+	_, _, err = readTestFrameOfType(client.controlStream, core.TypeAck, 60*time.Second)
 	elapsed := time.Since(start)
 
 	require.NoError(s.T(), err, "等待大 payload ACK 超时")
@@ -215,13 +214,12 @@ func (s *MBTANetworkTestSuite) TestBandwidthDrop() {
 	batchData1, _ := json.Marshal(batch1)
 	s.T().Logf("阶段 1 payload: %d 字节", len(batchData1))
 
-	frame1 := createMBTAFrame(BatchMessageType, batchData1)
 	ds1, err := client.conn.OpenUniStreamSync(ctx)
 	require.NoError(s.T(), err)
 	start1 := time.Now()
-	require.NoError(s.T(), writeFrame(ds1, frame1))
+	require.NoError(s.T(), writeTestFrame(ds1, core.TypeBatch, flagData, batchData1))
 	require.NoError(s.T(), ds1.Close())
-	_, _, err = readFrameOfType(client.controlStream, uint8(AckMessageType), 30*time.Second)
+	_, _, err = readTestFrameOfType(client.controlStream, core.TypeAck, 30*time.Second)
 	rtt1 := time.Since(start1)
 	require.NoError(s.T(), err)
 	s.T().Logf("阶段 1 (1MB/s) 传输耗时: %v", rtt1)
@@ -234,13 +232,12 @@ func (s *MBTANetworkTestSuite) TestBandwidthDrop() {
 	batch2 := createLargePayload(20)
 	batchData2, _ := json.Marshal(batch2)
 
-	frame2 := createMBTAFrame(BatchMessageType, batchData2)
 	ds2, err := client.conn.OpenUniStreamSync(ctx)
 	require.NoError(s.T(), err)
 	start2 := time.Now()
-	require.NoError(s.T(), writeFrame(ds2, frame2))
+	require.NoError(s.T(), writeTestFrame(ds2, core.TypeBatch, flagData, batchData2))
 	require.NoError(s.T(), ds2.Close())
-	_, _, err = readFrameOfType(client.controlStream, uint8(AckMessageType), 60*time.Second)
+	_, _, err = readTestFrameOfType(client.controlStream, core.TypeAck, 60*time.Second)
 	rtt2 := time.Since(start2)
 	require.NoError(s.T(), err)
 	s.T().Logf("阶段 2 (10KB/s) 传输耗时: %v", rtt2)
@@ -347,17 +344,15 @@ func (s *MBTANetworkTestSuite) TestSlowReceiver() {
 	batchData, _ := json.Marshal(batch)
 	s.T().Logf("payload 大小: %d 字节", len(batchData))
 
-	frame := createMBTAFrame(BatchMessageType, batchData)
-
 	dataStream, err := client.conn.OpenUniStreamSync(ctx)
 	require.NoError(s.T(), err)
 
 	start := time.Now()
-	require.NoError(s.T(), writeFrame(dataStream, frame))
+	require.NoError(s.T(), writeTestFrame(dataStream, core.TypeBatch, flagData, batchData))
 	require.NoError(s.T(), dataStream.Close())
 
 	// 等待 ACK
-	_, _, err = readFrameOfType(client.controlStream, uint8(AckMessageType), 30*time.Second)
+	_, _, err = readTestFrameOfType(client.controlStream, core.TypeAck, 30*time.Second)
 	elapsed := time.Since(start)
 
 	require.NoError(s.T(), err, "慢接收方场景 ACK 超时")
@@ -421,23 +416,22 @@ func (s *MBTANetworkTestSuite) TestStressUnderAdverseNetwork() {
 		seq := fmt.Sprintf("stress-%03d", i)
 		batch := createTestBatch(5, seq)
 		batchData, _ := json.Marshal(batch)
-		frame := createMBTAFrame(BatchMessageType, batchData)
 
 		dataStream, err := client.conn.OpenUniStreamSync(ctx)
 		if err != nil {
 			s.T().Logf("batch %03d: OpenUniStreamSync 失败: %v", i, err)
 			continue
 		}
-		if err := writeFrame(dataStream, frame); err != nil {
-			s.T().Logf("batch %03d: writeFrame 失败: %v", i, err)
+		if err := writeTestFrame(dataStream, core.TypeBatch, flagData, batchData); err != nil {
+			s.T().Logf("batch %03d: writeTestFrame 失败: %v", i, err)
 			dataStream.Close()
 			continue
 		}
 		dataStream.Close()
 		sendSuccess++
 
-		// 等待该 batch 的 ACK（通过 readFrameOfType 跳过 WINDOW 等帧）
-		_, _, err = readFrameOfType(client.controlStream, uint8(AckMessageType), 10*time.Second)
+		// 等待该 batch 的 ACK（通过 readTestFrameOfType 跳过 WINDOW 等帧）
+		_, _, err = readTestFrameOfType(client.controlStream, core.TypeAck, 10*time.Second)
 		if err != nil {
 			s.T().Logf("batch %03d: ACK 超时: %v", i, err)
 			continue

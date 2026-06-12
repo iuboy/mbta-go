@@ -156,6 +156,10 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 				return err
 			}
 		case core.TypePing:
+			if h.sm.State() != core.ServerStateReady {
+				h.sendError(core.CodeUnsupportedMessage, "PING not allowed before auth", true)
+				continue
+			}
 			h.handlePing(f.Payload)
 		case core.TypeClose:
 			slog.Info("close received", "session", h.sessionID)
@@ -239,11 +243,11 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 
 func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	// Enforce authentication retry limit to prevent brute-force attacks.
-	h.authAttempts++
-	if h.authAttempts > maxAuthAttempts {
+	if h.authAttempts >= maxAuthAttempts {
 		h.sendAuthFail("too_many_attempts", "authentication retry limit exceeded", false)
 		return core.NewError(core.NumAuth, core.ErrAuth, "too many auth attempts")
 	}
+	h.authAttempts++
 
 	var msg core.AuthMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {
@@ -260,6 +264,12 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 		slog.Warn("auth agent_id mismatch", "session", h.sessionID, "hello_agent", h.agentID, "auth_agent", msg.AgentID)
 		h.sendAuthFail("invalid_auth", "authentication failed", false)
 		return core.NewError(core.NumAuth, core.ErrAuth, "agent_id mismatch")
+	}
+
+	if msg.SessionID != h.sessionID {
+		slog.Warn("auth session_id mismatch", "session", h.sessionID, "auth_session", msg.SessionID)
+		h.sendAuthFail("invalid_auth", "authentication failed", false)
+		return core.NewError(core.NumAuth, core.ErrAuth, "session_id mismatch")
 	}
 
 	// Challenge-response validation: 使用 HMAC(token, nonce) 验证客户端持有 token
@@ -411,7 +421,8 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	if err := json.Unmarshal(payload, &env); err != nil {
 		// envelope 无法解码时 seq/chunkID 未知，发送 ERROR 而非 NACK。
 		// 零值 NACK 会导致客户端 pendingAcks 无法清理，最终 inflight 死锁。
-		h.sendError(core.CodeDecodeFailed, fmt.Sprintf("invalid_envelope: %s", err), false)
+		slog.Debug("invalid envelope", "session", h.sessionID, "error", err)
+			h.sendError(core.CodeDecodeFailed, "invalid_envelope", false)
 		return
 	}
 
@@ -451,6 +462,13 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 		return
 	}
 
+	// Enforce batch size limits to prevent resource exhaustion.
+	if len(batchPayload) > maxBatchBytes {
+		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "batch_too_large",
+			fmt.Sprintf("batch payload %d bytes exceeds limit %d", len(batchPayload), maxBatchBytes), false)
+		return
+	}
+
 	// Decode SignalBatch from the batch payload
 	var signalBatch core.SignalBatch
 	if err := json.Unmarshal(batchMsg.Batch, &signalBatch); err != nil {
@@ -460,6 +478,13 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 
 	if err := signalBatch.Validate(); err != nil {
 		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "signal_validation", err.Error(), false)
+		return
+	}
+
+	// Enforce event count limit.
+	if len(signalBatch.Signals) > maxBatchEvents {
+		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "too_many_events",
+			fmt.Sprintf("event count %d exceeds limit %d", len(signalBatch.Signals), maxBatchEvents), false)
 		return
 	}
 

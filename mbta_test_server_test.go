@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/iuboy/mbta-go/core"
 	quic "github.com/quic-go/quic-go"
 )
 
@@ -149,23 +150,23 @@ func (s *MBTATestServer) handleControlStream(client *MBTAClientConnection) {
 
 	// 处理控制消息
 	for {
-		header, payload, err := readFrameWithTimeout(stream, 30*time.Second)
+		typ, _, payload, err := readTestFrameWithTimeout(stream, 30*time.Second)
 		if err != nil {
 			fmt.Printf("Read control frame error: %v\n", err)
 			break
 		}
 
-		switch header.MessageType {
-		case HelloMessageType:
+		switch typ {
+		case core.TypeHello:
 			s.handleHello(client, payload)
-		case AuthMessageType:
+		case core.TypeAuth:
 			s.handleAuth(client, payload)
-		case PingMessageType:
+		case core.TypePing:
 			s.handlePing(client, payload)
-		case BatchMessageType:
+		case core.TypeBatch:
 			fmt.Println("Received BATCH on control stream, ignoring")
 		default:
-			fmt.Printf("Unknown message type: %d\n", header.MessageType)
+			fmt.Printf("Unknown message type: %d\n", typ)
 		}
 	}
 }
@@ -188,11 +189,11 @@ func (s *MBTATestServer) handleDataStream(client *MBTAClientConnection, stream *
 	defer func() { _, _ = io.Copy(io.Discard, stream) }() // 排空流中剩余数据，释放 QUIC 流控窗口
 
 	for {
-		header, payload, err := readFrameWithTimeout(stream, 30*time.Second)
+		typ, _, payload, err := readTestFrameWithTimeout(stream, 30*time.Second)
 		if err != nil {
 			if err == ErrCRCMismatch {
 				// CRC 校验失败 — 发送 NACK
-				s.sendToClient(client, NackMessageType, map[string]interface{}{
+				s.sendToClient(client, core.TypeNack, map[string]interface{}{
 					"reason": "CRC32 mismatch",
 					"code":   0x02,
 				})
@@ -201,11 +202,11 @@ func (s *MBTATestServer) handleDataStream(client *MBTAClientConnection, stream *
 			return
 		}
 
-		if header.MessageType == BatchMessageType {
+		if typ == core.TypeBatch {
 			var batchMsg map[string]interface{}
 			if err := json.Unmarshal(payload, &batchMsg); err != nil {
 				// JSON 解析失败 — 发送 NACK，继续读下一帧
-				s.sendToClient(client, NackMessageType, map[string]interface{}{
+				s.sendToClient(client, core.TypeNack, map[string]interface{}{
 					"reason": "invalid JSON payload",
 					"code":   0x04,
 				})
@@ -215,7 +216,7 @@ func (s *MBTATestServer) handleDataStream(client *MBTAClientConnection, stream *
 			seq, _ := batchMsg["seq"].(string)
 
 			// 发送 ACK
-			s.sendToClient(client, AckMessageType, map[string]interface{}{
+			s.sendToClient(client, core.TypeAck, map[string]interface{}{
 				"seq":    seq,
 				"status": "ok",
 			})
@@ -244,14 +245,13 @@ func (s *MBTATestServer) handleHello(client *MBTAClientConnection, data []byte) 
 	}
 
 	ackData, _ := json.Marshal(ackMsg)
-	ackFrame := createMBTAFrame(HelloAckMessageType, ackData)
 
 	client.mu.Lock()
 	stream := client.controlStream
 	client.mu.Unlock()
 
 	if stream != nil {
-		err := writeFrame(stream, ackFrame)
+		err := writeTestFrame(stream, core.TypeHelloAck, flagControl, ackData)
 		if err != nil {
 			fmt.Printf("Write frame error: %v\n", err)
 		}
@@ -269,7 +269,7 @@ func (s *MBTATestServer) handleAuth(client *MBTAClientConnection, data []byte) {
 
 	token, ok := authMsg["token"].(string)
 	if !ok {
-		s.sendToClient(client, AuthFailMessageType, map[string]interface{}{
+		s.sendToClient(client, core.TypeAuthFail, map[string]interface{}{
 			"error_code": 0x01,
 			"reason":     "missing token",
 		})
@@ -282,7 +282,7 @@ func (s *MBTATestServer) handleAuth(client *MBTAClientConnection, data []byte) {
 		client.authenticated = true
 		client.mu.Unlock()
 
-		s.sendToClient(client, AuthOkMessageType, map[string]interface{}{
+		s.sendToClient(client, core.TypeAuthOK, map[string]interface{}{
 			"session_id":   fmt.Sprintf("session-%d", time.Now().UnixNano()),
 			"server_time":  time.Now().Unix(),
 			"capabilities": []string{"window", "throttle"},
@@ -292,7 +292,7 @@ func (s *MBTATestServer) handleAuth(client *MBTAClientConnection, data []byte) {
 		// 发送 WINDOW 更新
 		go s.sendWindowUpdate(client)
 	} else {
-		s.sendToClient(client, AuthFailMessageType, map[string]interface{}{
+		s.sendToClient(client, core.TypeAuthFail, map[string]interface{}{
 			"error_code": 0x01,
 			"reason":     "invalid token",
 			"timestamp":  time.Now().Unix(),
@@ -302,16 +302,15 @@ func (s *MBTATestServer) handleAuth(client *MBTAClientConnection, data []byte) {
 }
 
 // sendToClient 向客户端发送消息
-func (s *MBTATestServer) sendToClient(client *MBTAClientConnection, msgType uint8, msg interface{}) {
+func (s *MBTATestServer) sendToClient(client *MBTAClientConnection, msgType uint16, msg interface{}) {
 	data, _ := json.Marshal(msg)
-	frame := createMBTAFrame(msgType, data)
 
 	client.mu.Lock()
 	stream := client.controlStream
 	client.mu.Unlock()
 
 	if stream != nil {
-		if err := writeFrame(stream, frame); err != nil {
+		if err := writeTestFrame(stream, msgType, flagControl, data); err != nil {
 			// 客户端正常断开产生的错误无需打印
 			if err.Error() != "Application error 0x0 (remote)" {
 				fmt.Printf("Write frame error: %v\n", err)
@@ -324,7 +323,7 @@ func (s *MBTATestServer) sendToClient(client *MBTAClientConnection, msgType uint
 func (s *MBTATestServer) sendWindowUpdate(client *MBTAClientConnection) {
 	time.Sleep(100 * time.Millisecond) // 模拟延迟
 
-	s.sendToClient(client, WindowMessageType, map[string]interface{}{
+	s.sendToClient(client, core.TypeWindow, map[string]interface{}{
 		"window_size": 1048576,
 		"seq":         0,
 	})
@@ -336,7 +335,7 @@ func (s *MBTATestServer) handlePing(client *MBTAClientConnection, data []byte) {
 	var pingMsg map[string]interface{}
 	_ = json.Unmarshal(data, &pingMsg)
 
-	s.sendToClient(client, PongMessageType, map[string]interface{}{
+	s.sendToClient(client, core.TypePong, map[string]interface{}{
 		"timestamp":   pingMsg["timestamp"],
 		"sequence":    pingMsg["sequence"],
 		"server_time": time.Now().Unix(),

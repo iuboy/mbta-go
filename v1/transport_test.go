@@ -155,7 +155,7 @@ func TestConnStructure(t *testing.T) {
 	c := &Conn{}
 
 	// Test initial state
-	if c.authed {
+	if c.authed.Load() {
 		t.Error("authed should be false initially")
 	}
 	if c.controlClaimed {
@@ -164,13 +164,13 @@ func TestConnStructure(t *testing.T) {
 
 	// Test SetAuthed
 	c.SetAuthed(true)
-	if !c.authed {
+	if !c.authed.Load() {
 		t.Error("authed should be true after SetAuthed(true)")
 	}
 
 	// Test SetAuthed back to false
 	c.SetAuthed(false)
-	if c.authed {
+	if c.authed.Load() {
 		t.Error("authed should be false after SetAuthed(false)")
 	}
 }
