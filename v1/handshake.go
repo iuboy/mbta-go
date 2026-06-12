@@ -29,7 +29,7 @@ func (c *Client) sendHello() error {
 		return err
 	}
 	if err := c.sm.Transition(core.StateHelloSent); err != nil {
-		slog.Warn("state transition failed", "to", core.StateHelloSent, "error", err)
+		return core.WrapError(core.NumSession, core.ErrSession, "transition to HELLO_SENT", err)
 	}
 	return nil
 }
@@ -64,15 +64,41 @@ func (c *Client) recvHelloAck() (*core.HelloAckMessage, error) {
 		Encryption:           ack.Encryption,
 	}
 
+	// Store server challenge for auth
+	c.challengeNonce = ack.ChallengeNonce
+
+	// 校验 ChallengeNonce：服务端必须在 HELLO_ACK 中提供非空的挑战
+	if c.challengeNonce == "" {
+		return nil, core.NewError(core.NumHandshake, core.ErrHandshake, "server did not provide challenge_nonce in HELLO_ACK")
+	}
+
+	// 校验 HMACAlgo：服务端选择的算法必须是客户端已知的
+	if ack.HMACAlgo != "" && ack.HMACAlgo != core.HMACAlgoNone &&
+		ack.HMACAlgo != core.HMACAlgoSHA256 && ack.HMACAlgo != core.HMACAlgoSM3 {
+		return nil, core.NewError(core.NumHandshake, core.ErrHandshake, fmt.Sprintf("server selected unknown HMAC algorithm: %s", ack.HMACAlgo))
+	}
+
 	return &ack, nil
 }
 
 func (c *Client) sendAuth() error {
+	// Challenge nonce is mandatory — the server must provide it in HELLO_ACK.
+	if c.challengeNonce == "" {
+		return core.NewError(core.NumAuth, core.ErrAuth, "server did not provide challenge_nonce in HELLO_ACK, cannot authenticate")
+	}
+
+	// 使用 HMAC(token, nonce) 代替原始 nonce 回显，证明客户端持有 token
+	algo := core.HMACAlgoSHA256
+	if c.negotiated != nil && c.negotiated.HMACAlgo != core.HMACAlgoNone {
+		algo = c.negotiated.HMACAlgo
+	}
+
 	auth := core.AuthMessage{
 		Token:     c.config.Token,
 		AgentID:   c.config.AgentID,
 		SessionID: c.sessionID,
-		AuthNonce: uuid.Must(uuid.NewV7()).String(),
+		AuthNonce: core.ComputeChallengeResponse(c.config.Token, c.challengeNonce, algo),
+		HMACAlgo:  algo,
 	}
 	payload, err := json.Marshal(auth)
 	if err != nil {
@@ -82,7 +108,7 @@ func (c *Client) sendAuth() error {
 		return err
 	}
 	if err := c.sm.Transition(core.StateAuthSent); err != nil {
-		slog.Warn("state transition failed", "to", core.StateAuthSent, "error", err)
+		return core.WrapError(core.NumSession, core.ErrSession, "transition to AUTH_SENT", err)
 	}
 	return nil
 }
@@ -106,16 +132,25 @@ func (c *Client) recvAuthResult() error {
 			if err != nil {
 				return core.WrapError(core.NumAuth, core.ErrAuth, "decode hmac key", err)
 			}
+				algo := okMsg.HMACAlgo
+				if algo == "" {
+					algo = core.HMACAlgoSHA256
+				}
 			c.keys = &core.SessionKeys{
 				KeyID:    okMsg.KeyID,
 				HMACKey:  hmacKey,
-				HMACAlgo: "sha256",
+				HMACAlgo: algo,
 			}
+		}
+
+		// 存储会话过期时间
+		if okMsg.ExpiresAtUnix > 0 {
+			c.expiresAt = time.Unix(okMsg.ExpiresAtUnix, 0)
 		}
 
 		c.conn.SetAuthed(true)
 		if err := c.sm.Transition(core.StateReady); err != nil {
-			slog.Warn("state transition failed", "to", core.StateReady, "error", err)
+			return core.WrapError(core.NumSession, core.ErrSession, "transition to READY", err)
 		}
 		return nil
 

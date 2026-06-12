@@ -2,6 +2,7 @@ package v1
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,15 +27,26 @@ type ConnectionHandlerConfig struct {
 	ServerID string
 }
 
+// loadLastPressure returns the current pressure state, defaulting to PressureNormal
+// if never set (handles zero-value atomic.Value safely).
+func (h *ConnectionHandler) loadLastPressure() core.PressureState {
+	v := h.lastPressure.Load()
+	if v == nil {
+		return core.PressureNormal
+	}
+	return v.(core.PressureState)
+}
+
 // NewConnectionHandler creates a new connection handler.
 func NewConnectionHandler(cfg ConnectionHandlerConfig) *ConnectionHandler {
 	return &ConnectionHandler{
-		conn:      cfg.Conn,
-		config:    cfg,
-		sm:        core.NewServerMachine(),
-		replay:    core.NewReplayCache(),
-		window:    core.NewWindow(100, 10000, 16*1024*1024),
-		streamSem: make(chan struct{}, maxConcurrentDataStreams),
+		conn:         cfg.Conn,
+		config:       cfg,
+		sm:           core.NewServerMachine(),
+		replay:       core.NewReplayCache(),
+		window:       core.NewWindow(windowMaxBatches, windowMaxEvents, windowMaxBytes),
+		streamSem:    make(chan struct{}, maxConcurrentDataStreams),
+		lastPressure: func() atomic.Value { v := atomic.Value{}; v.Store(core.PressureNormal); return v }(),
 	}
 }
 
@@ -54,16 +66,44 @@ type ConnectionHandler struct {
 	controlMu  sync.Mutex // protects concurrent writes to controlWriter
 	controlW   io.Writer  // control stream writer (set to controlStr in production)
 
+	lastPressure   atomic.Value       // tracks pressure state for WINDOW updates (core.PressureState)
+	challengeNonce string             // server-generated challenge for auth
+	authAttempts   int                // tracks authentication retry count
+	expiresAt      atomic.Int64       // 会话过期时间(Unix秒)，processBatch 检查
+
 	acceptOnce    sync.Once     // ensures acceptDataStreams starts only once
 	streamSem     chan struct{} // limits concurrent data-stream goroutines
 	activeStreams atomic.Int32
 }
 
-const maxConcurrentDataStreams = 64
+const (
+	maxConcurrentDataStreams = 64
+	maxAuthAttempts         = 3
+	heartbeatIntervalSec    = 30
+	maxFramePayloadBytes    = 16 * 1024 * 1024
+	maxBatchBytes           = 8 * 1024 * 1024
+	maxEventBytes           = 256 * 1024
+	maxBatchEvents          = 10000
+	windowMaxBatches        = 100
+	windowMaxEvents         = 10000
+	windowMaxBytes   int64  = 16 * 1024 * 1024
+	throttleRetryMs         = 1000
+)
 
 // HandleConnection orchestrates the full connection lifecycle.
 func (h *ConnectionHandler) HandleConnection(ctx context.Context) error {
-	defer func() { _ = h.conn.CloseWithError(0, "done") }()
+	defer func() {
+		// 安全清除会话密钥
+		if h.keys != nil {
+			for i := range h.keys.HMACKey {
+				h.keys.HMACKey[i] = 0
+			}
+			h.keys = nil
+		}
+		if err := h.conn.CloseWithError(0, "done"); err != nil {
+			slog.Debug("connection close error", "session", h.sessionID, "error", err)
+		}
+	}()
 
 	slog.Debug("handling connection", "remote", h.conn.RemoteAddr)
 
@@ -80,7 +120,7 @@ func (h *ConnectionHandler) HandleConnection(ctx context.Context) error {
 	defer h.controlStr.Close()
 
 	if err := h.sm.Transition(core.ServerStateControlWait); err != nil {
-		slog.Warn("state transition failed", "from", h.sm.State(), "to", core.ServerStateControlWait, "error", err)
+		return core.WrapError(core.NumSession, core.ErrSession, "transition to CONTROL_WAIT", err)
 	}
 
 	// Handle control stream messages
@@ -100,10 +140,18 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 
 		switch f.Header.Type {
 		case core.TypeHello:
+			if h.sm.State() == core.ServerStateReady {
+				h.sendError(core.CodeUnsupportedMessage, "HELLO not allowed after auth", true)
+				continue
+			}
 			if err := h.handleHello(f.Payload); err != nil {
 				return err
 			}
 		case core.TypeAuth:
+			if h.sm.State() == core.ServerStateReady {
+				h.sendError(core.CodeUnsupportedMessage, "AUTH not allowed after auth", true)
+				continue
+			}
 			if err := h.handleAuth(f.Payload); err != nil {
 				return err
 			}
@@ -116,7 +164,7 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 			if h.sm.State() == core.ServerStateReady {
 				slog.Debug("unexpected control message after auth", "type", f.Header.Type)
 			} else {
-				h.sendError(fmt.Sprintf("unexpected message type 0x%04x before auth", f.Header.Type), true)
+				h.sendError(core.CodeUnsupportedMessage, fmt.Sprintf("unexpected message type 0x%04x before auth", f.Header.Type), true)
 				return core.NewError(core.NumProtocol, core.ErrProtocol, fmt.Sprintf("unexpected message type 0x%04x", f.Header.Type))
 			}
 		}
@@ -135,15 +183,16 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 	}
 
 	if err := msg.Validate(); err != nil {
-		h.sendError(err.Error(), true)
+		h.sendError(core.CodeDecodeFailed, err.Error(), true)
 		return err
 	}
 
 	h.agentID = msg.AgentID
 	h.sessionID = uuid.Must(uuid.NewV7()).String()
+	h.challengeNonce = uuid.Must(uuid.NewV7()).String()
 
 	if err := h.sm.Transition(core.ServerStateHelloReceived); err != nil {
-		slog.Warn("state transition failed", "session", h.sessionID, "to", core.ServerStateHelloReceived, "error", err)
+		return core.WrapError(core.NumSession, core.ErrSession, "transition to HELLO_RECEIVED", err)
 	}
 
 	// Negotiate capabilities
@@ -160,16 +209,17 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 		Compression:          result.Compression,
 		HMACAlgo:             result.HMACAlgo,
 		Encryption:           result.Encryption,
-		HeartbeatIntervalSec: 30,
-		MaxFramePayloadBytes: 16 * 1024 * 1024,
-		MaxBatchBytes:        8 * 1024 * 1024,
-		MaxEventBytes:        256 * 1024,
-		MaxBatchEvents:       10000,
+		HeartbeatIntervalSec: heartbeatIntervalSec,
+		MaxFramePayloadBytes: maxFramePayloadBytes,
+		MaxBatchBytes:        maxBatchBytes,
+		MaxEventBytes:        maxEventBytes,
+		MaxBatchEvents:       maxBatchEvents,
 		InitialWindow: core.WindowMessage{
-			MaxInflightBatches: 100,
-			MaxInflightEvents:  10000,
-			MaxInflightBytes:   16 * 1024 * 1024,
+			MaxInflightBatches: windowMaxBatches,
+			MaxInflightEvents:  windowMaxEvents,
+			MaxInflightBytes:   windowMaxBytes,
 		},
+		ChallengeNonce: h.challengeNonce,
 	}
 
 	ackPayload, err := json.Marshal(helloAck)
@@ -181,13 +231,20 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 	}
 
 	if err := h.sm.Transition(core.ServerStateAuthWait); err != nil {
-		slog.Warn("state transition failed", "session", h.sessionID, "to", core.ServerStateAuthWait, "error", err)
+		return core.WrapError(core.NumSession, core.ErrSession, "transition to AUTH_WAIT", err)
 	}
 	slog.Info("hello processed", "agent", h.agentID, "session", h.sessionID)
 	return nil
 }
 
 func (h *ConnectionHandler) handleAuth(payload []byte) error {
+	// Enforce authentication retry limit to prevent brute-force attacks.
+	h.authAttempts++
+	if h.authAttempts > maxAuthAttempts {
+		h.sendAuthFail("too_many_attempts", "authentication retry limit exceeded", false)
+		return core.NewError(core.NumAuth, core.ErrAuth, "too many auth attempts")
+	}
+
 	var msg core.AuthMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		return core.WrapError(core.NumProtocol, core.ErrProtocol, "decode auth", err)
@@ -205,6 +262,20 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 		return core.NewError(core.NumAuth, core.ErrAuth, "agent_id mismatch")
 	}
 
+	// Challenge-response validation: 使用 HMAC(token, nonce) 验证客户端持有 token
+	if h.challengeNonce != "" {
+		algo := core.HMACAlgoSHA256
+		if h.negotiated != nil && h.negotiated.HMACAlgo != core.HMACAlgoNone {
+			algo = h.negotiated.HMACAlgo
+		}
+		expected := core.ComputeChallengeResponse(msg.Token, h.challengeNonce, algo)
+		if !hmac.Equal([]byte(msg.AuthNonce), []byte(expected)) {
+			slog.Warn("auth challenge mismatch", "session", h.sessionID)
+			h.sendAuthFail("challenge_mismatch", "auth_nonce HMAC verification failed", false)
+			return core.NewError(core.NumAuth, core.ErrAuth, "challenge nonce mismatch")
+		}
+	}
+
 	// Token validation
 	if h.config.Auth != nil {
 		_, err := h.config.Auth.Validate(msg.Token)
@@ -213,24 +284,30 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 			if h.config.Metrics != nil {
 				h.config.Metrics.AuthFailureTotal.Inc()
 			}
-			return err
+			return core.WrapError(core.NumAuth, core.ErrAuth, "token validation", err)
 		}
 	}
 
-	// Generate session keys
-	keys, err := core.GenerateSessionKeys()
+	// Generate session keys with the negotiated HMAC algorithm
+	if h.negotiated == nil {
+		h.sendAuthFail("internal_error", "no negotiation result", true)
+		return core.NewError(core.NumConfig, core.ErrConfig, "missing negotiation result")
+	}
+	keys, err := core.GenerateSessionKeys(h.negotiated.HMACAlgo)
 	if err != nil {
 		h.sendAuthFail("internal_error", "key generation failed", true)
-		return err
+		return core.WrapError(core.NumConfig, core.ErrConfig, "session key generation", err)
 	}
 	h.keys = keys
+	h.expiresAt.Store(time.Now().Add(core.DefaultSessionTTL).Unix())
 
 	// Send AUTH_OK
 	authOK := core.AuthOKMessage{
 		SessionID:     h.sessionID,
 		KeyID:         keys.KeyID,
 		HMACKey:       keys.HMACKeyBase64(),
-		ExpiresAtUnix: time.Now().Add(core.DefaultSessionTTL).Unix(),
+		HMACAlgo:      keys.HMACAlgo,
+		ExpiresAtUnix: h.expiresAt.Load(),
 	}
 	okPayload, err := json.Marshal(authOK)
 	if err != nil {
@@ -241,7 +318,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	}
 
 	if err := h.sm.Transition(core.ServerStateReady); err != nil {
-		slog.Warn("state transition failed", "session", h.sessionID, "to", core.ServerStateReady, "error", err)
+		return core.WrapError(core.NumSession, core.ErrSession, "transition to READY", err)
 	}
 	h.conn.SetAuthed(true)
 
@@ -293,8 +370,8 @@ func (h *ConnectionHandler) acceptDataStreams(ctx context.Context) {
 					h.handleDataStream(ctx, s)
 				}()
 			default:
-				_ = s.Close() // #nosec G104 -- rejecting stream, best-effort close
-				h.sendThrottle(1000, "too_many_streams", "max concurrent data streams exceeded")
+				_ = s.Close() // #nosec G104 -- rejecting excess stream, close is best-effort
+				h.sendThrottle(throttleRetryMs, "too_many_streams", "max concurrent data streams exceeded")
 			}
 		}
 	}
@@ -304,13 +381,23 @@ func (h *ConnectionHandler) handleDataStream(ctx context.Context, s *quic.Stream
 	defer s.Close()
 
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		f, err := core.Read(s, core.DefaultLimits())
 		if err != nil {
+			// 数据流读取错误，通知客户端以便立即重试
+			slog.Warn("data stream read error", "session", h.sessionID, "error", err)
+			h.sendError(core.CodeInvalidFrame, "data_stream_error", false)
 			return
 		}
 
 		if f.Header.Type != core.TypeBatch {
 			slog.Warn("unexpected frame type on data stream", "session", h.sessionID, "type", f.Header.Type)
+			h.sendError(core.CodeUnsupportedMessage, fmt.Sprintf("expected BATCH on data stream, got 0x%04x", f.Header.Type), false)
 			continue
 		}
 
@@ -322,14 +409,22 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	// Decode envelope
 	var env core.SecureEnvelope
 	if err := json.Unmarshal(payload, &env); err != nil {
-		h.sendNack(0, "invalid_envelope", err.Error(), false)
+		// envelope 无法解码时 seq/chunkID 未知，发送 ERROR 而非 NACK。
+		// 零值 NACK 会导致客户端 pendingAcks 无法清理，最终 inflight 死锁。
+		h.sendError(core.CodeDecodeFailed, fmt.Sprintf("invalid_envelope: %s", err), false)
+		return
+	}
+
+	// 检查会话是否过期
+	if h.expiresAt.Load() > 0 && time.Now().Unix() > h.expiresAt.Load() {
+		h.sendNack(env.Seq, env.ChunkID, "session_expired", "session TTL exceeded, please reconnect", false)
 		return
 	}
 
 	// Verify HMAC if enabled
-	if h.negotiated.HMACAlgo == "sha256" && h.keys != nil {
-		if !core.VerifyHMACSHA256(h.keys.HMACKey, &env) {
-			h.sendNack(env.Seq, "hmac_mismatch", "HMAC verification failed", false)
+	if h.negotiated.HMACAlgo != core.HMACAlgoNone && h.keys != nil {
+		if !core.VerifyHMAC(h.keys.HMACKey, &env) {
+			h.sendNack(env.Seq, env.ChunkID, "hmac_mismatch", "HMAC verification failed", false)
 			if h.config.Metrics != nil {
 				h.config.Metrics.HMACFailuresTotal.Inc()
 			}
@@ -340,31 +435,31 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	// Open envelope
 	batchPayload, err := core.Open(&env)
 	if err != nil {
-		h.sendNack(env.Seq, "envelope_open_error", err.Error(), true)
+		h.sendNack(env.Seq, env.ChunkID, "envelope_open_error", err.Error(), true)
 		return
 	}
 
 	// Decode batch message (protocol metadata wrapper)
 	var batchMsg core.BatchMessage
 	if err := json.Unmarshal(batchPayload, &batchMsg); err != nil {
-		h.sendNack(env.Seq, "invalid_batch", err.Error(), false)
+		h.sendNack(env.Seq, env.ChunkID, "invalid_batch", err.Error(), false)
 		return
 	}
 
 	if err := batchMsg.Validate(); err != nil {
-		h.sendNack(batchMsg.Seq, "batch_validation", err.Error(), false)
+		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "batch_validation", err.Error(), false)
 		return
 	}
 
 	// Decode SignalBatch from the batch payload
 	var signalBatch core.SignalBatch
 	if err := json.Unmarshal(batchMsg.Batch, &signalBatch); err != nil {
-		h.sendNack(batchMsg.Seq, "invalid_signal_batch", err.Error(), false)
+		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "invalid_signal_batch", err.Error(), false)
 		return
 	}
 
 	if err := signalBatch.Validate(); err != nil {
-		h.sendNack(batchMsg.Seq, "signal_validation", err.Error(), false)
+		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "signal_validation", err.Error(), false)
 		return
 	}
 
@@ -372,21 +467,27 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	dedupKey := core.Key(h.agentID, batchMsg.ChunkID)
 	existing := h.replay.SeenOrAdd(dedupKey)
 	if existing != nil {
-		// Already processed, resend ACK
-		h.sendAck(batchMsg.Seq, batchMsg.ChunkID, len(signalBatch.Signals), core.AckModeAccepted)
+		// Already processed — return correct ack_mode based on stored status.
+		ackMode := core.AckModeAccepted
+		if existing.Status == core.ReplayDurable {
+			ackMode = core.AckModeDurable
+		}
+		h.sendAck(batchMsg.Seq, batchMsg.ChunkID, len(signalBatch.Signals), ackMode)
 		return
 	}
 
 	// Process events
 	h.replay.Update(dedupKey, core.ReplayAccepted)
+	h.routeAndACK(ctx, dedupKey, &batchMsg, &signalBatch)
+}
 
-	// Route SignalBatch into the processing pipeline and determine ACK mode
-	ackMode := core.AckModeAccepted // default: accepted
+// routeAndACK routes the batch to the configured sink and sends the appropriate ACK response.
+func (h *ConnectionHandler) routeAndACK(ctx context.Context, dedupKey string, batchMsg *core.BatchMessage, signalBatch *core.SignalBatch) {
+	ackMode := core.AckModeAccepted
 
 	if h.config.Sink != nil {
 		if durable, ok := h.config.Sink.(core.DurableEventSink); ok {
-			// Use result-aware routing for correct ACK mode selection
-			result, err := durable.OnSignalBatchWithResult(ctx, h.agentID, &signalBatch)
+			result, err := durable.OnSignalBatchWithResult(ctx, h.agentID, signalBatch)
 			if err != nil {
 				slog.Warn("durable routing failed", "session", h.sessionID, "error", err)
 			} else {
@@ -395,8 +496,7 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 					ackMode = core.AckModeDurable
 					h.replay.Update(dedupKey, core.ReplayDurable)
 				case core.ACKStatusThrottle:
-					// Queue pressure critical - send THROTTLE frame instead of ACK
-					h.sendThrottle(1000, "queue_pressure", "queue pressure critical, retry later")
+					h.sendThrottle(throttleRetryMs, "queue_pressure", "queue pressure critical, retry later")
 					slog.Warn("throttling agent due to queue pressure",
 						"session", h.sessionID,
 						"agent", h.agentID,
@@ -405,16 +505,31 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 				default:
 					ackMode = core.AckModeAccepted
 				}
+
+				// Send WINDOW update when pressure state changes.
+				// Ignore empty Pressure (zero value — sink did not set it).
+				if result.Pressure != "" && result.Pressure != h.loadLastPressure() {
+					h.lastPressure.Store(result.Pressure)
+					b, e, by := pressureToWindow(result.Pressure)
+					h.window.Update(b, e, by)
+					h.sendWindowUpdate(b, e, by, string(result.Pressure))
+				}
 			}
 		} else {
-			// Fallback: basic sink without result feedback
-			if err := h.config.Sink.OnSignalBatch(ctx, h.agentID, &signalBatch); err != nil {
+			if err := h.config.Sink.OnSignalBatch(ctx, h.agentID, signalBatch); err != nil {
 				slog.Warn("event routing failed", "session", h.sessionID, "error", err)
+			}
+			// Check pressure even for basic EventSink.
+			pressure := h.config.Sink.OnPressure(h.agentID)
+			if pressure != "" && pressure != h.loadLastPressure() {
+				h.lastPressure.Store(pressure)
+				b, e, by := pressureToWindow(pressure)
+				h.window.Update(b, e, by)
+				h.sendWindowUpdate(b, e, by, string(pressure))
 			}
 		}
 	}
 
-	// Send ACK with the appropriate mode
 	h.sendAck(batchMsg.Seq, batchMsg.ChunkID, len(signalBatch.Signals), ackMode)
 
 	if h.config.Metrics != nil {
@@ -446,14 +561,15 @@ func (h *ConnectionHandler) sendAck(seq uint64, chunkID string, count int, ackMo
 		slog.Warn("marshal ack failed", "error", err)
 		return
 	}
-	if err := h.writeControl(core.TypeAck, core.FlagData, payload); err != nil {
+	if err := h.writeControl(core.TypeAck, core.FlagControl, payload); err != nil {
 		slog.Debug("write ack failed", "session", h.sessionID, "error", err)
 	}
 }
 
-func (h *ConnectionHandler) sendNack(seq uint64, code, reason string, retryable bool) {
+func (h *ConnectionHandler) sendNack(seq uint64, chunkID, code, reason string, retryable bool) {
 	nack := core.NackMessage{
 		Seq:       seq,
+		ChunkID:   chunkID,
 		Code:      code,
 		Reason:    reason,
 		Retryable: retryable,
@@ -463,7 +579,7 @@ func (h *ConnectionHandler) sendNack(seq uint64, code, reason string, retryable 
 		slog.Warn("marshal nack failed", "error", err)
 		return
 	}
-	if err := h.writeControl(core.TypeNack, core.FlagData, payload); err != nil {
+	if err := h.writeControl(core.TypeNack, core.FlagControl, payload); err != nil {
 		slog.Debug("write nack failed", "session", h.sessionID, "error", err)
 	}
 
@@ -483,12 +599,12 @@ func (h *ConnectionHandler) sendThrottle(retryDelayMs int, code, reason string) 
 		slog.Warn("marshal throttle failed", "error", err)
 		return
 	}
-	if err := h.writeControl(core.TypeThrottle, core.FlagData, payload); err != nil {
+	if err := h.writeControl(core.TypeThrottle, core.FlagControl, payload); err != nil {
 		slog.Debug("write throttle failed", "session", h.sessionID, "error", err)
 	}
 
 	if h.config.Metrics != nil {
-		h.config.Metrics.BatchesNackedTotal.Inc()
+		h.config.Metrics.ThrottledTotal.Inc()
 	}
 }
 
@@ -508,9 +624,9 @@ func (h *ConnectionHandler) sendAuthFail(code, reason string, retryable bool) {
 	}
 }
 
-func (h *ConnectionHandler) sendError(reason string, fatal bool) {
+func (h *ConnectionHandler) sendError(code, reason string, fatal bool) {
 	errMsg := core.ErrorMessage{
-		Code:      "protocol_error",
+		Code:      code,
 		Reason:    reason,
 		Fatal:     fatal,
 		Retryable: !fatal,
@@ -522,5 +638,41 @@ func (h *ConnectionHandler) sendError(reason string, fatal bool) {
 	}
 	if err := h.writeControl(core.TypeError, core.FlagControl, payload); err != nil {
 		slog.Debug("write error frame failed", "session", h.sessionID, "error", err)
+	}
+}
+
+// sendWindowUpdate sends a WINDOW frame to the client with updated flow-control limits.
+func (h *ConnectionHandler) sendWindowUpdate(batches, events int, maxBytes int64, reason string) {
+	win := core.WindowMessage{
+		MaxInflightBatches: batches,
+		MaxInflightEvents:  events,
+		MaxInflightBytes:   maxBytes,
+		Reason:             reason,
+	}
+	payload, err := json.Marshal(win)
+	if err != nil {
+		slog.Warn("marshal window failed", "error", err)
+		return
+	}
+	if err := h.writeControl(core.TypeWindow, core.FlagControl, payload); err != nil {
+		slog.Debug("write window failed", "session", h.sessionID, "error", err)
+	}
+	slog.Debug("window update sent",
+		"session", h.sessionID,
+		"batches", batches,
+		"events", events,
+		"bytes", maxBytes,
+		"reason", reason)
+}
+
+// pressureToWindow maps a PressureState to window dimensions.
+func pressureToWindow(pressure core.PressureState) (batches int, events int, maxBytes int64) {
+	switch pressure {
+	case core.PressureDegraded:
+		return windowMaxBatches / 2, windowMaxEvents / 2, windowMaxBytes / 2
+	case core.PressureCritical:
+		return windowMaxBatches / 10, windowMaxEvents / 10, windowMaxBytes / 10
+	default: // PressureNormal
+		return windowMaxBatches, windowMaxEvents, windowMaxBytes
 	}
 }

@@ -19,14 +19,14 @@ func TestNewClient(t *testing.T) {
 	}
 }
 
-// TestNewClientWithVersionPriority tests creating client with custom version priority.
-func TestNewClientWithVersionPriority(t *testing.T) {
+// TestNewClientWithVersion tests creating client with explicit version.
+func TestNewClientWithVersion(t *testing.T) {
 	creds := v1.ClientCredentials{
 		ServerName: "example.com",
 	}
 
 	client, err := NewClient(
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithServer("example.com:8080"),
 		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
@@ -41,33 +41,19 @@ func TestNewClientWithVersionPriority(t *testing.T) {
 		return
 	}
 
-	if len(client.cfg.Versions) != 1 {
-		t.Errorf("Versions count = %d, want 1", len(client.cfg.Versions))
-	}
-
-	if client.cfg.Versions[0] != Version1 {
-		t.Errorf("First version = %s, want %s", client.cfg.Versions[0], Version1)
+	if client.cfg.Version != Version1 {
+		t.Errorf("Version = %s, want %s", client.cfg.Version, Version1)
 	}
 }
 
 // TestNewClientInvalidVersion tests error handling for invalid version.
 func TestNewClientInvalidVersion(t *testing.T) {
 	_, err := NewClient(
-		WithVersionPriority([]string{"v3", "invalid"}),
+		WithVersion("v3"),
 	)
 
 	if err == nil {
 		t.Error("Expected error for invalid version, got nil")
-	}
-}
-
-// TestNewClientNoVersions tests error handling when no versions specified.
-func TestNewClientNoVersions(t *testing.T) {
-	// Create client without credentials
-	_, err := NewClient()
-	// Expected to fail without credentials
-	if err == nil {
-		t.Error("NewClient() without credentials should return error")
 	}
 }
 
@@ -78,7 +64,7 @@ func TestNewClientMissingAgentID(t *testing.T) {
 	}
 
 	_, err := NewClient(
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithServer("example.com:8080"),
 		WithV1Credentials(creds),
 		// AgentID intentionally omitted
@@ -98,7 +84,7 @@ func TestNewClientMissingServer(t *testing.T) {
 	}
 
 	_, err := NewClient(
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
 		// Server intentionally omitted
@@ -118,7 +104,7 @@ func TestClientSendBatchBeforeConnect(t *testing.T) {
 	}
 
 	client, err := NewClient(
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithServer("example.com:8080"),
 		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
@@ -141,7 +127,7 @@ func TestClientCloseBeforeConnect(t *testing.T) {
 	}
 
 	client, err := NewClient(
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithServer("example.com:8080"),
 		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
@@ -155,8 +141,8 @@ func TestClientCloseBeforeConnect(t *testing.T) {
 		t.Errorf("Close before Connect should not error, got %v", err)
 	}
 
-	if client.ActiveVersion() != "" {
-		t.Error("ActiveVersion should be empty after Close")
+	if client.ActiveVersion() != Version1 {
+		t.Errorf("ActiveVersion = %s, want %s", client.ActiveVersion(), Version1)
 	}
 }
 
@@ -167,7 +153,7 @@ func TestClientActiveVersion(t *testing.T) {
 	}
 
 	client, err := NewClient(
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithServer("example.com:8080"),
 		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
@@ -176,8 +162,8 @@ func TestClientActiveVersion(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	if client.ActiveVersion() != "" {
-		t.Error("ActiveVersion should be empty before Connect")
+	if client.ActiveVersion() != Version1 {
+		t.Errorf("ActiveVersion = %s, want %s", client.ActiveVersion(), Version1)
 	}
 }
 
@@ -188,7 +174,7 @@ func TestClientState(t *testing.T) {
 	}
 
 	client, err := NewClient(
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithServer("example.com:8080"),
 		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),
@@ -198,8 +184,8 @@ func TestClientState(t *testing.T) {
 	}
 
 	state := client.State()
-	if state != "disconnected" {
-		t.Errorf("State = %s, want 'disconnected'", state)
+	if state != "DISCONNECTED" {
+		t.Errorf("State = %s, want 'DISCONNECTED'", state)
 	}
 }
 
@@ -212,7 +198,7 @@ func TestWithServer(t *testing.T) {
 	client, err := NewClient(
 		WithServer("example.com:8080"),
 		WithAgent("test-agent", "test-host", "test-token"),
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithV1Credentials(creds),
 	)
 	if err != nil {
@@ -233,7 +219,7 @@ func TestWithAgent(t *testing.T) {
 	client, err := NewClient(
 		WithAgent("agent-1", "host-1", "token-123"),
 		WithServer("example.com:8080"),
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithV1Credentials(creds),
 	)
 
@@ -255,15 +241,15 @@ func TestWithAgent(t *testing.T) {
 // TestClientConfigStructure tests ClientConfig structure.
 func TestClientConfigStructure(t *testing.T) {
 	cfg := ClientConfig{
-		Versions: []string{Version1, Version2},
+		Version:  Version1,
 		Server:   "example.com:8080",
 		AgentID:  "test-agent",
 		Hostname: "test-host",
 		Token:    "test-token",
 	}
 
-	if len(cfg.Versions) != 2 {
-		t.Errorf("Versions count = %d, want 2", len(cfg.Versions))
+	if cfg.Version != Version1 {
+		t.Errorf("Version = %s, want %s", cfg.Version, Version1)
 	}
 	if cfg.Server == "" {
 		t.Error("Server should not be empty")
@@ -280,7 +266,7 @@ func TestClientOptionsChain(t *testing.T) {
 	}
 
 	client, err := NewClient(
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithServer("example.com:8080"),
 		WithAgent("agent-1", "host-1", "token-1"),
 		WithV1Credentials(creds),
@@ -308,7 +294,7 @@ func TestClientConcurrency(t *testing.T) {
 	}
 
 	client, err := NewClient(
-		WithVersionPriority([]string{Version1}),
+		WithVersion(Version1),
 		WithServer("example.com:8080"),
 		WithAgent("test-agent", "test-host", "test-token"),
 		WithV1Credentials(creds),

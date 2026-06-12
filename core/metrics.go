@@ -13,12 +13,15 @@ type MBTAMetrics struct {
 	BatchesSentTotal   prometheus.Counter
 	BatchesAckedTotal  prometheus.Counter
 	BatchesNackedTotal prometheus.Counter
+	ThrottledTotal     prometheus.Counter
 	PartialAckTotal    prometheus.Counter
 
 	SpoolRecords prometheus.Gauge
 	SpoolBytes   prometheus.Gauge
 
 	ReplayCacheHitsTotal prometheus.Counter
+
+		ReplayCacheEvictions prometheus.Counter
 
 	HMACFailuresTotal    prometheus.Counter
 	DecryptFailuresTotal prometheus.Counter
@@ -28,6 +31,16 @@ type MBTAMetrics struct {
 	WindowCurrentBytes   prometheus.Gauge
 
 	ThrottleSecondsTotal prometheus.Counter
+
+	// Key SLI histograms
+	BatchLatencySeconds prometheus.Histogram // SendBatch → ACK latency
+	BatchSizeEvents     prometheus.Histogram // events per batch distribution
+	BatchSizeBytes      prometheus.Histogram // bytes per batch distribution
+	ConnectionDuration  prometheus.Histogram // connection lifetime
+
+	// Spool health counters
+	SpoolFlushErrors  prometheus.Counter // disk flush failures
+	SpoolSizeLimitHit prometheus.Counter // disk protection triggers
 }
 
 // New creates and registers all MBTA metrics with the given registerer.
@@ -68,6 +81,11 @@ func New(reg prometheus.Registerer) *MBTAMetrics {
 			Namespace: namespace,
 			Name:      "batches_nacked_total",
 			Help:      "Total number of batches rejected (NACK)",
+		}),
+		ThrottledTotal: newCounter(reg, prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "throttled_total",
+			Help:      "Total number of THROTTLE frames sent to clients",
 		}),
 		PartialAckTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
@@ -119,6 +137,40 @@ func New(reg prometheus.Registerer) *MBTAMetrics {
 			Name:      "throttle_seconds_total",
 			Help:      "Total seconds the client has been throttled",
 		}),
+		BatchLatencySeconds: newHistogram(reg, prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "batch_latency_seconds",
+			Help:      "Latency from SendBatch to ACK in seconds",
+			Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10},
+		}),
+		BatchSizeEvents: newHistogram(reg, prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "batch_size_events",
+			Help:      "Number of events per batch",
+			Buckets:   []float64{1, 10, 50, 100, 500, 1000, 5000, 10000},
+		}),
+		BatchSizeBytes: newHistogram(reg, prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "batch_size_bytes",
+			Help:      "Payload bytes per batch",
+			Buckets:   []float64{1024, 10240, 102400, 1048576, 4194304, 8388608, 16777216},
+		}),
+		ConnectionDuration: newHistogram(reg, prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "connection_duration_seconds",
+			Help:      "Connection lifetime in seconds",
+			Buckets:   []float64{60, 300, 900, 1800, 3600, 21600, 43200, 86400},
+		}),
+		SpoolFlushErrors: newCounter(reg, prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "spool_flush_errors_total",
+			Help:      "Total number of spool disk flush errors",
+		}),
+		SpoolSizeLimitHit: newCounter(reg, prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "spool_size_limit_hit_total",
+			Help:      "Total number of times the spool size limit was reached",
+		}),
 	}
 
 	return m
@@ -134,4 +186,10 @@ func newGauge(reg prometheus.Registerer, opts prometheus.GaugeOpts) prometheus.G
 	g := prometheus.NewGauge(opts)
 	reg.MustRegister(g)
 	return g
+}
+
+func newHistogram(reg prometheus.Registerer, opts prometheus.HistogramOpts) prometheus.Histogram {
+	h := prometheus.NewHistogram(opts)
+	reg.MustRegister(h)
+	return h
 }

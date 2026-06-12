@@ -39,7 +39,10 @@ type Client struct {
 	throttle   *core.ThrottleState
 	picker     StreamPicker
 	controlStr *quic.Stream
+	controlMu  sync.Mutex // protects concurrent writes to controlStr
 	sessionID  string
+	challengeNonce string // server challenge from HELLO_ACK
+	expiresAt      time.Time // 会话过期时间，从 AUTH_OK 的 expires_at_unix 获取
 
 	// sendMu serializes SendBatch calls so that the throttle/window check
 	// and the actual write happen atomically. Without this lock, concurrent
@@ -53,14 +56,20 @@ type Client struct {
 	// The handler receives the chunkID and ack_mode (e.g. "durable", "accepted").
 	ackHandler atomic.Pointer[func(chunkID, ackMode string)]
 
-	cancelACK context.CancelFunc
+	ackTimeout        time.Duration // max time to wait for ACK (default 5 min)
+	heartbeatInterval time.Duration // PING 发送间隔（从 HELLO_ACK 获取，默认 30s）
+	cancelACK         context.CancelFunc
+	cancelReaper      context.CancelFunc
+	cancelHeartbeat   context.CancelFunc
+	drainCh           chan struct{} // signaled when pendingAcks reaches 0 during drain
 }
 
 type pendingBatch struct {
-	Seq    uint64
-	Events int
-	Bytes  int64
-	SentAt time.Time
+	Seq      uint64
+	Events   int
+	Bytes    int64
+	SentAt   time.Time
+	Deadline time.Time // when this batch expires if no ACK received
 }
 
 // quicStreamWrapper adapts *quic.Stream to the DataStream interface.
@@ -75,12 +84,14 @@ func (w *quicStreamWrapper) Write(p []byte) (int, error) { return w.stream.Write
 // NewClient creates a new MBTA client.
 func NewClient(cfg ClientConfig) (*Client, error) {
 	c := &Client{
-		config:   cfg,
-		sm:       core.NewStateMachine(),
-		seq:      core.NewSeqGenerator(),
-		inflight: &core.Inflight{},
-		window:   core.NewWindow(100, 10000, 16*1024*1024),
-		throttle: &core.ThrottleState{},
+		config:     cfg,
+		sm:         core.NewStateMachine(),
+		seq:        core.NewSeqGenerator(),
+		inflight:   &core.Inflight{},
+		window:     core.NewWindow(100, 10000, 16*1024*1024),
+		throttle:   &core.ThrottleState{},
+		ackTimeout: 5 * time.Minute,
+		drainCh:    make(chan struct{}, 1),
 	}
 
 	if cfg.SpoolDir != "" {
@@ -98,7 +109,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 func (c *Client) Connect(ctx context.Context) error {
 	// Dial QUIC
 	if err := c.sm.Transition(core.StateConnecting); err != nil {
-		slog.Warn("state transition failed", "to", core.StateConnecting, "error", err)
+		return core.WrapError(core.NumSession, core.ErrSession, "transition to CONNECTING", err)
 	}
 
 	conn, err := Dial(ctx, c.config.Transport)
@@ -114,7 +125,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 	c.controlStr = ctrlStr
 	if err := c.sm.Transition(core.StateControlStreamOpen); err != nil {
-		slog.Warn("state transition failed", "to", core.StateControlStreamOpen, "error", err)
+		return core.WrapError(core.NumSession, core.ErrSession, "transition to CONTROL_STREAM_OPEN", err)
 	}
 
 	// Send HELLO
@@ -130,7 +141,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.sessionID = helloAck.SessionID
 	if err := c.sm.Transition(core.StateHelloAcked); err != nil {
-		slog.Warn("state transition failed", "to", core.StateHelloAcked, "error", err)
+		return core.WrapError(core.NumSession, core.ErrSession, "transition to HELLO_ACKED", err)
 	}
 
 	// Update window from HELLO_ACK
@@ -139,6 +150,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		helloAck.InitialWindow.MaxInflightEvents,
 		helloAck.InitialWindow.MaxInflightBytes,
 	)
+
+	// Store heartbeat interval from server
+	if helloAck.HeartbeatIntervalSec > 0 {
+		c.heartbeatInterval = time.Duration(helloAck.HeartbeatIntervalSec) * time.Second
+	} else {
+		c.heartbeatInterval = 30 * time.Second
+	}
 
 	// Send AUTH
 	if err := c.sendAuth(); err != nil {
@@ -156,10 +174,25 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.cancelACK = cancel
 	go c.readControlLoop(ackCtx)
 
+	// Start ACK timeout reaper — reclaims inflight slots for batches that
+	// never received an ACK within the configured timeout.
+	reaperCtx, cancelReaper := context.WithCancel(ctx)
+	c.cancelReaper = cancelReaper
+	go c.ackReaper(reaperCtx)
+
+	// Start heartbeat — sends periodic PING frames to keep the connection alive.
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
+	c.cancelHeartbeat = cancelHeartbeat
+	go c.heartbeatLoop(heartbeatCtx)
+
 	// Open initial data stream
 	if c.picker == nil {
 		ds, err := c.conn.OpenDataStream(ctx)
 		if err != nil {
+			// Clean up goroutines started above before returning error.
+			cancel()
+			cancelReaper()
+			cancelHeartbeat()
 			return core.WrapError(core.NumStream, core.ErrStream, "open data stream", err)
 		}
 		c.picker = NewSingleStream(&quicStreamWrapper{stream: ds, idx: 0})
@@ -202,7 +235,7 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 		ChunkID: chunkID,
 		Tag:     tag,
 		Source:  source,
-		Batch:   batchJSON,
+		Batch:   json.RawMessage(batchJSON),
 	}
 	batchPayload, err := json.Marshal(batch)
 	if err != nil {
@@ -265,10 +298,11 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	// Track inflight — still under sendMu, so the window check remains valid.
 	c.inflight.Add(batchEvents, batchBytes)
 	c.pendingAcks.Store(chunkID, &pendingBatch{
-		Seq:    seq,
-		Events: batchEvents,
-		Bytes:  batchBytes,
-		SentAt: time.Now(),
+		Seq:      seq,
+		Events:   batchEvents,
+		Bytes:    batchBytes,
+		SentAt:   time.Now(),
+		Deadline: time.Now().Add(c.ackTimeout),
 	})
 
 	slog.Debug("batch sent", "seq", seq, "chunk", chunkID, "events", batchEvents)
@@ -293,12 +327,49 @@ func (c *Client) Close() error {
 	if c.cancelACK != nil {
 		c.cancelACK()
 	}
+	if c.cancelReaper != nil {
+		c.cancelReaper()
+	}
+	if c.cancelHeartbeat != nil {
+		c.cancelHeartbeat()
+	}
+
+	// Transition to Draining state.
+	if err := c.sm.Transition(core.StateDraining); err != nil {
+		slog.Debug("drain transition skipped", "error", err)
+	}
+
+	// Wait for drain with timeout. Event-driven: drainCh signals when
+	// pendingAcks reaches 0. If the timeout fires first, force-close.
+	if c.sm.State() == core.StateDraining {
+		drainDeadline := time.NewTimer(core.DefaultDrainTimeout)
+		defer drainDeadline.Stop()
+		for c.sm.State() == core.StateDraining {
+			select {
+			case <-drainDeadline.C:
+				slog.Warn("drain timeout exceeded, force-closing")
+				_ = c.sm.Transition(core.StateClosed)
+			case <-c.drainCh:
+				_ = c.sm.Transition(core.StateClosed)
+			}
+		}
+	}
+
+	// Clear pending ACKs to release references.
+	c.pendingAcks.Range(func(key, _ any) bool {
+		c.pendingAcks.Delete(key)
+		return true
+	})
 
 	if c.controlStr != nil {
+		c.controlMu.Lock()
 		closeMsg := core.CloseMessage{Code: "shutdown", Reason: "client closing"}
 		if payload, err := json.Marshal(closeMsg); err == nil {
-			_ = core.Write(c.controlStr, core.TypeClose, core.FlagControl, payload)
+			if err := core.Write(c.controlStr, core.TypeClose, core.FlagControl, payload); err != nil {
+				slog.Debug("write close frame", "error", err)
+			}
 		}
+		c.controlMu.Unlock()
 	}
 
 	// Reset inflight counters so stale state does not block future sends.
@@ -327,4 +398,85 @@ func (c *Client) SessionID() string {
 // State returns the current client state.
 func (c *Client) State() core.State {
 	return c.sm.State()
+}
+
+// ackReaper periodically scans pendingAcks and removes entries that have exceeded
+// their deadline. Reclaimed inflight slots allow new batches to be sent.
+func (c *Client) ackReaper(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			c.pendingAcks.Range(func(key, val any) bool {
+				pb, ok := val.(*pendingBatch)
+				if !ok {
+					return true
+				}
+				if !pb.Deadline.IsZero() && now.After(pb.Deadline) {
+					c.pendingAcks.Delete(key)
+					c.inflight.Remove(pb.Events, pb.Bytes)
+					slog.Warn("reaped expired pending ACK",
+						"chunk", key,
+						"seq", pb.Seq,
+						"age", now.Sub(pb.SentAt).Round(time.Second))
+				}
+				return true
+			})
+				c.notifyDrainIfEmpty()
+		}
+	}
+}
+
+// notifyDrainIfEmpty signals the drain channel when no pending ACKs remain.
+// This is called after each ACK/NACK/reaper removal to unblock the Close drain loop.
+func (c *Client) notifyDrainIfEmpty() {
+	pending := 0
+	c.pendingAcks.Range(func(_, _ any) bool {
+		pending++
+		return false // one hit is enough to know it's non-empty
+	})
+	if pending == 0 {
+		select {
+		case c.drainCh <- struct{}{}:
+		default: // already signaled, no need to block
+		}
+	}
+}
+
+// heartbeatLoop periodically sends PING frames to keep the connection alive.
+// The interval is negotiated with the server in HELLO_ACK (default 30s).
+func (c *Client) heartbeatLoop(ctx context.Context) {
+	if c.heartbeatInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(c.heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ping := core.PingMessage{
+				TimeUnixMs: time.Now().UnixMilli(),
+				Nonce:      uuid.Must(uuid.NewV7()).String(),
+			}
+			payload, err := json.Marshal(ping)
+			if err != nil {
+				slog.Debug("marshal ping failed", "error", err)
+				continue
+			}
+			c.controlMu.Lock()
+			if err := core.Write(c.controlStr, core.TypePing, core.FlagControl, payload); err != nil {
+				slog.Debug("write ping failed", "error", err)
+				return
+			}
+			c.controlMu.Unlock()
+		}
+	}
 }

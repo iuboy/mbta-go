@@ -44,6 +44,7 @@ type HelloAckMessage struct {
 	MaxEventBytes        int           `json:"max_event_bytes"`
 	MaxBatchEvents       int           `json:"max_batch_events"`
 	InitialWindow        WindowMessage `json:"initial_window"`
+	ChallengeNonce       string        `json:"challenge_nonce,omitempty"` // 服务端生成的挑战，客户端需回传
 }
 
 // Validate 检查HelloAckMessage的有效性。
@@ -85,8 +86,9 @@ func (m *AuthMessage) Validate() error {
 type AuthOKMessage struct {
 	SessionID        string `json:"session_id"`
 	KeyID            string `json:"key_id"`
-	HMACKey          string `json:"hmac_key,omitempty"` // Base64(32 bytes)
-	SM4Key           string `json:"sm4_key,omitempty"`  // Base64(16 bytes)
+	HMACKey          string `json:"hmac_key,omitempty"`  // Base64(32 bytes)
+	HMACAlgo         string `json:"hmac_algo,omitempty"` // "sha256" or "sm3"
+	SM4Key           string `json:"sm4_key,omitempty"`   // Base64(16 bytes)
 	ServerSM2CertPEM string `json:"server_sm2_cert_pem,omitempty"`
 	ExpiresAtUnix    int64  `json:"expires_at_unix,omitempty"`
 }
@@ -100,11 +102,11 @@ type AuthFailMessage struct {
 
 // BatchMessage carries a batch of events inside the SecureEnvelope payload.
 type BatchMessage struct {
-	Seq     uint64 `json:"seq"`
-	ChunkID string `json:"chunk_id"`
-	Tag     string `json:"tag,omitempty"`
-	Source  string `json:"source,omitempty"`
-	Batch   []byte `json:"batch"` // 原始 SignalBatch JSON（延迟解码）
+	Seq     uint64          `json:"seq"`
+	ChunkID string          `json:"chunk_id"`
+	Tag     string          `json:"tag,omitempty"`
+	Source  string          `json:"source,omitempty"`
+	Batch   json.RawMessage `json:"batch"` // 原始 SignalBatch JSON（延迟解码）
 }
 
 // Validate 检查BatchMessage的有效性。
@@ -117,6 +119,9 @@ func (m *BatchMessage) Validate() error {
 	}
 	if len(m.Batch) == 0 {
 		return NewError(NumValidation, ErrValidation, "batch must not be empty")
+	}
+	if !json.Valid(m.Batch) {
+		return NewError(NumValidation, ErrValidation, "batch must be valid JSON")
 	}
 	return nil
 }
@@ -133,7 +138,7 @@ type AckMessage struct {
 // NackMessage rejects an entire batch (S→C).
 type NackMessage struct {
 	Seq          uint64 `json:"seq"`
-	ChunkID      string `json:"chunk_id,omitempty"`
+	ChunkID      string `json:"chunk_id"`
 	Code         string `json:"code"`
 	Reason       string `json:"reason"`
 	Retryable    bool   `json:"retryable"`

@@ -3,9 +3,11 @@ package v1
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/iuboy/mbta-go/core"
 )
@@ -21,25 +23,39 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmpName := tmp.Name()
 
 	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		if cerr := tmp.Close(); cerr != nil {
+			slog.Debug("temp file close error", "path", tmpName, "error", cerr)
+		}
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
+		}
 		return core.WrapError(core.NumSpool, core.ErrSpool, "write temp file", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		if cerr := tmp.Close(); cerr != nil {
+			slog.Debug("temp file close error", "path", tmpName, "error", cerr)
+		}
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
+		}
 		return core.WrapError(core.NumSpool, core.ErrSpool, "sync temp file", err)
 	}
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
+		}
 		return core.WrapError(core.NumSpool, core.ErrSpool, "close temp file", err)
 	}
 	if err := os.Chmod(tmpName, perm); err != nil {
-		_ = os.Remove(tmpName)
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
+		}
 		return core.WrapError(core.NumSpool, core.ErrSpool, "chmod temp file", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
+		}
 		return core.WrapError(core.NumSpool, core.ErrSpool, "rename temp file", err)
 	}
 	return nil
@@ -66,16 +82,61 @@ type Batch struct {
 	AttemptCount    int      `json:"attempt_count"`
 }
 
+// SpoolOption configures spool behavior.
+type SpoolOption func(*Spool)
+
+// WithFlushInterval sets the interval for periodic disk flushes.
+// Default is 500ms. Set to 0 to disable background flushing (synchronous mode).
+func WithFlushInterval(d time.Duration) SpoolOption {
+	return func(s *Spool) {
+		s.flushInterval = d
+	}
+}
+
+// WithMaxSize sets the maximum estimated spool size in bytes.
+// When the spool exceeds this limit, Put/PutBatch return an error.
+// Default is 512 MiB. Set to 0 to disable the size limit.
+func WithMaxSize(bytes int64) SpoolOption {
+	return func(s *Spool) {
+		s.maxSize = bytes
+	}
+}
+
 // Spool stores events durably before they are ACKed.
+//
+// NOTE: 当前实现使用全量 JSON 重写（每次 flush 重写整个文件）。
+// 当 spool 接近 512 MiB 上限时，这会成为性能瓶颈。
+// 未来改进方向：
+//   1. 仅 flush dirty records（增量写入）
+//   2. 使用 append-only 格式 + 定期 compaction
+//   3. 使用更高效的序列化格式（如 msgpack 或 protobuf）
+// When flushInterval > 0, writes are buffered and flushed periodically by a
+// background goroutine. When flushInterval == 0, every mutation flushes
+// synchronously to disk (legacy behaviour).
 type Spool struct {
 	mu      sync.Mutex
 	dir     string
 	records map[string]*Record // keyed by RecordID
 	batches map[string]*Batch  // keyed by ChunkID
+
+	// Buffered flush fields
+	dirty         bool
+	dirtyRecords  bool
+	dirtyBatches  bool
+	flushInterval time.Duration
+	stopCh        chan struct{}
+	doneCh        chan struct{}
+
+	// Disk protection
+	maxSize int64 // maximum estimated spool size (default 512 MiB)
 }
 
+const defaultSpoolMaxSize int64 = 512 * 1024 * 1024 // 512 MiB
+
 // New creates or opens a spool in the given directory.
-func New(dir string) (*Spool, error) {
+// By default, writes are buffered and flushed every 500ms.
+// Pass WithFlushInterval(0) to flush synchronously on every mutation.
+func New(dir string, opts ...SpoolOption) (*Spool, error) {
 	// Validate directory to prevent path traversal.
 	cleanDir := filepath.Clean(dir)
 	if cleanDir != dir {
@@ -87,13 +148,29 @@ func New(dir string) (*Spool, error) {
 	}
 
 	s := &Spool{
-		dir:     dir,
-		records: make(map[string]*Record),
-		batches: make(map[string]*Batch),
+		dir:           dir,
+		records:       make(map[string]*Record),
+		batches:       make(map[string]*Batch),
+		flushInterval: 500 * time.Millisecond,
+		maxSize:       defaultSpoolMaxSize,
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
+	}
+
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	if err := s.load(); err != nil {
 		return nil, core.WrapError(core.NumSpool, core.ErrSpool, "load spool", err)
+	}
+
+	// Start background flush loop when buffered mode is enabled.
+	if s.flushInterval > 0 {
+		go s.flushLoop()
+	} else {
+		// Synchronous mode: no background goroutine.
+		close(s.doneCh)
 	}
 
 	return s, nil
@@ -104,8 +181,18 @@ func (s *Spool) Put(rec Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Disk protection: check size before write.
+	if s.maxSize > 0 && s.estimatedSize() >= s.maxSize {
+		return core.NewError(core.NumSpool, core.ErrSpool, "spool size limit exceeded")
+	}
+
 	s.records[rec.RecordID] = &rec
-	return s.flushRecords()
+
+	if s.flushInterval == 0 {
+		return s.flushRecords()
+	}
+	s.markDirty(true, false)
+	return nil
 }
 
 // PutBatch stores multiple records and creates a batch.
@@ -113,11 +200,21 @@ func (s *Spool) PutBatch(records []Record, batch Batch) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Disk protection: check size before write.
+	if s.maxSize > 0 && s.estimatedSize() >= s.maxSize {
+		return core.NewError(core.NumSpool, core.ErrSpool, "spool size limit exceeded")
+	}
+
 	for i := range records {
 		s.records[records[i].RecordID] = &records[i]
 	}
 	s.batches[batch.ChunkID] = &batch
-	return s.flushAll()
+
+	if s.flushInterval == 0 {
+		return s.flushAll()
+	}
+	s.markDirty(true, true)
+	return nil
 }
 
 // DeleteRecords removes records after durable ACK.
@@ -128,7 +225,12 @@ func (s *Spool) DeleteRecords(ids []string) error {
 	for _, id := range ids {
 		delete(s.records, id)
 	}
-	return s.flushRecords()
+
+	if s.flushInterval == 0 {
+		return s.flushRecords()
+	}
+	s.markDirty(true, false)
+	return nil
 }
 
 // DeleteBatch removes a batch entry.
@@ -137,7 +239,12 @@ func (s *Spool) DeleteBatch(chunkID string) error {
 	defer s.mu.Unlock()
 
 	delete(s.batches, chunkID)
-	return s.flushBatches()
+
+	if s.flushInterval == 0 {
+		return s.flushBatches()
+	}
+	s.markDirty(false, true)
+	return nil
 }
 
 // PendingRecords returns all unACKed records.
@@ -169,6 +276,126 @@ func (s *Spool) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.records)
+}
+
+// Sync flushes any dirty data to disk immediately.
+// Call this when durability is required before returning to the caller.
+func (s *Spool) Sync() error {
+	s.mu.Lock()
+	if !s.dirty {
+		s.mu.Unlock()
+		return nil
+	}
+	dirtyRec := s.dirtyRecords
+	dirtyBat := s.dirtyBatches
+	s.dirty = false
+	s.dirtyRecords = false
+	s.dirtyBatches = false
+	s.mu.Unlock()
+
+	if dirtyRec {
+		if err := s.flushRecords(); err != nil {
+			return err
+		}
+	}
+	if dirtyBat {
+		if err := s.flushBatches(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Close stops the background flush goroutine and performs a final flush.
+// The Spool must not be used after Close.
+func (s *Spool) Close() error {
+	if s.flushInterval > 0 {
+		close(s.stopCh)
+		<-s.doneCh
+	}
+
+	// Final synchronous flush.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flushAll()
+}
+
+// markDirty sets the dirty flags. Must be called with s.mu held.
+func (s *Spool) markDirty(records, batches bool) {
+	s.dirty = true
+	if records {
+		s.dirtyRecords = true
+	}
+	if batches {
+		s.dirtyBatches = true
+	}
+}
+
+// flushLoop runs in a background goroutine, periodically flushing dirty data.
+func (s *Spool) flushLoop() {
+	defer close(s.doneCh)
+
+	ticker := time.NewTicker(s.flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.flushIfNeeded()
+		case <-s.stopCh:
+			// Final flush on shutdown.
+			s.flushIfNeeded()
+			return
+		}
+	}
+}
+
+// flushIfNeeded flushes dirty data to disk.
+// Snapshot is taken under the lock; I/O happens outside the lock.
+func (s *Spool) flushIfNeeded() {
+	s.mu.Lock()
+	if !s.dirty {
+		s.mu.Unlock()
+		return
+	}
+
+	dirtyRec := s.dirtyRecords
+	dirtyBat := s.dirtyBatches
+	s.dirty = false
+	s.dirtyRecords = false
+	s.dirtyBatches = false
+
+	var recordsData, batchesData []byte
+	var err error
+	if dirtyRec {
+		recordsData, err = json.Marshal(s.records)
+		if err != nil {
+			s.mu.Unlock()
+			slog.Error("flush: marshal records", "error", err)
+			return
+		}
+	}
+	if dirtyBat {
+		batchesData, err = json.Marshal(s.batches)
+		if err != nil {
+			s.mu.Unlock()
+			slog.Error("flush: marshal batches", "error", err)
+			return
+		}
+	}
+	s.mu.Unlock()
+
+	// Write outside the lock (writeFileAtomic is already atomic).
+	if recordsData != nil {
+		if err := writeFileAtomic(filepath.Join(s.dir, "records.json"), recordsData, 0600); err != nil {
+			slog.Error("flush: write records", "error", err)
+		}
+	}
+	if batchesData != nil {
+		if err := writeFileAtomic(filepath.Join(s.dir, "batches.json"), batchesData, 0600); err != nil {
+			slog.Error("flush: write batches", "error", err)
+		}
+	}
 }
 
 func (s *Spool) load() error {
@@ -216,4 +443,19 @@ func (s *Spool) flushAll() error {
 		return err
 	}
 	return s.flushBatches()
+}
+
+// estimatedSize returns a rough estimate of the spool's memory footprint in bytes.
+// Must be called with s.mu held.
+func (s *Spool) estimatedSize() int64 {
+	var size int64
+	for _, r := range s.records {
+		// Approximate: RecordID + AgentID + overhead per record.
+		size += int64(len(r.RecordID) + len(r.AgentID) + 256)
+	}
+	for _, b := range s.batches {
+		// Approximate: ChunkID + RecordIDs + overhead per batch.
+		size += int64(len(b.ChunkID) + len(b.RecordIDs)*36 + 128)
+	}
+	return size
 }

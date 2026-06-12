@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/iuboy/pollux-go/sm3"
 )
 
 // EnvelopeVersion is the current wire-format version for secure envelopes.
@@ -62,6 +65,15 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 		HMACAlgo:        params.HMACAlgo,
 	}
 
+	// Step 0: 当 HMAC 启用时，生成随机 nonce 增强防重放保护。
+	if params.HMACAlgo == HMACAlgoSHA256 || params.HMACAlgo == HMACAlgoSM3 {
+		nonceBytes := make([]byte, 16)
+		if _, err := rand.Read(nonceBytes); err != nil {
+			return nil, WrapError(NumEnvelope, ErrEnvelope, "generate nonce", err)
+		}
+		env.Nonce = base64.StdEncoding.EncodeToString(nonceBytes)
+	}
+
 	// Step 1: Compress
 	processed := batchPayload
 	if params.Compression == CompressionGzip {
@@ -83,9 +95,14 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 	env.Payload = base64.StdEncoding.EncodeToString(processed)
 
 	// Step 4: HMAC
-	if params.HMACAlgo == HMACAlgoSHA256 {
+	switch params.HMACAlgo {
+	case HMACAlgoSHA256:
 		signingBytes := CanonicalSigningString(env)
 		mac := computeHMACSHA256(params.HMACKey, signingBytes)
+		env.MAC = base64.StdEncoding.EncodeToString(mac)
+	case HMACAlgoSM3:
+		signingBytes := CanonicalSigningString(env)
+		mac := computeHMACSM3(params.HMACKey, signingBytes)
 		env.MAC = base64.StdEncoding.EncodeToString(mac)
 	}
 
@@ -121,7 +138,13 @@ func computeHMACSHA256(key, data []byte) []byte {
 	return h.Sum(nil)
 }
 
-// VerifyHMACSHA256 checks the MAC against the envelope.
+func computeHMACSM3(key, data []byte) []byte {
+	h := hmac.New(sm3.New, key)
+	h.Write(data)
+	return h.Sum(nil)
+}
+
+// VerifyHMACSHA256 checks the MAC against the envelope using HMAC-SHA256.
 func VerifyHMACSHA256(key []byte, env *SecureEnvelope) bool {
 	signingBytes := CanonicalSigningString(env)
 	expected := computeHMACSHA256(key, signingBytes)
@@ -131,6 +154,31 @@ func VerifyHMACSHA256(key []byte, env *SecureEnvelope) bool {
 		return false
 	}
 	return hmac.Equal(got, expected)
+}
+
+// VerifyHMACSM3 checks the MAC against the envelope using HMAC-SM3.
+func VerifyHMACSM3(key []byte, env *SecureEnvelope) bool {
+	signingBytes := CanonicalSigningString(env)
+	expected := computeHMACSM3(key, signingBytes)
+
+	got, err := base64.StdEncoding.DecodeString(env.MAC)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(got, expected)
+}
+
+// VerifyHMAC checks the MAC using the algorithm specified in the envelope.
+// Returns false if the algorithm is unknown or verification fails.
+func VerifyHMAC(key []byte, env *SecureEnvelope) bool {
+	switch env.HMACAlgo {
+	case HMACAlgoSHA256:
+		return VerifyHMACSHA256(key, env)
+	case HMACAlgoSM3:
+		return VerifyHMACSM3(key, env)
+	default:
+		return false
+	}
 }
 
 // MaxDecompressedSize limits decompressed payload to 100 MB to prevent zip-bomb attacks.

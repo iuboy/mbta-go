@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -33,6 +34,9 @@ const (
 	flagReservedMask byte = 0xF0 // bits 4-7 must be zero
 )
 
+// magicBytes caches the Magic string as a []byte for zero-allocation comparisons.
+var magicBytes = []byte(Magic)
+
 // Header represents the 16-byte MBTA frame header.
 type Header struct {
 	Version byte
@@ -43,15 +47,30 @@ type Header struct {
 }
 
 // Frame is a decoded MBTA frame.
+// 注意：帧级 CRC32 仅提供传输错误检测（快速预检），
+// 不具备密码学安全保证。协议的安全完整性由 SecureEnvelope 层的 HMAC 提供。
 type Frame struct {
 	Header  Header
 	Payload []byte
+}
+
+// knownTypes is the set of valid frame type values.
+var knownTypes = map[uint16]bool{
+	TypeHello: true, TypeHelloAck: true,
+	TypeAuth: true, TypeAuthOK: true, TypeAuthFail: true,
+	TypeBatch: true, TypeAck: true, TypeNack: true, TypePartialAck: true,
+	TypeWindow: true, TypeThrottle: true,
+	TypePing: true, TypePong: true,
+	TypeClose: true, TypeError: true,
 }
 
 // Write encodes and writes a single MBTA frame.
 func Write(w io.Writer, typ uint16, flags byte, payload []byte) error {
 	if err := validateFlags(flags); err != nil {
 		return err
+	}
+	if !knownTypes[typ] {
+		return NewError(NumProtocol, ErrProtocol, fmt.Sprintf("unknown frame type 0x%04x", typ))
 	}
 	if len(payload) > int(MaxPayloadSize) {
 		return NewError(NumProtocol, ErrProtocol, fmt.Sprintf("payload exceeds max size (%d > %d)", len(payload), MaxPayloadSize))
@@ -97,7 +116,7 @@ func Read(r io.Reader, lim Limits) (Frame, error) {
 	}
 
 	// Step 1: Magic
-	if string(hdr[0:4]) != Magic {
+	if !bytes.Equal(hdr[0:4], magicBytes) {
 		return Frame{}, NewError(NumProtocol, ErrProtocol, fmt.Sprintf("invalid magic %q", hdr[0:4]))
 	}
 	// Step 2: Version

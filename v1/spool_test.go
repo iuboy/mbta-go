@@ -239,8 +239,8 @@ func TestSpoolPersistence(t *testing.T) {
 	dir := getTempSpoolDir(t)
 	defer cleanupTempSpoolDir(dir)
 
-	// Create first spool instance
-	spool1, err := New(dir)
+	// Create first spool instance (synchronous mode for test determinism)
+	spool1, err := New(dir, WithFlushInterval(0))
 	if err != nil {
 		t.Fatalf("New spool failed: %v", err)
 	}

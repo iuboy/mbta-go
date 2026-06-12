@@ -67,13 +67,19 @@ issues:
     # G402: TLS InsecureSkipVerify — intentionally used in examples and tests
     - linters: [gosec]
       text: "G402"
-      path: (examples|v1/transport\.go)
+      path: (examples|v1/transport\.go|_test\.go)
     # G104: error not checked — best-effort cleanup in defer/close paths
     - linters: [gosec]
       text: "G104"
     # G304: file path from variable — validated by callers
     - linters: [gosec]
       text: "G304"
+
+
+    # G404: weak random number generator in test files — not a security concern
+    - linters: [gosec]
+      text: "G404"
+      path: _test\.go
     # test files: relax rules
     - linters: [gocognit, maintidx, gocritic, revive]
       path: _test\.go

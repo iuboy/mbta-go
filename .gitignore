@@ -30,3 +30,5 @@ Thumbs.db
 # Examples binaries
 /examples/basic_client/basic_client
 /examples/basic_server/basic_server
+
+go.work

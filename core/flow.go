@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -86,6 +87,11 @@ func (inf *Inflight) Remove(events int, bytes int64) {
 	inf.batches--
 	inf.events -= events
 	inf.bytes -= bytes
+	if inf.batches < 0 || inf.events < 0 || inf.bytes < 0 {
+		slog.Warn("inflight counter underflow",
+			"batches", inf.batches, "events", inf.events, "bytes", inf.bytes,
+			"removed_events", events, "removed_bytes", bytes)
+	}
 	if inf.batches < 0 {
 		inf.batches = 0
 	}
@@ -142,6 +148,10 @@ func (w *Window) Update(maxBatches int, maxEvents int, maxBytes int64) {
 
 // CanSend checks whether a batch of the given size fits in the window.
 // A max of 0 means that dimension is paused (no sending allowed).
+//
+// 注意：此方法分别获取 Window 和 Inflight 的锁，在高并发场景下可能存在竞态。
+// 调用方必须提供外部同步保证（例如 v1.Client.sendMu），确保 CanSend 检查
+// 与实际写入操作的原子性。
 func (w *Window) CanSend(inf *Inflight, events int, bytes int64) bool {
 	if w == nil || inf == nil {
 		return false
@@ -171,6 +181,10 @@ func (w *Window) Snapshot() (maxBatches int, maxEvents int, maxBytes int64) {
 	return w.maxInflightBatches, w.maxInflightEvents, w.maxInflightBytes
 }
 
+// MaxThrottleDelay 是客户端接受的最大限流延迟（5分钟）。
+// 超过此值的 retry_delay_ms 会被截断，防止恶意或异常的服务器无限期阻塞客户端。
+const MaxThrottleDelay = 5 * time.Minute
+
 // ThrottleState tracks the current throttle status.
 type ThrottleState struct {
 	mu         sync.Mutex
@@ -182,7 +196,7 @@ type ThrottleState struct {
 func (ts *ThrottleState) Apply(retryDelayMs int) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	ts.retryAfter = time.Duration(retryDelayMs) * time.Millisecond
+	ts.retryAfter = max(0, min(time.Duration(retryDelayMs)*time.Millisecond, MaxThrottleDelay))
 	ts.until = time.Now().Add(ts.retryAfter)
 }
 

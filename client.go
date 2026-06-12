@@ -17,13 +17,13 @@ const stateDisconnected = "disconnected"
 // ClientOption configures a Client.
 type ClientOption func(*ClientConfig) error
 
-// Client supports automatic version negotiation and fallback.
-// Implements the strategy pattern for version selection.
+// Client is a single-version MBTA client that connects to an MBTA server.
+// Each version (v1, v2, ntls) is a completely separate protocol — no automatic
+// fallback between versions. Create separate Client instances for different versions.
 type Client struct {
-	cfg     ClientConfig
-	clients map[string]versionedClient // version -> client wrapper
-	mu      sync.RWMutex
-	current string // actively connected version
+	cfg    ClientConfig
+	client versionedClient
+	mu     sync.RWMutex
 }
 
 // ACKHandler is called when the server acknowledges a batch.
@@ -40,8 +40,8 @@ type versionedClient interface {
 
 // ClientConfig holds the client configuration.
 type ClientConfig struct {
-	// Version priority (attempted in order)
-	Versions []string // e.g., ["v2", "v1", "ntls"]
+	// Protocol version — one of "v1", "v2", "ntls". Required.
+	Version string
 
 	// Connection settings
 	Server   string
@@ -55,13 +55,11 @@ type ClientConfig struct {
 	NTLSCreds *ntls.ClientCredentials
 }
 
-// NewClient creates a multi-version MBTA client.
-// The client will attempt to connect using versions in the priority order
-// specified in the config, falling back to the next version on failure.
+// NewClient creates a single-version MBTA client.
+// The client will connect using exactly the version specified in the config.
 func NewClient(opts ...ClientOption) (*Client, error) {
 	cfg := &ClientConfig{
-		// Default: try v2 first (if available), then v1
-		Versions: []string{Version1}, // Default to v1 only
+		Version: Version1, // Default to v1
 	}
 
 	for _, opt := range opts {
@@ -70,9 +68,15 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		}
 	}
 
-	// Validate at least one version is specified
-	if len(cfg.Versions) == 0 {
-		return nil, core.NewError(core.NumConfig, core.ErrConfig, "at least one version must be specified")
+	// Validate version
+	if cfg.Version == "" {
+		return nil, core.NewError(core.NumConfig, core.ErrConfig, "version is required")
+	}
+	switch cfg.Version {
+	case Version1, Version2, VersionNTLS:
+		// valid
+	default:
+		return nil, core.NewError(core.NumVersion, core.ErrVersion, fmt.Sprintf("unsupported version: %s", cfg.Version))
 	}
 
 	if cfg.AgentID == "" {
@@ -82,15 +86,14 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		return nil, core.NewError(core.NumConfig, core.ErrConfig, "Server address is required")
 	}
 
-	c := &Client{
-		cfg:     *cfg,
-		clients: make(map[string]versionedClient),
-	}
+	c := &Client{cfg: *cfg}
 
-	// Initialize version-specific clients
-	if err := c.initClients(); err != nil {
+	// Initialize the version-specific client
+	client, err := c.initClient()
+	if err != nil {
 		return nil, err
 	}
+	c.client = client
 
 	return c, nil
 }
@@ -101,16 +104,18 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 // For simple use cases:
 //
 //	client, err := mbta.Dial(ctx, "localhost:7400", "my-agent", "secret-token",
-//	    mbta.WithV1Credentials(v1.ClientCredentials{}),
+//	    "v1",
+//	    mbta.WithV1Credentials(v1.ClientCredentials{CAFile: "ca.pem"}),
 //	)
 //	if err != nil { ... }
 //	defer client.Close()
 //
 //	// client is already connected, ready to SendBatch
-func Dial(ctx context.Context, server, agentID, token string, opts ...ClientOption) (*Client, error) {
+func Dial(ctx context.Context, server, agentID, token, version string, opts ...ClientOption) (*Client, error) {
 	allOpts := append([]ClientOption{
 		WithServer(server),
 		WithAgent(agentID, "", token),
+		WithVersion(version),
 	}, opts...)
 
 	client, err := NewClient(allOpts...)
@@ -119,131 +124,70 @@ func Dial(ctx context.Context, server, agentID, token string, opts ...ClientOpti
 	}
 
 	if err := client.Connect(ctx); err != nil {
-		_ = client.Close()
+		if closeErr := client.Close(); closeErr != nil {
+			slog.Debug("cleanup close after failed connect", "error", closeErr)
+		}
 		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "dial connect", err)
 	}
 
 	return client, nil
 }
 
-// initClients initializes clients for each configured version.
-func (c *Client) initClients() error {
-	for _, version := range c.cfg.Versions {
-		var client versionedClient
-		var err error
-
-		switch version {
-		case Version1:
-			if c.cfg.V1Creds == nil {
-				continue
-			}
-			client, err = c.initV1Client()
-		case Version2:
-			if c.cfg.V2Creds == nil {
-				continue
-			}
-			client, err = c.initV2Client()
-		case VersionNTLS:
-			if c.cfg.NTLSCreds == nil {
-				continue
-			}
-			client, err = c.initNTLSClient()
-		default:
-			slog.Warn("unknown MBTA version", "version", version)
-			continue
-		}
-
-		if err != nil {
-			slog.Error("failed to init client", "version", version, "error", err)
-			continue
-		}
-
-		c.clients[version] = client
-		slog.Info("initialized client", "version", version)
+// initClient initializes the version-specific client.
+func (c *Client) initClient() (versionedClient, error) {
+	switch c.cfg.Version {
+	case Version1:
+		return c.initV1Client()
+	case Version2:
+		return c.initV2Client()
+	case VersionNTLS:
+		return c.initNTLSClient()
+	default:
+		return nil, core.NewError(core.NumVersion, core.ErrVersion, fmt.Sprintf("unsupported version: %s", c.cfg.Version))
 	}
-
-	// Ensure at least one client was initialized
-	if len(c.clients) == 0 {
-		return core.NewError(core.NumConfig, core.ErrConfig, "no clients initialized (check version-specific configs)")
-	}
-
-	return nil
 }
 
-// Connect attempts to connect using versions in priority order.
-// The first version to successfully connect becomes the active version.
-// Implements the fallback strategy pattern.
+// Connect establishes a connection using the configured version.
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var lastErr error
+	slog.Info("connecting", "version", c.cfg.Version, "server", c.cfg.Server)
 
-	// Try versions in priority order
-	for _, version := range c.cfg.Versions {
-		client, ok := c.clients[version]
-		if !ok {
-			slog.Warn("client not initialized, skipping", "version", version)
-			continue
-		}
-
-		slog.Info("attempting connection", "version", version, "server", c.cfg.Server)
-
-		if err := client.Connect(ctx); err != nil {
-			slog.Error("connection failed", "version", version, "error", err)
-			lastErr = err
-			continue
-		}
-
-		// Connection successful
-		c.current = version
-		slog.Info("connected", "version", version)
-		return nil
+	if err := c.client.Connect(ctx); err != nil {
+		slog.Error("connection failed", "version", c.cfg.Version, "error", err)
+		return err
 	}
 
-	// All versions failed
-	return core.WrapError(core.NumTransport, core.ErrTransport, "all versions failed to connect", lastErr)
+	slog.Info("connected", "version", c.cfg.Version)
+	return nil
 }
 
 // SendBatch sends a batch using the active connection.
-// Holds RLock for the entire call to prevent Close from invalidating
-// the client reference mid-send.
 func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	c.mu.RLock()
-	client, ok := c.clients[c.current]
-	current := c.current
+	client := c.client
 	c.mu.RUnlock()
 
-	if !ok || current == "" {
+	if client == nil {
 		return "", core.NewError(core.NumSession, core.ErrSession, "not connected (call Connect first)")
 	}
 
-	// The underlying client must handle writes on a closed connection gracefully.
-	result, err := client.SendBatch(ctx, batch, tag, source)
-	return result, err
+	return client.SendBatch(ctx, batch, tag, source)
 }
 
-// Close closes all clients.
+// Close closes the client and releases all resources.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var errs []error
-
-	for version, client := range c.clients {
-		if err := client.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", version, err))
-		}
-	}
-
-	c.current = ""
 	c.cfg.Token = ""
 	c.cfg.V1Creds = nil
 	c.cfg.V2Creds = nil
 	c.cfg.NTLSCreds = nil
 
-	if len(errs) > 0 {
-		return fmt.Errorf("close errors: %v", errs)
+	if c.client != nil {
+		return c.client.Close()
 	}
 	return nil
 }
@@ -253,15 +197,10 @@ func (c *Client) State() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.current == "" {
+	if c.client == nil {
 		return stateDisconnected
 	}
-
-	if client, ok := c.clients[c.current]; ok {
-		return client.State()
-	}
-
-	return stateDisconnected
+	return c.client.State()
 }
 
 // SetACKHandler registers a callback for ACK notifications from the server.
@@ -270,20 +209,16 @@ func (c *Client) SetACKHandler(handler ACKHandler) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	for version, client := range c.clients {
-		if version == Version1 {
-			// Only v1 supports ACK handlers
-			client.SetACKHandler(handler)
-			slog.Info("ACK handler registered", "version", version)
-		}
+	if c.client != nil {
+		c.client.SetACKHandler(handler)
 	}
 }
 
-// ActiveVersion returns the currently active version.
+// ActiveVersion returns the configured protocol version.
 func (c *Client) ActiveVersion() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.current
+	return c.cfg.Version
 }
 
 // initV1Client initializes the V1 client wrapper.
@@ -340,7 +275,6 @@ func (c *Client) initNTLSClient() (versionedClient, error) {
 		return nil, core.NewError(core.NumCredential, core.ErrCredential, "ntls credentials not provided")
 	}
 
-	// Convert ClientCredentials to ClientConfig
 	cfg := ntls.ClientConfig{
 		Server:     c.cfg.Server,
 		CertFile:   c.cfg.NTLSCreds.CertFile,
@@ -365,92 +299,50 @@ type v1ClientWrapper struct {
 	client *v1.Client
 }
 
-func (w *v1ClientWrapper) Connect(ctx context.Context) error {
-	return w.client.Connect(ctx)
-}
-
+func (w *v1ClientWrapper) Connect(ctx context.Context) error      { return w.client.Connect(ctx) }
 func (w *v1ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	return w.client.SendBatch(ctx, batch, tag, source)
 }
-
-func (w *v1ClientWrapper) Close() error {
-	return w.client.Close()
-}
-
-func (w *v1ClientWrapper) State() string {
-	return w.client.State().String()
-}
-
-func (w *v1ClientWrapper) SetACKHandler(handler ACKHandler) {
-	w.client.SetACKHandler(handler)
-}
+func (w *v1ClientWrapper) Close() error                           { return w.client.Close() }
+func (w *v1ClientWrapper) State() string                          { return w.client.State().String() }
+func (w *v1ClientWrapper) SetACKHandler(handler ACKHandler)       { w.client.SetACKHandler(handler) }
 
 type v2ClientWrapper struct {
 	client *v2.Client
 }
 
-func (w *v2ClientWrapper) Connect(ctx context.Context) error {
-	return w.client.Connect(ctx)
-}
-
+func (w *v2ClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
 func (w *v2ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	return w.client.SendBatch(ctx, batch, tag, source)
 }
-
-func (w *v2ClientWrapper) Close() error {
-	return w.client.Close()
-}
-
-func (w *v2ClientWrapper) State() string {
-	return w.client.State().String()
-}
-
-func (w *v2ClientWrapper) SetACKHandler(handler ACKHandler) {
-	// V2 doesn't support ACK handlers yet
-	// This is a no-op to satisfy the interface
-}
+func (w *v2ClientWrapper) Close() error                     { return w.client.Close() }
+func (w *v2ClientWrapper) State() string                    { return w.client.State().String() }
+func (w *v2ClientWrapper) SetACKHandler(ACKHandler)         {} // v2 not yet implemented
 
 type ntlsClientWrapper struct {
 	client *ntls.Client
 }
 
-func (w *ntlsClientWrapper) Connect(ctx context.Context) error {
-	return w.client.Connect(ctx)
-}
-
+func (w *ntlsClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
 func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	return w.client.SendBatch(ctx, batch, tag, source)
 }
-
-func (w *ntlsClientWrapper) Close() error {
-	return w.client.Close()
-}
-
-func (w *ntlsClientWrapper) State() string {
-	return w.client.State().String()
-}
-
-func (w *ntlsClientWrapper) SetACKHandler(handler ACKHandler) {
-	// NTLS doesn't support ACK handlers yet
-	// This is a no-op to satisfy the interface
-}
+func (w *ntlsClientWrapper) Close() error                     { return w.client.Close() }
+func (w *ntlsClientWrapper) State() string                    { return w.client.State().String() }
+func (w *ntlsClientWrapper) SetACKHandler(ACKHandler)         {} // ntls not yet implemented
 
 // Client Options (functional options pattern)
 
-// WithVersionPriority sets the version priority list.
-func WithVersionPriority(versions []string) ClientOption {
+// WithVersion sets the protocol version. Must be one of "v1", "v2", "ntls".
+func WithVersion(version string) ClientOption {
 	return func(cc *ClientConfig) error {
-		// Validate versions
-		for _, v := range versions {
-			switch v {
-			case Version1, Version2, VersionNTLS:
-				// Valid
-			default:
-				return core.NewError(core.NumVersion, core.ErrVersion, fmt.Sprintf("invalid version: %s", v))
-			}
+		switch version {
+		case Version1, Version2, VersionNTLS:
+			cc.Version = version
+			return nil
+		default:
+			return core.NewError(core.NumVersion, core.ErrVersion, fmt.Sprintf("invalid version: %s", version))
 		}
-		cc.Versions = versions
-		return nil
 	}
 }
 

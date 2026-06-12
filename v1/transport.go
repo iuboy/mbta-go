@@ -160,7 +160,7 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 
 	ql, err := quic.Listen(udpConn, tlsCfg, quicCfg)
 	if err != nil {
-		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path
+		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to listen error
 		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "listen QUIC", err)
 	}
 
@@ -271,7 +271,7 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 
 	qc, err := quic.Dial(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
 	if err != nil {
-		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path
+		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to listen error
 		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "dial QUIC", err)
 	}
 

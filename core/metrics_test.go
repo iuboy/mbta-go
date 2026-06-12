@@ -219,12 +219,14 @@ func TestMetricsCount(t *testing.T) {
 	}
 
 	// Expected metrics count (based on MBTAMetrics struct)
-	// 16 metrics: ConnectionsActive, AuthSuccessTotal, AuthFailureTotal,
-	// BatchesSentTotal, BatchesAckedTotal, BatchesNackedTotal, PartialAckTotal,
-	// SpoolRecords, SpoolBytes, ReplayCacheHitsTotal, HMACFailuresTotal,
-	// DecryptFailuresTotal, WindowCurrentBatches, WindowCurrentEvents,
-	// WindowCurrentBytes, ThrottleSecondsTotal
-	expectedCount := 16
+	// 23 metrics: ConnectionsActive, AuthSuccessTotal, AuthFailureTotal,
+	// BatchesSentTotal, BatchesAckedTotal, BatchesNackedTotal, ThrottledTotal,
+	// PartialAckTotal, SpoolRecords, SpoolBytes, ReplayCacheHitsTotal,
+	// HMACFailuresTotal, DecryptFailuresTotal, WindowCurrentBatches,
+	// WindowCurrentEvents, WindowCurrentBytes, ThrottleSecondsTotal,
+	// BatchLatencySeconds, BatchSizeEvents, BatchSizeBytes, ConnectionDuration,
+	// SpoolFlushErrors, SpoolSizeLimitHit
+	expectedCount := 23
 	if len(metricFamilies) != expectedCount {
 		t.Errorf("Expected %d metrics, got %d", expectedCount, len(metricFamilies))
 	}

@@ -2,7 +2,9 @@ package core
 
 import (
 	"fmt"
+	"slices"
 	"sync"
+	"time"
 )
 
 // State represents the session state machine state.
@@ -108,15 +110,21 @@ func (s ServerState) String() string {
 	}
 }
 
+// DefaultDrainTimeout is the maximum time to wait in StateDraining before
+// the caller should force-close the connection.
+const DefaultDrainTimeout = 30 * time.Second
+
 // StateMachine is a thread-safe client-side state machine for MBTA sessions.
 type StateMachine struct {
-	mu    sync.Mutex
-	state State
+	mu           sync.Mutex
+	state        State
+	drainTimer   *time.Timer
+	drainTimeout time.Duration
 }
 
 // NewStateMachine creates a client state machine starting at Disconnected.
 func NewStateMachine() *StateMachine {
-	return &StateMachine{state: StateDisconnected}
+	return &StateMachine{state: StateDisconnected, drainTimeout: DefaultDrainTimeout}
 }
 
 // State returns the current state.
@@ -131,13 +139,34 @@ func (sm *StateMachine) Transition(next State) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	for _, valid := range validTransitions[sm.state] {
-		if valid == next {
-			sm.state = next
-			return nil
+	if slices.Contains(validTransitions[sm.state], next) {
+		sm.state = next
+		// Start drain timer when entering Draining state.
+		if next == StateDraining && sm.drainTimeout > 0 {
+			if sm.drainTimer != nil {
+				sm.drainTimer.Stop()
+			}
+			sm.drainTimer = time.NewTimer(sm.drainTimeout)
 		}
+		return nil
 	}
 	return NewError(NumSession, ErrSession, fmt.Sprintf("invalid transition %s -> %s", sm.state, next))
+}
+
+// DrainExpired returns true if the drain timer has fired.
+// Returns false if not in draining state, or if the timer hasn't expired yet.
+func (sm *StateMachine) DrainExpired() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.state != StateDraining || sm.drainTimer == nil {
+		return false
+	}
+	select {
+	case <-sm.drainTimer.C:
+		return true
+	default:
+		return false
+	}
 }
 
 // ServerMachine is a thread-safe server-side state machine.
@@ -225,6 +254,11 @@ type NegotiateResult struct {
 	Encryption           string
 }
 
+// 设计说明：HELLO 和 AUTH 分为两步，原因：
+//   1. 未来支持 token 轮换（无需重新 HELLO）
+//   2. 未来版本的加密协商完成后，AUTH payload 可受加密保护
+//   3. 允许服务器在 HELLO_ACK 中下发 challenge nonce 用于挑战-响应
+//
 // Negotiate computes the server-selected capabilities based on client offers and server policy.
 func Negotiate(clientCaps []string, policy Policy) NegotiateResult {
 	offered := toSet(clientCaps)

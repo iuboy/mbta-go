@@ -41,6 +41,18 @@ func (c *Client) readControlLoop(ctx context.Context) {
 		case core.TypeClose:
 			slog.Info("server sent close")
 			return
+		case core.TypePing:
+			c.handlePing(f.Payload)
+		case core.TypeError:
+			var errMsg core.ErrorMessage
+			if err := json.Unmarshal(f.Payload, &errMsg); err != nil {
+				slog.Debug("invalid error payload", "error", err)
+			} else {
+				slog.Warn("server error", "code", errMsg.Code, "reason", errMsg.Reason, "fatal", errMsg.Fatal)
+				if errMsg.Fatal {
+					return
+				}
+			}
 		}
 	}
 }
@@ -65,6 +77,8 @@ func (c *Client) handleAck(payload []byte) {
 		handler(ack.ChunkID, ack.AckMode)
 	}
 
+	c.notifyDrainIfEmpty()
+
 	slog.Debug("ack received", "seq", ack.Seq, "chunk", ack.ChunkID, "count", ack.Count, "mode", ack.AckMode)
 }
 
@@ -87,6 +101,8 @@ func (c *Client) handleNack(payload []byte) {
 	if handler := c.loadACKHandler(); handler != nil {
 		handler(nack.ChunkID, "nack")
 	}
+
+	c.notifyDrainIfEmpty()
 
 	slog.Warn("nack received", "seq", nack.Seq, "code", nack.Code, "reason", nack.Reason, "retryable", nack.Retryable)
 }
@@ -112,4 +128,27 @@ func (c *Client) handleThrottle(payload []byte) {
 	}
 	c.throttle.Apply(throt.RetryDelayMs)
 	slog.Info("throttled", "delay_ms", throt.RetryDelayMs, "reason", throt.Reason)
+}
+
+// handlePing responds to a server PING with a PONG frame.
+func (c *Client) handlePing(payload []byte) {
+	var ping core.PingMessage
+	if err := json.Unmarshal(payload, &ping); err != nil {
+		slog.Debug("invalid ping payload", "error", err)
+		return
+	}
+
+	pong := core.PongMessage{
+		TimeUnixMs: ping.TimeUnixMs,
+		Nonce:      ping.Nonce,
+		Status:     "ok",
+	}
+	pongPayload, err := json.Marshal(pong)
+	if err != nil {
+		slog.Warn("marshal pong failed", "error", err)
+		return
+	}
+	if err := core.Write(c.controlStr, core.TypePong, core.FlagControl, pongPayload); err != nil {
+		slog.Debug("write pong failed", "error", err)
+	}
 }

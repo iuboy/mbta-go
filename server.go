@@ -137,7 +137,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Lock()
 		s.started = false
 		s.mu.Unlock()
-		return err
+		return fmt.Errorf("server accept loop: %w", err)
 	}
 
 	return nil

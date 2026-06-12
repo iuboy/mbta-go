@@ -20,7 +20,7 @@ func TestSignalBatchValidate(t *testing.T) {
 			batch: SignalBatch{
 				SchemaURL: "https://example.com/schema",
 				Signals: []*SignalRecord{
-					{SignalType: "log"},
+					{SignalType: "log", Body: "hello"},
 				},
 			},
 			wantErr: false,
@@ -59,9 +59,9 @@ func TestSignalBatchValidate(t *testing.T) {
 			batch: SignalBatch{
 				SchemaURL: "https://example.com/schema",
 				Signals: []*SignalRecord{
-					{SignalType: "log"},
-					{SignalType: "metric"},
-					{SignalType: "span"},
+					{SignalType: "log", Body: "msg"},
+					{SignalType: "metric", MetricName: "req_total"},
+					{SignalType: "span", Name: "GET /api", TraceID: "t1"},
 				},
 			},
 			wantErr: false,
@@ -71,7 +71,7 @@ func TestSignalBatchValidate(t *testing.T) {
 			batch: SignalBatch{
 				SchemaURL: "https://example.com/schema",
 				Signals: []*SignalRecord{
-					{SignalType: "log"},
+					{SignalType: "log", Body: "msg"},
 					{SignalType: ""},
 				},
 			},
@@ -335,10 +335,10 @@ func TestSignalBatchWithResourceAndScope(t *testing.T) {
 func TestSignalBatchWithMultipleSignals(t *testing.T) {
 	batch := &SignalBatch{
 		Signals: []*SignalRecord{
-			{SignalType: "log", EventID: "evt-1"},
-			{SignalType: "metric", EventID: "evt-2"},
-			{SignalType: "span", EventID: "evt-3"},
-			{SignalType: "log", EventID: "evt-4"},
+			{SignalType: "log", EventID: "evt-1", Body: "msg1"},
+			{SignalType: "metric", EventID: "evt-2", MetricName: "m1"},
+			{SignalType: "span", EventID: "evt-3", Name: "s1", TraceID: "t1"},
+			{SignalType: "log", EventID: "evt-4", Body: "msg4"},
 		},
 	}
 

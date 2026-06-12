@@ -1,6 +1,7 @@
 package core
 
 import (
+	"log/slog"
 	"sync"
 	"sync/atomic"
 )
@@ -55,12 +56,21 @@ type ReplayCache struct {
 
 const defaultReplayMaxSize = 50000
 
-// NewReplayCache creates a new replay cache.
+// NewReplayCache creates a new replay cache with the default capacity (50000).
 func NewReplayCache() *ReplayCache {
+	return NewReplayCacheWithSize(defaultReplayMaxSize)
+}
+
+// NewReplayCacheWithSize creates a new replay cache with a custom capacity.
+// A larger cache provides a longer dedup window at the cost of more memory.
+func NewReplayCacheWithSize(maxSize int) *ReplayCache {
+	if maxSize <= 0 {
+		maxSize = defaultReplayMaxSize
+	}
 	return &ReplayCache{
-		entries: make(map[string]*ReplayEntry),
-		maxSize: defaultReplayMaxSize,
-		order:   make([]string, 0, defaultReplayMaxSize),
+		entries: make(map[string]*ReplayEntry, min(maxSize, 1024)),
+		maxSize: maxSize,
+		order:   make([]string, 0, maxSize),
 	}
 }
 
@@ -80,12 +90,36 @@ func (rc *ReplayCache) SeenOrAdd(key string) *ReplayEntry {
 		return e
 	}
 
-	// Evict oldest entry (FIFO) when over capacity.
-	// This guarantees bounded memory regardless of entry status.
+	// 当缓存超过容量时，优先驱逐非 Processing 的条目。
+	// 如果全部为 Processing，则回退驱逐最早的条目（防止内存无限增长）。
+	//
+	// TODO(perf): 当前淘汰逻辑最坏情况 O(n)——当 maxSize=50000 且全部为 Processing 时，
+	// 每次插入新条目都遍历整个 order 列表。改进方案：
+	//   1. 维护两个链表：processingList 和 completedList，分别跟踪不同状态的条目
+	//   2. 或使用 container/list + map 的双向链表实现 O(1) 淘汰
+	//   3. 当前 maxSize=50000 在正常负载下几乎不会全部为 Processing，因此实际影响有限
 	for len(rc.entries) >= rc.maxSize && len(rc.order) > 0 {
-		oldest := rc.order[0]
-		rc.order = rc.order[1:]
-		delete(rc.entries, oldest)
+		evicted := false
+		for i, k := range rc.order {
+			if e, ok := rc.entries[k]; ok && e.Status != ReplayProcessing {
+				delete(rc.entries, k)
+				rc.order = append(rc.order[:i], rc.order[i+1:]...)
+				evicted = true
+				break
+			}
+		}
+		if !evicted {
+			// 全部为 Processing，回退驱逐最早的条目。
+			// 这意味着有一个正在处理的 batch 可能被重复处理——记录警告。
+			oldest := rc.order[0]
+			rc.order = rc.order[1:]
+			delete(rc.entries, oldest)
+			slog.Warn("replay cache evicted processing entry",
+				"evicted_key", oldest,
+				"cache_size", len(rc.entries),
+				"max_size", rc.maxSize,
+			)
+		}
 	}
 
 	rc.entries[key] = &ReplayEntry{Status: ReplayProcessing}
