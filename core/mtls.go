@@ -36,20 +36,20 @@ func ExtractMTLSIdentity(state tls.ConnectionState) (*MTLSIdentity, bool) {
 func ValidateMTLSIdentity(state tls.ConnectionState, requireDN string) error {
 	identity, hasCert := ExtractMTLSIdentity(state)
 	if !hasCert {
-		return NewError(NumTLS, ErrTLS, "no client certificate presented")
+		return NewError(NumTLS, CodeTLS, "no client certificate presented")
 	}
 
 	// Verify certificate time validity.
 	now := time.Now()
 	if now.Before(identity.Cert.NotBefore) {
-		return NewError(NumTLS, ErrTLS, fmt.Sprintf("client certificate not valid before %s", identity.Cert.NotBefore.Format(time.RFC3339)))
+		return NewError(NumTLS, CodeTLS, fmt.Sprintf("client certificate not valid before %s", identity.Cert.NotBefore.Format(time.RFC3339)))
 	}
 	if now.After(identity.Cert.NotAfter) {
-		return NewError(NumTLS, ErrTLS, fmt.Sprintf("client certificate expired at %s", identity.Cert.NotAfter.Format(time.RFC3339)))
+		return NewError(NumTLS, CodeTLS, fmt.Sprintf("client certificate expired at %s", identity.Cert.NotAfter.Format(time.RFC3339)))
 	}
 
 	if requireDN != "" && identity.Subject != requireDN {
-		return NewError(NumTLS, ErrTLS, fmt.Sprintf("certificate subject %q does not match required %q", identity.Subject, requireDN))
+		return NewError(NumTLS, CodeTLS, fmt.Sprintf("certificate subject %q does not match required %q", identity.Subject, requireDN))
 	}
 	return nil
 }

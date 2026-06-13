@@ -41,7 +41,7 @@ func NewServer(cfg ServerConfig) *Server {
 func (s *Server) Start(ctx context.Context) error {
 	l, err := Listen(ctx, s.config.Transport)
 	if err != nil {
-		return core.WrapError(core.NumTransport, core.ErrTransport, "listen", err)
+		return core.WrapError(core.NumTransport, core.CodeTransport, "listen", err)
 	}
 	s.mu.Lock()
 	s.listener = l
@@ -74,7 +74,7 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Accept(ctx context.Context) (*ConnectionHandler, error) {
 	conn, err := s.listener.Accept(ctx)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "accept", err)
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "accept", err)
 	}
 
 	handler := NewConnectionHandler(ConnectionHandlerConfig{

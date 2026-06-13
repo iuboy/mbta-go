@@ -18,7 +18,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".mbta-spool-*")
 	if err != nil {
-		return core.WrapError(core.NumSpool, core.ErrSpool, "create temp file", err)
+		return core.WrapError(core.NumSpool, core.CodeSpool, "create temp file", err)
 	}
 	tmpName := tmp.Name()
 
@@ -29,7 +29,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		if rerr := os.Remove(tmpName); rerr != nil {
 			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
 		}
-		return core.WrapError(core.NumSpool, core.ErrSpool, "write temp file", err)
+		return core.WrapError(core.NumSpool, core.CodeSpool, "write temp file", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		if cerr := tmp.Close(); cerr != nil {
@@ -38,25 +38,25 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		if rerr := os.Remove(tmpName); rerr != nil {
 			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
 		}
-		return core.WrapError(core.NumSpool, core.ErrSpool, "sync temp file", err)
+		return core.WrapError(core.NumSpool, core.CodeSpool, "sync temp file", err)
 	}
 	if err := tmp.Close(); err != nil {
 		if rerr := os.Remove(tmpName); rerr != nil {
 			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
 		}
-		return core.WrapError(core.NumSpool, core.ErrSpool, "close temp file", err)
+		return core.WrapError(core.NumSpool, core.CodeSpool, "close temp file", err)
 	}
 	if err := os.Chmod(tmpName, perm); err != nil {
 		if rerr := os.Remove(tmpName); rerr != nil {
 			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
 		}
-		return core.WrapError(core.NumSpool, core.ErrSpool, "chmod temp file", err)
+		return core.WrapError(core.NumSpool, core.CodeSpool, "chmod temp file", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		if rerr := os.Remove(tmpName); rerr != nil {
 			slog.Debug("temp file remove error", "path", tmpName, "error", rerr)
 		}
-		return core.WrapError(core.NumSpool, core.ErrSpool, "rename temp file", err)
+		return core.WrapError(core.NumSpool, core.CodeSpool, "rename temp file", err)
 	}
 	return nil
 }
@@ -142,11 +142,11 @@ func New(dir string, opts ...SpoolOption) (*Spool, error) {
 	// Validate directory to prevent path traversal.
 	cleanDir := filepath.Clean(dir)
 	if cleanDir != dir {
-		return nil, core.NewError(core.NumSpool, core.ErrSpool, fmt.Sprintf("spool directory path contains suspicious elements: %s", dir))
+		return nil, core.NewError(core.NumSpool, core.CodeSpool, fmt.Sprintf("spool directory path contains suspicious elements: %s", dir))
 	}
 
 	if err := os.MkdirAll(cleanDir, 0700); err != nil {
-		return nil, core.WrapError(core.NumSpool, core.ErrSpool, "create spool dir", err)
+		return nil, core.WrapError(core.NumSpool, core.CodeSpool, "create spool dir", err)
 	}
 
 	s := &Spool{
@@ -164,7 +164,7 @@ func New(dir string, opts ...SpoolOption) (*Spool, error) {
 	}
 
 	if err := s.load(); err != nil {
-		return nil, core.WrapError(core.NumSpool, core.ErrSpool, "load spool", err)
+		return nil, core.WrapError(core.NumSpool, core.CodeSpool, "load spool", err)
 	}
 
 	// Start background flush loop when buffered mode is enabled.
@@ -185,7 +185,7 @@ func (s *Spool) Put(rec Record) error {
 	// Disk protection: check size before write.
 	if s.maxSize > 0 && s.estimatedSize() >= s.maxSize {
 		s.mu.Unlock()
-		return core.NewError(core.NumSpool, core.ErrSpool, "spool size limit exceeded")
+		return core.NewError(core.NumSpool, core.CodeSpool, "spool size limit exceeded")
 	}
 
 	s.records[rec.RecordID] = &rec
@@ -205,7 +205,7 @@ func (s *Spool) PutBatch(records []Record, batch Batch) error {
 	// Disk protection: check size before write.
 	if s.maxSize > 0 && s.estimatedSize() >= s.maxSize {
 		s.mu.Unlock()
-		return core.NewError(core.NumSpool, core.ErrSpool, "spool size limit exceeded")
+		return core.NewError(core.NumSpool, core.CodeSpool, "spool size limit exceeded")
 	}
 
 	for i := range records {
@@ -508,20 +508,20 @@ func (s *Spool) load() error {
 	data, err := os.ReadFile(recordsPath) // #nosec G304 -- s.dir validated in New()
 	if err == nil {
 		if err := json.Unmarshal(data, &s.records); err != nil {
-			return core.WrapError(core.NumSpool, core.ErrSpool, "unmarshal records", err)
+			return core.WrapError(core.NumSpool, core.CodeSpool, "unmarshal records", err)
 		}
 	} else if !os.IsNotExist(err) {
-		return core.WrapError(core.NumSpool, core.ErrSpool, "read records", err)
+		return core.WrapError(core.NumSpool, core.CodeSpool, "read records", err)
 	}
 
 	batchesPath := filepath.Join(s.dir, "batches.json")
 	data, err = os.ReadFile(batchesPath) // #nosec G304 -- s.dir validated in New()
 	if err == nil {
 		if err := json.Unmarshal(data, &s.batches); err != nil {
-			return core.WrapError(core.NumSpool, core.ErrSpool, "unmarshal batches", err)
+			return core.WrapError(core.NumSpool, core.CodeSpool, "unmarshal batches", err)
 		}
 	} else if !os.IsNotExist(err) {
-		return core.WrapError(core.NumSpool, core.ErrSpool, "read batches", err)
+		return core.WrapError(core.NumSpool, core.CodeSpool, "read batches", err)
 	}
 
 	return nil

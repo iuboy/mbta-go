@@ -20,10 +20,10 @@ type HelloMessage struct {
 // Validate 检查HelloMessage的有效性。
 func (m *HelloMessage) Validate() error {
 	if m.AgentID == "" {
-		return NewError(NumValidation, ErrValidation, "agent_id is required")
+		return NewError(NumValidation, CodeValidation, "agent_id is required")
 	}
 	if m.Version != 1 {
-		return NewError(NumValidation, ErrValidation, fmt.Sprintf("version must be 1, got %d", m.Version))
+		return NewError(NumValidation, CodeValidation, fmt.Sprintf("version must be 1, got %d", m.Version))
 	}
 	return nil
 }
@@ -50,10 +50,10 @@ type HelloAckMessage struct {
 // Validate 检查HelloAckMessage的有效性。
 func (m *HelloAckMessage) Validate() error {
 	if m.SessionID == "" {
-		return NewError(NumValidation, ErrValidation, "session_id is required")
+		return NewError(NumValidation, CodeValidation, "session_id is required")
 	}
 	if m.ServerVersion != 1 {
-		return NewError(NumValidation, ErrValidation, "server_version must be 1")
+		return NewError(NumValidation, CodeValidation, "server_version must be 1")
 	}
 	return nil
 }
@@ -71,13 +71,13 @@ type AuthMessage struct {
 // Validate 检查AuthMessage的有效性。
 func (m *AuthMessage) Validate() error {
 	if m.AgentID == "" {
-		return NewError(NumValidation, ErrValidation, "agent_id is required")
+		return NewError(NumValidation, CodeValidation, "agent_id is required")
 	}
 	if m.SessionID == "" {
-		return NewError(NumValidation, ErrValidation, "session_id is required")
+		return NewError(NumValidation, CodeValidation, "session_id is required")
 	}
 	if m.AuthNonce == "" {
-		return NewError(NumValidation, ErrValidation, "auth_nonce is required")
+		return NewError(NumValidation, CodeValidation, "auth_nonce is required")
 	}
 	return nil
 }
@@ -112,19 +112,19 @@ type BatchMessage struct {
 // Validate 检查BatchMessage的有效性。
 func (m *BatchMessage) Validate() error {
 	if m.Seq == 0 {
-		return NewError(NumValidation, ErrValidation, "seq must be >= 1")
+		return NewError(NumValidation, CodeValidation, "seq must be >= 1")
 	}
 	if m.ChunkID == "" {
-		return NewError(NumValidation, ErrValidation, "chunk_id is required")
+		return NewError(NumValidation, CodeValidation, "chunk_id is required")
 	}
 	if len(m.ChunkID) > 256 {
-		return NewError(NumValidation, ErrValidation, "chunk_id exceeds maximum length of 256")
+		return NewError(NumValidation, CodeValidation, "chunk_id exceeds maximum length of 256")
 	}
 	if len(m.Batch) == 0 {
-		return NewError(NumValidation, ErrValidation, "batch must not be empty")
+		return NewError(NumValidation, CodeValidation, "batch must not be empty")
 	}
 	if !json.Valid(m.Batch) {
-		return NewError(NumValidation, ErrValidation, "batch must be valid JSON")
+		return NewError(NumValidation, CodeValidation, "batch must be valid JSON")
 	}
 	return nil
 }

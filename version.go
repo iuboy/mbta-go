@@ -76,7 +76,7 @@ type UnsupportedVersionError struct {
 }
 
 func (e *UnsupportedVersionError) Error() string {
-	return fmt.Sprintf("[%d %s] unsupported mbta version: %s", core.NumVersion, core.ErrVersion, e.Version)
+	return fmt.Sprintf("[%d %s] unsupported mbta version: %s", core.NumVersion, core.CodeVersion, e.Version)
 }
 
 // IsUnsupportedVersion checks if an error is an UnsupportedVersionError.

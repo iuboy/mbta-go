@@ -54,12 +54,12 @@ type QUICClientConfig struct {
 // buildServerTLS creates a tls.Config for the server.
 func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 	if cfg == nil {
-		return nil, core.NewError(core.NumCredential, core.ErrCredential, "server credentials required")
+		return nil, core.NewError(core.NumCredential, core.CodeCredential, "server credentials required")
 	}
 
 	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
-		return nil, core.WrapError(core.NumTLS, core.ErrTLS, "load server cert/key", err)
+		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load server cert/key", err)
 	}
 
 	tlsCfg := &tls.Config{
@@ -72,10 +72,10 @@ func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 		pool := x509.NewCertPool()
 		caData, err := os.ReadFile(cfg.CAFile)
 		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.ErrTLS, "read CA file", err)
+			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "read CA file", err)
 		}
 		if !pool.AppendCertsFromPEM(caData) {
-			return nil, core.NewError(core.NumTLS, core.ErrTLS, "failed to append CA certificates")
+			return nil, core.NewError(core.NumTLS, core.CodeTLS, "failed to append CA certificates")
 		}
 		tlsCfg.ClientCAs = pool
 	}
@@ -95,7 +95,7 @@ func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 // buildClientTLS creates a tls.Config for the client.
 func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 	if cfg == nil {
-		return nil, core.NewError(core.NumCredential, core.ErrCredential, "client TLS credentials required: provide ClientCredentials or explicitly set InsecureSkipVerify for development")
+		return nil, core.NewError(core.NumCredential, core.CodeCredential, "client TLS credentials required: provide ClientCredentials or explicitly set InsecureSkipVerify for development")
 	}
 	tlsCfg := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
@@ -112,10 +112,10 @@ func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 		pool := x509.NewCertPool()
 		caData, err := os.ReadFile(cfg.CAFile)
 		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.ErrTLS, "read CA file", err)
+			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "read CA file", err)
 		}
 		if !pool.AppendCertsFromPEM(caData) {
-			return nil, core.NewError(core.NumTLS, core.ErrTLS, "failed to append CA certificates")
+			return nil, core.NewError(core.NumTLS, core.CodeTLS, "failed to append CA certificates")
 		}
 		tlsCfg.RootCAs = pool
 	}
@@ -123,7 +123,7 @@ func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 	if cfg.CertFile != "" && cfg.KeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.ErrTLS, "load client cert/key", err)
+			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client cert/key", err)
 		}
 		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
@@ -151,18 +151,18 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Address)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "resolve address", err)
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "resolve address", err)
 	}
 
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "listen UDP", err)
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen UDP", err)
 	}
 
 	ql, err := quic.Listen(udpConn, tlsCfg, quicCfg)
 	if err != nil {
 		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to listen error
-		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "listen QUIC", err)
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen QUIC", err)
 	}
 
 	return &Listener{listener: ql, config: cfg}, nil
@@ -206,7 +206,7 @@ func (l *Listener) Addr() net.Addr {
 func (c *Conn) OpenControlStream(ctx context.Context) (*quic.Stream, error) {
 	s, err := c.QC.OpenStreamSync(ctx)
 	if err != nil {
-		return nil, core.WrapError(core.NumStream, core.ErrStream, "open control stream", err)
+		return nil, core.WrapError(core.NumStream, core.CodeStream, "open control stream", err)
 	}
 	c.controlMu.Lock()
 	c.controlClaimed = true
@@ -234,7 +234,7 @@ func (c *Conn) AcceptStream(ctx context.Context) (*quic.Stream, string, error) {
 // OpenDataStream opens a new data stream. Requires auth to be completed.
 func (c *Conn) OpenDataStream(ctx context.Context) (*quic.Stream, error) {
 	if !c.authed.Load() {
-		return nil, core.NewError(core.NumStream, core.ErrStream, "cannot open data stream before auth")
+		return nil, core.NewError(core.NumStream, core.CodeStream, "cannot open data stream before auth")
 	}
 	return c.QC.OpenStreamSync(ctx)
 }
@@ -262,18 +262,18 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Server)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "resolve address", err)
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "resolve address", err)
 	}
 
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "listen UDP", err)
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen UDP", err)
 	}
 
 	qc, err := quic.Dial(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
 	if err != nil {
 		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to listen error
-		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "dial QUIC", err)
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial QUIC", err)
 	}
 
 	cs := qc.ConnectionState().TLS

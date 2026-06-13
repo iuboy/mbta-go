@@ -63,14 +63,14 @@ type Server struct {
 // NewServer creates a V2 MBTA server.
 func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Transport.Address == "" {
-		return nil, core.NewError(core.NumConfig, core.ErrConfig, "address required")
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "address required")
 	}
 	return &Server{config: cfg}, nil
 }
 
 // Start begins listening for QUIC connections with GM TLS.
 func (s *Server) Start(ctx context.Context) error {
-	return core.NewError(core.NumConfig, core.ErrConfig, "v2 server not yet implemented (requires GM TLS library)")
+	return core.NewError(core.NumConfig, core.CodeConfig, "v2 server not yet implemented (requires GM TLS library)")
 }
 
 // Close shuts down the server.
@@ -92,19 +92,19 @@ type Client struct {
 // NewClient creates a V2 MBTA client.
 func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Transport.Server == "" {
-		return nil, core.NewError(core.NumCredential, core.ErrCredential, "server address required")
+		return nil, core.NewError(core.NumCredential, core.CodeCredential, "server address required")
 	}
 	return &Client{config: cfg}, nil
 }
 
 // Connect establishes V2 connection with GM TLS.
 func (c *Client) Connect(ctx context.Context) error {
-	return core.NewError(core.NumConfig, core.ErrConfig, "v2 client not yet implemented (requires GM TLS library)")
+	return core.NewError(core.NumConfig, core.CodeConfig, "v2 client not yet implemented (requires GM TLS library)")
 }
 
 // SendBatch sends a signal batch.
 func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
-	return "", core.NewError(core.NumConfig, core.ErrConfig, "v2 send not yet implemented")
+	return "", core.NewError(core.NumConfig, core.CodeConfig, "v2 send not yet implemented")
 }
 
 // Close closes the connection.

@@ -58,10 +58,22 @@ type Client struct {
 
 	ackTimeout        time.Duration // max time to wait for ACK (default 5 min)
 	heartbeatInterval time.Duration // PING 发送间隔（从 HELLO_ACK 获取，默认 30s）
-	cancelACK         context.CancelFunc
-	cancelReaper      context.CancelFunc
-	cancelHeartbeat   context.CancelFunc
-	drainCh           chan struct{} // signaled when pendingAcks reaches 0 during drain
+
+	// lifecycleCtx drives all background goroutines (readControlLoop, ackReaper,
+	// heartbeatLoop). It is derived from the Connect caller's context so
+	// goroutines exit on caller cancellation OR explicit Close().
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+
+	// ackDone/reaperDone/heartbeatDone are closed when the corresponding
+	// goroutine exits. Close() waits on them so no goroutine outlives Close.
+	ackDone       chan struct{}
+	reaperDone    chan struct{}
+	heartbeatDone chan struct{}
+
+	drainCh   chan struct{}   // signaled when pendingAcks reaches 0 during drain
+	closeOnce sync.Once       // makes Close idempotent
+	connErr   error           // captured inside closeOnce.Do for return
 }
 
 type pendingBatch struct {
@@ -97,7 +109,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.SpoolDir != "" {
 		s, err := New(cfg.SpoolDir)
 		if err != nil {
-			return nil, core.WrapError(core.NumSpool, core.ErrSpool, "open spool", err)
+			return nil, core.WrapError(core.NumSpool, core.CodeSpool, "open spool", err)
 		}
 		c.spool = s
 	}
@@ -109,39 +121,39 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 func (c *Client) Connect(ctx context.Context) error {
 	// Dial QUIC
 	if err := c.sm.Transition(core.StateConnecting); err != nil {
-		return core.WrapError(core.NumSession, core.ErrSession, "transition to CONNECTING", err)
+		return core.WrapError(core.NumSession, core.CodeSession, "transition to CONNECTING", err)
 	}
 
 	conn, err := Dial(ctx, c.config.Transport)
 	if err != nil {
-		return core.WrapError(core.NumTransport, core.ErrTransport, "dial", err)
+		return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
 	}
 	c.conn = conn
 
 	// Open control stream
 	ctrlStr, err := conn.OpenControlStream(ctx)
 	if err != nil {
-		return core.WrapError(core.NumStream, core.ErrStream, "open control stream", err)
+		return core.WrapError(core.NumStream, core.CodeStream, "open control stream", err)
 	}
 	c.controlStr = ctrlStr
 	if err := c.sm.Transition(core.StateControlStreamOpen); err != nil {
-		return core.WrapError(core.NumSession, core.ErrSession, "transition to CONTROL_STREAM_OPEN", err)
+		return core.WrapError(core.NumSession, core.CodeSession, "transition to CONTROL_STREAM_OPEN", err)
 	}
 
 	// Send HELLO
 	if err := c.sendHello(); err != nil {
-		return core.WrapError(core.NumHandshake, core.ErrHandshake, "hello", err)
+		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello", err)
 	}
 
 	// Receive HELLO_ACK
 	helloAck, err := c.recvHelloAck()
 	if err != nil {
-		return core.WrapError(core.NumHandshake, core.ErrHandshake, "hello_ack", err)
+		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello_ack", err)
 	}
 
 	c.sessionID = helloAck.SessionID
 	if err := c.sm.Transition(core.StateHelloAcked); err != nil {
-		return core.WrapError(core.NumSession, core.ErrSession, "transition to HELLO_ACKED", err)
+		return core.WrapError(core.NumSession, core.CodeSession, "transition to HELLO_ACKED", err)
 	}
 
 	// Update window from HELLO_ACK
@@ -160,40 +172,36 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Send AUTH
 	if err := c.sendAuth(); err != nil {
-		return core.WrapError(core.NumHandshake, core.ErrHandshake, "auth", err)
+		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth", err)
 	}
 
 	// Receive AUTH_OK/FAIL
 	if err := c.recvAuthResult(); err != nil {
-		return core.WrapError(core.NumHandshake, core.ErrHandshake, "auth_result", err)
+		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth_result", err)
 	}
 
-	// Start ACK reader — derive from ctx so readControlLoop exits when
-	// the caller's context is cancelled, not just on explicit Close().
-	ackCtx, cancel := context.WithCancel(ctx)
-	c.cancelACK = cancel
-	go c.readControlLoop(ackCtx)
+	// Start background goroutines on a single lifecycle context derived from
+	// the caller's ctx. All three exit when ctx is cancelled OR on Close().
+	c.lifecycleCtx, c.lifecycleCancel = context.WithCancel(ctx)
+	c.ackDone = make(chan struct{})
+	c.reaperDone = make(chan struct{})
+	c.heartbeatDone = make(chan struct{})
 
-	// Start ACK timeout reaper — reclaims inflight slots for batches that
-	// never received an ACK within the configured timeout.
-	reaperCtx, cancelReaper := context.WithCancel(ctx)
-	c.cancelReaper = cancelReaper
-	go c.ackReaper(reaperCtx)
-
-	// Start heartbeat — sends periodic PING frames to keep the connection alive.
-	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
-	c.cancelHeartbeat = cancelHeartbeat
-	go c.heartbeatLoop(heartbeatCtx)
+	// readControlLoop processes ACK/NACK/window/throttle frames. Each goroutine
+	// closes its done channel on exit so Close() can wait.
+	go func() { defer close(c.ackDone); c.readControlLoop(c.lifecycleCtx) }()
+	go func() { defer close(c.reaperDone); c.ackReaper(c.lifecycleCtx) }()
+	go func() { defer close(c.heartbeatDone); c.heartbeatLoop(c.lifecycleCtx) }()
 
 	// Open initial data stream
 	if c.picker == nil {
 		ds, err := c.conn.OpenDataStream(ctx)
 		if err != nil {
-			// Clean up goroutines started above before returning error.
-			cancel()
-			cancelReaper()
-			cancelHeartbeat()
-			return core.WrapError(core.NumStream, core.ErrStream, "open data stream", err)
+			// Cancel goroutines and wait for them to exit before returning,
+			// otherwise they leak on a failed Connect.
+			c.lifecycleCancel()
+			c.waitGoroutines()
+			return core.WrapError(core.NumStream, core.CodeStream, "open data stream", err)
 		}
 		c.picker = NewSingleStream(&quicStreamWrapper{stream: ds, idx: 0})
 	}
@@ -206,7 +214,7 @@ func (c *Client) Connect(ctx context.Context) error {
 // Returns the chunkID assigned to this batch for ACK correlation, or an error.
 func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string) (string, error) {
 	if signalBatch == nil {
-		return "", core.NewError(core.NumBatch, core.ErrBatch, "batch must not be nil")
+		return "", core.NewError(core.NumBatch, core.CodeBatch, "batch must not be nil")
 	}
 
 	c.sendMu.Lock()
@@ -227,7 +235,7 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	// Marshal SignalBatch to JSON for embedding in BatchMessage
 	batchJSON, err := json.Marshal(signalBatch)
 	if err != nil {
-		return "", core.WrapError(core.NumBatch, core.ErrBatch, "marshal signal batch", err)
+		return "", core.WrapError(core.NumBatch, core.CodeBatch, "marshal signal batch", err)
 	}
 
 	batch := core.BatchMessage{
@@ -239,7 +247,7 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	}
 	batchPayload, err := json.Marshal(batch)
 	if err != nil {
-		return "", core.WrapError(core.NumBatch, core.ErrBatch, "marshal batch", err)
+		return "", core.WrapError(core.NumBatch, core.CodeBatch, "marshal batch", err)
 	}
 
 	batchBytes := int64(len(batchPayload))
@@ -276,23 +284,23 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 
 	env, err := core.Build(params, batchPayload)
 	if err != nil {
-		return "", core.WrapError(core.NumEnvelope, core.ErrEnvelope, "build envelope", err)
+		return "", core.WrapError(core.NumEnvelope, core.CodeEnvelope, "build envelope", err)
 	}
 
 	envPayload, err := json.Marshal(env)
 	if err != nil {
-		return "", core.WrapError(core.NumEnvelope, core.ErrEnvelope, "marshal envelope", err)
+		return "", core.WrapError(core.NumEnvelope, core.CodeEnvelope, "marshal envelope", err)
 	}
 
 	// Pick stream
 	ds, err := c.picker.Pick(batch)
 	if err != nil {
-		return "", core.WrapError(core.NumBatch, core.ErrBatch, "pick stream", err)
+		return "", core.WrapError(core.NumBatch, core.CodeBatch, "pick stream", err)
 	}
 
 	// Write frame
 	if err := core.Write(ds, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
-		return "", core.WrapError(core.NumBatch, core.ErrBatch, "write batch", err)
+		return "", core.WrapError(core.NumBatch, core.CodeBatch, "write batch", err)
 	}
 
 	// Track inflight — still under sendMu, so the window check remains valid.
@@ -322,56 +330,83 @@ func (c *Client) loadACKHandler() func(chunkID, ackMode string) {
 	return nil
 }
 
-// Close sends a CLOSE frame and shuts down.
+// Close sends a CLOSE frame, drains pending ACKs, and shuts down.
+// It is idempotent: subsequent calls return the error from the first close.
+//
+// Lifecycle (the previous implementation cancelled all goroutines up front,
+// which starved the drain loop — ACKs could no longer be processed so the
+// 30s drain timeout always fired):
+//  1. Send CLOSE frame while goroutines are still alive.
+//  2. Transition to Draining and wait for pending ACKs to reach zero
+//     (readControlLoop + ackReaper remain running to process final ACKs).
+//  3. Cancel goroutines and wait for them to exit.
+//  4. Clear state and close the connection.
 func (c *Client) Close() error {
-	if c.cancelACK != nil {
-		c.cancelACK()
-	}
-	if c.cancelReaper != nil {
-		c.cancelReaper()
-	}
-	if c.cancelHeartbeat != nil {
-		c.cancelHeartbeat()
-	}
+	c.closeOnce.Do(c.close)
+	return c.connErr
+}
 
-	// Transition to Draining state.
-	if err := c.sm.Transition(core.StateDraining); err != nil {
-		slog.Debug("drain transition skipped", "error", err)
-	}
-
-	// Wait for drain with timeout. Event-driven: drainCh signals when
-	// pendingAcks reaches 0. If the timeout fires first, force-close.
-	if c.sm.State() == core.StateDraining {
-		drainDeadline := time.NewTimer(core.DefaultDrainTimeout)
-		defer drainDeadline.Stop()
-		for c.sm.State() == core.StateDraining {
-			select {
-			case <-drainDeadline.C:
-				slog.Warn("drain timeout exceeded, force-closing")
-				_ = c.sm.Transition(core.StateClosed)
-			case <-c.drainCh:
-				_ = c.sm.Transition(core.StateClosed)
-			}
-		}
-	}
-
-	// Clear pending ACKs to release references.
-	c.pendingAcks.Range(func(key, _ any) bool {
-		c.pendingAcks.Delete(key)
-		return true
-	})
-
+// close performs the actual shutdown. Runs exactly once via closeOnce.
+func (c *Client) close() {
+	// 1. Send CLOSE frame before cancelling so the server learns we're done.
 	if c.controlStr != nil {
 		c.controlMu.Lock()
 		closeMsg := core.CloseMessage{Code: "shutdown", Reason: "client closing"}
 		if payload, err := json.Marshal(closeMsg); err == nil {
 			if err := core.Write(c.controlStr, core.TypeClose, core.FlagControl, payload); err != nil {
-				slog.Debug("write close frame", "error", err)
+				slog.Warn("write close frame", "error", err)
 			}
 		}
 		c.controlMu.Unlock()
 	}
 
+	// 2. Transition to Draining state.
+	if err := c.sm.Transition(core.StateDraining); err != nil {
+		slog.Debug("drain transition skipped", "error", err)
+	}
+
+	// 3. Wait for drain. readControlLoop is still running, so handleAck keeps
+	// firing notifyDrainIfEmpty → drainCh signals as pendingAcks hits zero.
+	// If the timeout fires first (no ACK for some batch), force-close.
+	if c.sm.State() == core.StateDraining {
+		drainDeadline := time.NewTimer(core.DefaultDrainTimeout)
+		for c.sm.State() == core.StateDraining {
+			select {
+			case <-drainDeadline.C:
+				slog.Warn("drain timeout exceeded, force-closing",
+					"pending", c.countPendingAcks())
+				_ = c.sm.Transition(core.StateClosed)
+			case <-c.drainCh:
+				_ = c.sm.Transition(core.StateClosed)
+			}
+		}
+		drainDeadline.Stop()
+	}
+
+	// 4. Cancel all background goroutines.
+	if c.lifecycleCancel != nil {
+		c.lifecycleCancel()
+	}
+	// Close the connection first so a readControlLoop blocked in core.Read
+	// unblocks (the stream errors out) and can observe the cancellation.
+	if c.conn != nil {
+		c.connErr = c.conn.CloseWithError(0, "client shutdown")
+	}
+	// 5. Wait for goroutines to actually exit (bounded — see waitGoroutines).
+	c.waitGoroutines()
+
+	// 6. Clear pending ACKs to release references.
+	c.pendingAcks.Range(func(key, _ any) bool {
+		c.pendingAcks.Delete(key)
+		return true
+	})
+
+	// 6. Acquire sendMu so the field clearing below cannot race a concurrent
+	// SendBatch. A SendBatch that already passed its StateReady check may
+	// still be reading c.keys under sendMu; once we hold the lock it has
+	// finished, and since the state machine is past Ready any later
+	// SendBatch returns ErrNotReady before touching these fields.
+	c.sendMu.Lock()
 	// Reset inflight counters so stale state does not block future sends.
 	c.inflight.Reset()
 
@@ -383,11 +418,39 @@ func (c *Client) Close() error {
 		}
 		c.keys = nil
 	}
+	c.sendMu.Unlock()
+}
 
-	if c.conn != nil {
-		return c.conn.CloseWithError(0, "client shutdown")
+// waitGoroutines blocks until all background goroutines exit or the wait
+// timeout elapses. The timeout bounds Close so a goroutine stuck in an
+// uninterruptible read cannot hang shutdown indefinitely.
+func (c *Client) waitGoroutines() {
+	const waitTimeout = 5 * time.Second
+	deadline := time.NewTimer(waitTimeout)
+	defer deadline.Stop()
+	for _, done := range []chan struct{}{c.ackDone, c.reaperDone, c.heartbeatDone} {
+		if done == nil {
+			continue
+		}
+		select {
+		case <-done:
+		case <-deadline.C:
+			slog.Warn("background goroutine did not exit within timeout",
+				"timeout", waitTimeout)
+			return
+		}
 	}
-	return nil
+}
+
+// countPendingAcks returns the number of batches awaiting ACK. Used only for
+// diagnostics in drain timeout logging.
+func (c *Client) countPendingAcks() int {
+	n := 0
+	c.pendingAcks.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
 }
 
 // SessionID returns the current session ID.
@@ -474,7 +537,7 @@ func (c *Client) heartbeatLoop(ctx context.Context) {
 			c.controlMu.Lock()
 			if err := core.Write(c.controlStr, core.TypePing, core.FlagControl, payload); err != nil {
 				c.controlMu.Unlock()
-				slog.Debug("write ping failed", "error", err)
+				slog.Warn("write ping failed", "error", err)
 				return
 			}
 			c.controlMu.Unlock()

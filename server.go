@@ -64,13 +64,13 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 
 	for _, opt := range opts {
 		if err := opt(cfg); err != nil {
-			return nil, core.WrapError(core.NumConfig, core.ErrConfig, "server option", err)
+			return nil, core.WrapError(core.NumConfig, core.CodeConfig, "server option", err)
 		}
 	}
 
 	// Validate at least one version is enabled
 	if !cfg.EnableV1 && !cfg.EnableV2 && !cfg.EnableNTLS {
-		return nil, core.NewError(core.NumConfig, core.ErrConfig, "at least one version must be enabled")
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "at least one version must be enabled")
 	}
 
 	return &Server{cfg: cfg}, nil
@@ -83,7 +83,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
-		return core.NewError(core.NumSession, core.ErrSession, "server already started")
+		return core.NewError(core.NumSession, core.CodeSession, "server already started")
 	}
 	s.started = true
 	s.mu.Unlock()
@@ -94,7 +94,7 @@ func (s *Server) Start(ctx context.Context) error {
 			s.mu.Lock()
 			s.started = false
 			s.mu.Unlock()
-			return core.WrapError(core.NumConfig, core.ErrConfig, "init v1", err)
+			return core.WrapError(core.NumConfig, core.CodeConfig, "init v1", err)
 		}
 	}
 	if s.cfg.EnableV2 {
@@ -102,7 +102,7 @@ func (s *Server) Start(ctx context.Context) error {
 			s.mu.Lock()
 			s.started = false
 			s.mu.Unlock()
-			return core.WrapError(core.NumConfig, core.ErrConfig, "init v2", err)
+			return core.WrapError(core.NumConfig, core.CodeConfig, "init v2", err)
 		}
 	}
 	if s.cfg.EnableNTLS {
@@ -110,7 +110,7 @@ func (s *Server) Start(ctx context.Context) error {
 			s.mu.Lock()
 			s.started = false
 			s.mu.Unlock()
-			return core.WrapError(core.NumConfig, core.ErrConfig, "init ntls", err)
+			return core.WrapError(core.NumConfig, core.CodeConfig, "init ntls", err)
 		}
 	}
 
@@ -119,17 +119,17 @@ func (s *Server) Start(ctx context.Context) error {
 
 	if s.v1Server != nil {
 		g.Go(func() error {
-			return core.WrapError(core.NumTransport, core.ErrTransport, "v1", s.v1Server.Start(ctx))
+			return core.WrapError(core.NumTransport, core.CodeTransport, "v1", s.v1Server.Start(ctx))
 		})
 	}
 	if s.v2Server != nil {
 		g.Go(func() error {
-			return core.WrapError(core.NumTransport, core.ErrTransport, "v2", s.v2Server.Start(ctx))
+			return core.WrapError(core.NumTransport, core.CodeTransport, "v2", s.v2Server.Start(ctx))
 		})
 	}
 	if s.ntlsServer != nil {
 		g.Go(func() error {
-			return core.WrapError(core.NumTransport, core.ErrTransport, "ntls", s.ntlsServer.Start(ctx))
+			return core.WrapError(core.NumTransport, core.CodeTransport, "ntls", s.ntlsServer.Start(ctx))
 		})
 	}
 
@@ -137,7 +137,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Lock()
 		s.started = false
 		s.mu.Unlock()
-		return core.WrapError(core.NumTransport, core.ErrTransport, "server accept loop", err)
+		return core.WrapError(core.NumTransport, core.CodeTransport, "server accept loop", err)
 	}
 
 	return nil

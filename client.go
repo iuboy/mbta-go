@@ -64,26 +64,26 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 
 	for _, opt := range opts {
 		if err := opt(cfg); err != nil {
-			return nil, core.WrapError(core.NumConfig, core.ErrConfig, "client option", err)
+			return nil, core.WrapError(core.NumConfig, core.CodeConfig, "client option", err)
 		}
 	}
 
 	// Validate version
 	if cfg.Version == "" {
-		return nil, core.NewError(core.NumConfig, core.ErrConfig, "version is required")
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "version is required")
 	}
 	switch cfg.Version {
 	case Version1, Version2, VersionNTLS:
 		// valid
 	default:
-		return nil, core.NewError(core.NumVersion, core.ErrVersion, fmt.Sprintf("unsupported version: %s", cfg.Version))
+		return nil, core.NewError(core.NumVersion, core.CodeVersion, fmt.Sprintf("unsupported version: %s", cfg.Version))
 	}
 
 	if cfg.AgentID == "" {
-		return nil, core.NewError(core.NumConfig, core.ErrConfig, "AgentID is required")
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "AgentID is required")
 	}
 	if cfg.Server == "" {
-		return nil, core.NewError(core.NumConfig, core.ErrConfig, "Server address is required")
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Server address is required")
 	}
 
 	c := &Client{cfg: *cfg}
@@ -120,14 +120,14 @@ func Dial(ctx context.Context, server, agentID, token, version string, opts ...C
 
 	client, err := NewClient(allOpts...)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "dial create", err)
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial create", err)
 	}
 
 	if err := client.Connect(ctx); err != nil {
 		if closeErr := client.Close(); closeErr != nil {
 			slog.Debug("cleanup close after failed connect", "error", closeErr)
 		}
-		return nil, core.WrapError(core.NumTransport, core.ErrTransport, "dial connect", err)
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial connect", err)
 	}
 
 	return client, nil
@@ -143,7 +143,7 @@ func (c *Client) initClient() (versionedClient, error) {
 	case VersionNTLS:
 		return c.initNTLSClient()
 	default:
-		return nil, core.NewError(core.NumVersion, core.ErrVersion, fmt.Sprintf("unsupported version: %s", c.cfg.Version))
+		return nil, core.NewError(core.NumVersion, core.CodeVersion, fmt.Sprintf("unsupported version: %s", c.cfg.Version))
 	}
 }
 
@@ -170,7 +170,7 @@ func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, so
 	c.mu.RUnlock()
 
 	if client == nil {
-		return "", core.NewError(core.NumSession, core.ErrSession, "not connected (call Connect first)")
+		return "", core.NewError(core.NumSession, core.CodeSession, "not connected (call Connect first)")
 	}
 
 	return client.SendBatch(ctx, batch, tag, source)
@@ -224,7 +224,7 @@ func (c *Client) ActiveVersion() string {
 // initV1Client initializes the V1 client wrapper.
 func (c *Client) initV1Client() (versionedClient, error) {
 	if c.cfg.V1Creds == nil {
-		return nil, core.NewError(core.NumCredential, core.ErrCredential, "v1 credentials not provided")
+		return nil, core.NewError(core.NumCredential, core.CodeCredential, "v1 credentials not provided")
 	}
 
 	cfg := v1.ClientConfig{
@@ -250,7 +250,7 @@ func (c *Client) initV2Client() (versionedClient, error) {
 	slog.Warn("v2 protocol is not yet implemented — all operations will return errors")
 
 	if c.cfg.V2Creds == nil {
-		return nil, core.NewError(core.NumCredential, core.ErrCredential, "v2 GM credentials not provided")
+		return nil, core.NewError(core.NumCredential, core.CodeCredential, "v2 GM credentials not provided")
 	}
 
 	cfg := v2.ClientConfig{
@@ -276,7 +276,7 @@ func (c *Client) initNTLSClient() (versionedClient, error) {
 	slog.Warn("ntls protocol is not yet implemented — all operations will return errors")
 
 	if c.cfg.NTLSCreds == nil {
-		return nil, core.NewError(core.NumCredential, core.ErrCredential, "ntls credentials not provided")
+		return nil, core.NewError(core.NumCredential, core.CodeCredential, "ntls credentials not provided")
 	}
 
 	cfg := ntls.ClientConfig{
@@ -349,7 +349,7 @@ func WithVersion(version string) ClientOption {
 			cc.Version = version
 			return nil
 		default:
-			return core.NewError(core.NumVersion, core.ErrVersion, fmt.Sprintf("invalid version: %s", version))
+			return core.NewError(core.NumVersion, core.CodeVersion, fmt.Sprintf("invalid version: %s", version))
 		}
 	}
 }

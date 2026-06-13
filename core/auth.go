@@ -28,7 +28,7 @@ type AgentIdentity struct {
 }
 
 // ErrInvalidToken is returned when token validation fails.
-var ErrInvalidToken = NewError(NumAuth, ErrAuth, "invalid token")
+var ErrInvalidToken = NewError(NumAuth, CodeAuth, "invalid token")
 
 // StaticTokenValidator validates tokens against a static map (dev/test use).
 type StaticTokenValidator struct {
@@ -64,7 +64,7 @@ type SessionKeys struct {
 func GenerateSessionKeys(hmacAlgo ...string) (*SessionKeys, error) {
 	hmacKey := make([]byte, 32)
 	if _, err := rand.Read(hmacKey); err != nil {
-		return nil, WrapError(NumHMAC, ErrHMAC, "generate HMAC key", err)
+		return nil, WrapError(NumHMAC, CodeHMAC, "generate HMAC key", err)
 	}
 
 	algo := HMACAlgoSHA256

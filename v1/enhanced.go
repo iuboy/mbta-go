@@ -68,7 +68,7 @@ func (r *EnhancedRouter) OnSignalBatchWithResult(ctx context.Context, agentID st
 			Status:      core.ACKStatusThrottle,
 			EventsCount: len(batch.Signals),
 			Pressure:    pressure,
-			Error:       core.NewError(core.NumThrottle, core.ErrThrottle, "queue pressure critical, throttling"),
+			Error:       core.NewError(core.NumThrottle, core.CodeThrottle, "queue pressure critical, throttling"),
 		}, nil
 	}
 

@@ -69,7 +69,7 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 	if params.HMACAlgo == HMACAlgoSHA256 || params.HMACAlgo == HMACAlgoSM3 {
 		nonceBytes := make([]byte, 16)
 		if _, err := rand.Read(nonceBytes); err != nil {
-			return nil, WrapError(NumEnvelope, ErrEnvelope, "generate nonce", err)
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "generate nonce", err)
 		}
 		env.Nonce = base64.StdEncoding.EncodeToString(nonceBytes)
 	}
@@ -80,10 +80,10 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 		var buf bytes.Buffer
 		w := gzip.NewWriter(&buf)
 		if _, err := w.Write(batchPayload); err != nil {
-			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip compress", err)
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip compress", err)
 		}
 		if err := w.Close(); err != nil {
-			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip close", err)
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip close", err)
 		}
 		processed = buf.Bytes()
 	}
@@ -189,7 +189,7 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 	// Base64 decode
 	raw, err := base64.StdEncoding.DecodeString(env.Payload)
 	if err != nil {
-		return nil, WrapError(NumEnvelope, ErrEnvelope, "base64 decode payload", err)
+		return nil, WrapError(NumEnvelope, CodeEnvelope, "base64 decode payload", err)
 	}
 
 	// Decrypt (when encryption enabled)
@@ -199,7 +199,7 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 	if env.Compression == CompressionGzip {
 		r, err := gzip.NewReader(bytes.NewReader(raw))
 		if err != nil {
-			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip reader", err)
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip reader", err)
 		}
 		defer r.Close()
 
@@ -207,10 +207,10 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
 		decompressed, err := io.ReadAll(lr)
 		if err != nil {
-			return nil, WrapError(NumEnvelope, ErrEnvelope, "gzip decompress", err)
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip decompress", err)
 		}
 		if lr.N == 0 {
-			return nil, NewError(NumEnvelope, ErrEnvelope, fmt.Sprintf("decompressed payload exceeds %d bytes limit", MaxDecompressedSize))
+			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed payload exceeds %d bytes limit", MaxDecompressedSize))
 		}
 		return decompressed, nil
 	}
@@ -227,7 +227,7 @@ func EncodeEnvelope(env *SecureEnvelope) ([]byte, error) {
 func DecodeEnvelope(data []byte) (*SecureEnvelope, error) {
 	var env SecureEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
-		return nil, WrapError(NumEnvelope, ErrEnvelope, "decode envelope", err)
+		return nil, WrapError(NumEnvelope, CodeEnvelope, "decode envelope", err)
 	}
 	return &env, nil
 }

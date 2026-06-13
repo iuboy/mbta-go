@@ -70,10 +70,10 @@ func Write(w io.Writer, typ uint16, flags byte, payload []byte) error {
 		return err
 	}
 	if !knownTypes[typ] {
-		return NewError(NumProtocol, ErrProtocol, fmt.Sprintf("unknown frame type 0x%04x", typ))
+		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("unknown frame type 0x%04x", typ))
 	}
 	if len(payload) > int(MaxPayloadSize) {
-		return NewError(NumProtocol, ErrProtocol, fmt.Sprintf("payload exceeds max size (%d > %d)", len(payload), MaxPayloadSize))
+		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("payload exceeds max size (%d > %d)", len(payload), MaxPayloadSize))
 	}
 
 	hdr := make([]byte, HeaderSz)
@@ -85,11 +85,11 @@ func Write(w io.Writer, typ uint16, flags byte, payload []byte) error {
 	binary.BigEndian.PutUint32(hdr[12:16], crc32.ChecksumIEEE(payload))
 
 	if _, err := w.Write(hdr); err != nil {
-		return WrapError(NumProtocol, ErrProtocol, "write header", err)
+		return WrapError(NumProtocol, CodeProtocol, "write header", err)
 	}
 	if len(payload) > 0 {
 		if _, err := w.Write(payload); err != nil {
-			return WrapError(NumProtocol, ErrProtocol, "write payload", err)
+			return WrapError(NumProtocol, CodeProtocol, "write payload", err)
 		}
 	}
 	return nil
@@ -112,16 +112,16 @@ func DefaultLimits() Limits {
 func Read(r io.Reader, lim Limits) (Frame, error) {
 	hdr := make([]byte, HeaderSz)
 	if _, err := io.ReadFull(r, hdr); err != nil {
-		return Frame{}, WrapError(NumProtocol, ErrProtocol, "read header", err)
+		return Frame{}, WrapError(NumProtocol, CodeProtocol, "read header", err)
 	}
 
 	// Step 1: Magic
 	if !bytes.Equal(hdr[0:4], magicBytes) {
-		return Frame{}, NewError(NumProtocol, ErrProtocol, fmt.Sprintf("invalid magic %q", hdr[0:4]))
+		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("invalid magic %q", hdr[0:4]))
 	}
 	// Step 2: Version
 	if hdr[4] != Version {
-		return Frame{}, NewError(NumProtocol, ErrProtocol, fmt.Sprintf("unsupported version 0x%02x", hdr[4]))
+		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("unsupported version 0x%02x", hdr[4]))
 	}
 	// Step 3: Flags
 	flags := hdr[5]
@@ -135,12 +135,12 @@ func Read(r io.Reader, lim Limits) (Frame, error) {
 
 	// Step 4: Length
 	if length > lim.MaxPayloadSize {
-		return Frame{}, NewError(NumProtocol, ErrProtocol, fmt.Sprintf("payload too large (%d bytes)", length))
+		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("payload too large (%d bytes)", length))
 	}
 	// Guard against int overflow on 32-bit platforms where int is 32 bits
 	// but uint32 can hold values up to 4294967295 (> MaxInt32 = 2147483647).
 	if length > maxInt32 {
-		return Frame{}, NewError(NumProtocol, ErrProtocol, fmt.Sprintf("payload length overflow (%d bytes)", length))
+		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("payload length overflow (%d bytes)", length))
 	}
 
 	// Step 5: Read payload
@@ -153,13 +153,13 @@ func Read(r io.Reader, lim Limits) (Frame, error) {
 			// stream with a deadline, the deadline error will propagate and the
 			// stream position will at least be past what we already consumed.
 			_, _ = io.CopyN(io.Discard, r, int64(length)-int64(len(payload)))
-			return Frame{}, WrapError(NumProtocol, ErrProtocol, "read payload", err)
+			return Frame{}, WrapError(NumProtocol, CodeProtocol, "read payload", err)
 		}
 	}
 
 	// Step 6: CRC32
 	if crc32.ChecksumIEEE(payload) != expectedCRC {
-		return Frame{}, NewError(NumProtocol, ErrProtocol, "crc32 mismatch")
+		return Frame{}, NewError(NumProtocol, CodeProtocol, "crc32 mismatch")
 	}
 
 	return Frame{
@@ -176,10 +176,10 @@ func Read(r io.Reader, lim Limits) (Frame, error) {
 
 func validateFlags(flags byte) error {
 	if flags&flagReservedMask != 0 {
-		return NewError(NumProtocol, ErrProtocol, fmt.Sprintf("reserved flags bits set: 0x%02x", flags&flagReservedMask))
+		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("reserved flags bits set: 0x%02x", flags&flagReservedMask))
 	}
 	if flags&FlagMoreFollows != 0 {
-		return NewError(NumProtocol, ErrProtocol, "FlagMoreFollows is not supported in v1")
+		return NewError(NumProtocol, CodeProtocol, "FlagMoreFollows is not supported in v1")
 	}
 	return nil
 }

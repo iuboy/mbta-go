@@ -13,28 +13,28 @@ type SignalBatch struct {
 // Validate 校验 SignalBatch 必填字段。
 func (b *SignalBatch) Validate() error {
 	if len(b.Signals) == 0 {
-		return NewError(NumValidation, ErrValidation, "signals must not be empty")
+		return NewError(NumValidation, CodeValidation, "signals must not be empty")
 	}
 	for i, s := range b.Signals {
 		if s.SignalType == "" {
-			return NewError(NumValidation, ErrValidation, fmt.Sprintf("signal[%d]: signal_type is required", i))
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: signal_type is required", i))
 		}
 		// 基于 signal_type 的类型特定校验
 		switch s.SignalType {
 		case "metric":
 			if s.MetricName == "" {
-				return NewError(NumValidation, ErrValidation, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
+				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
 			}
 		case "span":
 			if s.Name == "" {
-				return NewError(NumValidation, ErrValidation, fmt.Sprintf("signal[%d]: name is required for span type", i))
+				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: name is required for span type", i))
 			}
 			if s.TraceID == "" {
-				return NewError(NumValidation, ErrValidation, fmt.Sprintf("signal[%d]: trace_id is required for span type", i))
+				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: trace_id is required for span type", i))
 			}
 		case "log":
 			if s.Body == nil {
-				return NewError(NumValidation, ErrValidation, fmt.Sprintf("signal[%d]: body is required for log type", i))
+				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: body is required for log type", i))
 			}
 		}
 	}

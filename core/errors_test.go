@@ -241,7 +241,7 @@ func TestErrorCodeFormats(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMBTAError_Error(t *testing.T) {
-	e := NewError(NumConfig, ErrConfig, "invalid config")
+	e := NewError(NumConfig, CodeConfig, "invalid config")
 	want := "[1000 ERR_CONFIG] invalid config"
 	if got := e.Error(); got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
@@ -250,7 +250,7 @@ func TestMBTAError_Error(t *testing.T) {
 
 func TestMBTAError_ErrorWrapped(t *testing.T) {
 	inner := fmt.Errorf("listen failed")
-	e := WrapError(NumTransport, ErrTransport, "dial QUIC", inner)
+	e := WrapError(NumTransport, CodeTransport, "dial QUIC", inner)
 	want := "[2000 ERR_TRANSPORT] dial QUIC: listen failed"
 	if got := e.Error(); got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
@@ -259,16 +259,16 @@ func TestMBTAError_ErrorWrapped(t *testing.T) {
 
 func TestMBTAError_Unwrap(t *testing.T) {
 	inner := fmt.Errorf("base error")
-	e := WrapError(NumTLS, ErrTLS, "tls failed", inner)
+	e := WrapError(NumTLS, CodeTLS, "tls failed", inner)
 	if !errors.Is(e, inner) {
 		t.Error("Unwrap should return inner error")
 	}
 }
 
 func TestMBTAError_Is(t *testing.T) {
-	e1 := NewError(NumAuth, ErrAuth, "auth failed")
-	e2 := NewError(NumAuth, ErrAuth, "different message")
-	e3 := NewError(NumTransport, ErrTransport, "transport")
+	e1 := NewError(NumAuth, CodeAuth, "auth failed")
+	e2 := NewError(NumAuth, CodeAuth, "different message")
+	e3 := NewError(NumTransport, CodeTransport, "transport")
 
 	if !errors.Is(e1, e2) {
 		t.Error("same NumCode should match via errors.Is")
@@ -280,13 +280,40 @@ func TestMBTAError_Is(t *testing.T) {
 
 func TestMBTAError_IsWrapped(t *testing.T) {
 	inner := fmt.Errorf("connection refused")
-	e := WrapError(NumTransport, ErrTransport, "dial", inner)
+	e := WrapError(NumTransport, CodeTransport, "dial", inner)
 
-	if !errors.Is(e, NewError(NumTransport, ErrTransport, "")) {
+	if !errors.Is(e, NewError(NumTransport, CodeTransport, "")) {
 		t.Error("wrapped error should match by NumCode")
 	}
 	if !errors.Is(e, inner) {
 		t.Error("wrapped error should match inner via errors.Is")
+	}
+}
+
+// TestSentinelErrors verifies the package-level sentinel errors enable
+// idiomatic errors.Is matching by category, including through wrapping.
+func TestSentinelErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		target  error
+		matches bool
+	}{
+		{"session matches sentinel", NewError(NumSession, CodeSession, "bad state"), ErrSession, true},
+		{"transport matches sentinel", WrapError(NumTransport, CodeTransport, "dial", fmt.Errorf("refused")), ErrTransport, true},
+		{"auth matches through wrap", WrapError(NumAuth, CodeAuth, "token", fmt.Errorf("expired")), ErrAuth, true},
+		{"config matches sentinel", NewError(NumConfig, CodeConfig, "missing"), ErrConfig, true},
+		{"validation matches sentinel", NewError(NumValidation, CodeValidation, "too long"), ErrValidation, true},
+		// Different category must NOT match.
+		{"transport does not match session", NewError(NumTransport, CodeTransport, "dial"), ErrSession, false},
+		{"auth does not match config", WrapError(NumAuth, CodeAuth, "tok", nil), ErrConfig, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errors.Is(tc.err, tc.target); got != tc.matches {
+				t.Errorf("errors.Is(%v, %v) = %v, want %v", tc.err, tc.target, got, tc.matches)
+			}
+		})
 	}
 }
 
@@ -297,9 +324,9 @@ func TestGetErrorCode(t *testing.T) {
 		want int
 	}{
 		{"standard error", fmt.Errorf("plain error"), 0},
-		{"mbta error", NewError(NumSpool, ErrSpool, "spool failed"), NumSpool},
-		{"wrapped mbta", WrapError(NumAuth, ErrAuth, "auth", fmt.Errorf("bad token")), NumAuth},
-		{"double wrapped", fmt.Errorf("outer: %w", WrapError(NumBatch, ErrBatch, "batch", fmt.Errorf("inner"))), NumBatch},
+		{"mbta error", NewError(NumSpool, CodeSpool, "spool failed"), NumSpool},
+		{"wrapped mbta", WrapError(NumAuth, CodeAuth, "auth", fmt.Errorf("bad token")), NumAuth},
+		{"double wrapped", fmt.Errorf("outer: %w", WrapError(NumBatch, CodeBatch, "batch", fmt.Errorf("inner"))), NumBatch},
 		{"nil", nil, 0},
 	}
 	for _, tt := range tests {
@@ -312,9 +339,9 @@ func TestGetErrorCode(t *testing.T) {
 }
 
 func TestGetErrorCodeString(t *testing.T) {
-	e := WrapError(NumEnvelope, ErrEnvelope, "gzip failed", fmt.Errorf("compress error"))
-	if got := GetErrorCodeString(e); got != ErrEnvelope {
-		t.Errorf("GetErrorCodeString() = %q, want %q", got, ErrEnvelope)
+	e := WrapError(NumEnvelope, CodeEnvelope, "gzip failed", fmt.Errorf("compress error"))
+	if got := GetErrorCodeString(e); got != CodeEnvelope {
+		t.Errorf("GetErrorCodeString() = %q, want %q", got, CodeEnvelope)
 	}
 	if got := GetErrorCodeString(fmt.Errorf("plain")); got != "" {
 		t.Errorf("GetErrorCodeString(plain) = %q, want empty", got)

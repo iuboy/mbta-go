@@ -110,17 +110,17 @@ func (h *ConnectionHandler) HandleConnection(ctx context.Context) error {
 	// Accept the control stream
 	s, role, err := h.conn.AcceptStream(ctx)
 	if err != nil {
-		return core.WrapError(core.NumStream, core.ErrStream, "accept control stream", err)
+		return core.WrapError(core.NumStream, core.CodeStream, "accept control stream", err)
 	}
 	if role != core.StreamRoleControl {
-		return core.NewError(core.NumProtocol, core.ErrProtocol, fmt.Sprintf("first stream must be control, got %s", role))
+		return core.NewError(core.NumProtocol, core.CodeProtocol, fmt.Sprintf("first stream must be control, got %s", role))
 	}
 	h.controlStr = s
 	h.controlW = s
 	defer h.controlStr.Close()
 
 	if err := h.sm.Transition(core.ServerStateControlWait); err != nil {
-		return core.WrapError(core.NumSession, core.ErrSession, "transition to CONTROL_WAIT", err)
+		return core.WrapError(core.NumSession, core.CodeSession, "transition to CONTROL_WAIT", err)
 	}
 
 	// Handle control stream messages
@@ -135,7 +135,7 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 	for {
 		f, err := core.Read(h.controlStr, core.DefaultLimits())
 		if err != nil {
-			return core.WrapError(core.NumProtocol, core.ErrProtocol, "read frame", err)
+			return core.WrapError(core.NumProtocol, core.CodeProtocol, "read frame", err)
 		}
 
 		switch f.Header.Type {
@@ -169,7 +169,7 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 				slog.Debug("unexpected control message after auth", "type", f.Header.Type)
 			} else {
 				h.sendError(core.CodeUnsupportedMessage, fmt.Sprintf("unexpected message type 0x%04x before auth", f.Header.Type), true)
-				return core.NewError(core.NumProtocol, core.ErrProtocol, fmt.Sprintf("unexpected message type 0x%04x", f.Header.Type))
+				return core.NewError(core.NumProtocol, core.CodeProtocol, fmt.Sprintf("unexpected message type 0x%04x", f.Header.Type))
 			}
 		}
 
@@ -183,7 +183,7 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 func (h *ConnectionHandler) handleHello(payload []byte) error {
 	var msg core.HelloMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {
-		return core.WrapError(core.NumProtocol, core.ErrProtocol, "decode hello", err)
+		return core.WrapError(core.NumProtocol, core.CodeProtocol, "decode hello", err)
 	}
 
 	if err := msg.Validate(); err != nil {
@@ -196,7 +196,7 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 	h.challengeNonce = uuid.Must(uuid.NewV7()).String()
 
 	if err := h.sm.Transition(core.ServerStateHelloReceived); err != nil {
-		return core.WrapError(core.NumSession, core.ErrSession, "transition to HELLO_RECEIVED", err)
+		return core.WrapError(core.NumSession, core.CodeSession, "transition to HELLO_RECEIVED", err)
 	}
 
 	// Negotiate capabilities
@@ -228,14 +228,14 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 
 	ackPayload, err := json.Marshal(helloAck)
 	if err != nil {
-		return core.WrapError(core.NumProtocol, core.ErrProtocol, "marshal hello_ack", err)
+		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal hello_ack", err)
 	}
 	if err := h.writeControl(core.TypeHelloAck, core.FlagControl, ackPayload); err != nil {
-		return core.WrapError(core.NumStream, core.ErrStream, "write hello_ack", err)
+		return core.WrapError(core.NumStream, core.CodeStream, "write hello_ack", err)
 	}
 
 	if err := h.sm.Transition(core.ServerStateAuthWait); err != nil {
-		return core.WrapError(core.NumSession, core.ErrSession, "transition to AUTH_WAIT", err)
+		return core.WrapError(core.NumSession, core.CodeSession, "transition to AUTH_WAIT", err)
 	}
 	slog.Info("hello processed", "agent", h.agentID, "session", h.sessionID)
 	return nil
@@ -245,13 +245,13 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	// Enforce authentication retry limit to prevent brute-force attacks.
 	if h.authAttempts >= maxAuthAttempts {
 		h.sendAuthFail("too_many_attempts", "authentication retry limit exceeded", false)
-		return core.NewError(core.NumAuth, core.ErrAuth, "too many auth attempts")
+		return core.NewError(core.NumAuth, core.CodeAuth, "too many auth attempts")
 	}
 	h.authAttempts++
 
 	var msg core.AuthMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {
-		return core.WrapError(core.NumProtocol, core.ErrProtocol, "decode auth", err)
+		return core.WrapError(core.NumProtocol, core.CodeProtocol, "decode auth", err)
 	}
 
 	if err := msg.Validate(); err != nil {
@@ -263,13 +263,13 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	if msg.AgentID != h.agentID {
 		slog.Warn("auth agent_id mismatch", "session", h.sessionID, "hello_agent", h.agentID, "auth_agent", msg.AgentID)
 		h.sendAuthFail("invalid_auth", "authentication failed", false)
-		return core.NewError(core.NumAuth, core.ErrAuth, "agent_id mismatch")
+		return core.NewError(core.NumAuth, core.CodeAuth, "agent_id mismatch")
 	}
 
 	if msg.SessionID != h.sessionID {
 		slog.Warn("auth session_id mismatch", "session", h.sessionID, "auth_session", msg.SessionID)
 		h.sendAuthFail("invalid_auth", "authentication failed", false)
-		return core.NewError(core.NumAuth, core.ErrAuth, "session_id mismatch")
+		return core.NewError(core.NumAuth, core.CodeAuth, "session_id mismatch")
 	}
 
 	// Challenge-response validation: 使用 HMAC(token, nonce) 验证客户端持有 token
@@ -282,7 +282,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 		if !hmac.Equal([]byte(msg.AuthNonce), []byte(expected)) {
 			slog.Warn("auth challenge mismatch", "session", h.sessionID)
 			h.sendAuthFail("challenge_mismatch", "auth_nonce HMAC verification failed", false)
-			return core.NewError(core.NumAuth, core.ErrAuth, "challenge nonce mismatch")
+			return core.NewError(core.NumAuth, core.CodeAuth, "challenge nonce mismatch")
 		}
 	}
 
@@ -294,19 +294,19 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 			if h.config.Metrics != nil {
 				h.config.Metrics.AuthFailureTotal.Inc()
 			}
-			return core.WrapError(core.NumAuth, core.ErrAuth, "token validation", err)
+			return core.WrapError(core.NumAuth, core.CodeAuth, "token validation", err)
 		}
 	}
 
 	// Generate session keys with the negotiated HMAC algorithm
 	if h.negotiated == nil {
 		h.sendAuthFail("internal_error", "no negotiation result", true)
-		return core.NewError(core.NumConfig, core.ErrConfig, "missing negotiation result")
+		return core.NewError(core.NumConfig, core.CodeConfig, "missing negotiation result")
 	}
 	keys, err := core.GenerateSessionKeys(h.negotiated.HMACAlgo)
 	if err != nil {
 		h.sendAuthFail("internal_error", "key generation failed", true)
-		return core.WrapError(core.NumConfig, core.ErrConfig, "session key generation", err)
+		return core.WrapError(core.NumConfig, core.CodeConfig, "session key generation", err)
 	}
 	h.keys = keys
 	h.expiresAt.Store(time.Now().Add(core.DefaultSessionTTL).Unix())
@@ -321,14 +321,14 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	}
 	okPayload, err := json.Marshal(authOK)
 	if err != nil {
-		return core.WrapError(core.NumProtocol, core.ErrProtocol, "marshal auth_ok", err)
+		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal auth_ok", err)
 	}
 	if err := h.writeControl(core.TypeAuthOK, core.FlagControl, okPayload); err != nil {
-		return core.WrapError(core.NumStream, core.ErrStream, "write auth_ok", err)
+		return core.WrapError(core.NumStream, core.CodeStream, "write auth_ok", err)
 	}
 
 	if err := h.sm.Transition(core.ServerStateReady); err != nil {
-		return core.WrapError(core.NumSession, core.ErrSession, "transition to READY", err)
+		return core.WrapError(core.NumSession, core.CodeSession, "transition to READY", err)
 	}
 	h.conn.SetAuthed(true)
 
@@ -358,7 +358,7 @@ func (h *ConnectionHandler) handlePing(payload []byte) {
 		return
 	}
 	if err := h.writeControl(core.TypePong, core.FlagControl, pongPayload); err != nil {
-		slog.Debug("write pong failed", "error", err)
+		slog.Warn("write pong failed", "error", err)
 	}
 }
 
@@ -587,7 +587,7 @@ func (h *ConnectionHandler) sendAck(seq uint64, chunkID string, count int, ackMo
 		return
 	}
 	if err := h.writeControl(core.TypeAck, core.FlagControl, payload); err != nil {
-		slog.Debug("write ack failed", "session", h.sessionID, "error", err)
+		slog.Warn("write ack failed", "session", h.sessionID, "error", err)
 	}
 }
 
@@ -605,7 +605,7 @@ func (h *ConnectionHandler) sendNack(seq uint64, chunkID, code, reason string, r
 		return
 	}
 	if err := h.writeControl(core.TypeNack, core.FlagControl, payload); err != nil {
-		slog.Debug("write nack failed", "session", h.sessionID, "error", err)
+		slog.Warn("write nack failed", "session", h.sessionID, "error", err)
 	}
 
 	if h.config.Metrics != nil {
@@ -625,7 +625,7 @@ func (h *ConnectionHandler) sendThrottle(retryDelayMs int, code, reason string) 
 		return
 	}
 	if err := h.writeControl(core.TypeThrottle, core.FlagControl, payload); err != nil {
-		slog.Debug("write throttle failed", "session", h.sessionID, "error", err)
+		slog.Warn("write throttle failed", "session", h.sessionID, "error", err)
 	}
 
 	if h.config.Metrics != nil {
@@ -645,7 +645,7 @@ func (h *ConnectionHandler) sendAuthFail(code, reason string, retryable bool) {
 		return
 	}
 	if err := h.writeControl(core.TypeAuthFail, core.FlagControl, payload); err != nil {
-		slog.Debug("write auth_fail failed", "session", h.sessionID, "error", err)
+		slog.Warn("write auth_fail failed", "session", h.sessionID, "error", err)
 	}
 }
 
@@ -662,7 +662,7 @@ func (h *ConnectionHandler) sendError(code, reason string, fatal bool) {
 		return
 	}
 	if err := h.writeControl(core.TypeError, core.FlagControl, payload); err != nil {
-		slog.Debug("write error frame failed", "session", h.sessionID, "error", err)
+		slog.Warn("write error frame failed", "session", h.sessionID, "error", err)
 	}
 }
 
@@ -680,7 +680,7 @@ func (h *ConnectionHandler) sendWindowUpdate(batches, events int, maxBytes int64
 		return
 	}
 	if err := h.writeControl(core.TypeWindow, core.FlagControl, payload); err != nil {
-		slog.Debug("write window failed", "session", h.sessionID, "error", err)
+		slog.Warn("write window failed", "session", h.sessionID, "error", err)
 	}
 	slog.Debug("window update sent",
 		"session", h.sessionID,

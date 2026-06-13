@@ -48,35 +48,35 @@ const (
 
 const (
 	// 配置/初始化
-	ErrConfig     = "ERR_CONFIG"
-	ErrCredential = "ERR_CREDENTIAL" //#nosec G101 -- false positive: error code constant, not a credential
+	CodeConfig     = "ERR_CONFIG"
+	CodeCredential = "ERR_CREDENTIAL" //#nosec G101 -- false positive: error code constant, not a credential
 
 	// 连接/传输
-	ErrTransport = "ERR_TRANSPORT"
-	ErrTLS       = "ERR_TLS"
-	ErrStream    = "ERR_STREAM"
+	CodeTransport = "ERR_TRANSPORT"
+	CodeTLS       = "ERR_TLS"
+	CodeStream    = "ERR_STREAM"
 
 	// 协议/会话
-	ErrHandshake = "ERR_HANDSHAKE"
-	ErrAuth      = "ERR_AUTH"
-	ErrSession   = "ERR_SESSION"
-	ErrProtocol  = "ERR_PROTOCOL"
+	CodeHandshake = "ERR_HANDSHAKE"
+	CodeAuth      = "ERR_AUTH"
+	CodeSession   = "ERR_SESSION"
+	CodeProtocol  = "ERR_PROTOCOL"
 
 	// 数据/业务
-	ErrBatch      = "ERR_BATCH"
-	ErrEnvelope   = "ERR_ENVELOPE"
-	ErrValidation = "ERR_VALIDATION"
-	ErrHMAC       = "ERR_HMAC"
+	CodeBatch      = "ERR_BATCH"
+	CodeEnvelope   = "ERR_ENVELOPE"
+	CodeValidation = "ERR_VALIDATION"
+	CodeHMAC       = "ERR_HMAC"
 
 	// 流控
-	ErrWindowFull = "ERR_WINDOW_FULL"
-	ErrThrottle   = "ERR_THROTTLE"
+	CodeWindowFull = "ERR_WINDOW_FULL"
+	CodeThrottle   = "ERR_THROTTLE"
 
 	// 存储
-	ErrSpool = "ERR_SPOOL"
+	CodeSpool = "ERR_SPOOL"
 
 	// 版本
-	ErrVersion = "ERR_VERSION"
+	CodeVersion = "ERR_VERSION"
 )
 
 // ---------------------------------------------------------------------------
@@ -156,6 +156,47 @@ func NewError(numCode int, code, msg string) *Error {
 func WrapError(numCode int, code, msg string, err error) *Error {
 	return &Error{NumCode: numCode, Code: code, Message: msg, Err: err}
 }
+
+// ---------------------------------------------------------------------------
+// Sentinel errors — 支持 errors.Is 按错误类别匹配
+// ---------------------------------------------------------------------------
+//
+// 这些 sentinel 仅携带 NumCode。Error.Is 按 NumCode 比较，因此对任何由
+// NewError/WrapError 创建的、NumCode 相同的错误，errors.Is 均返回 true。
+//
+// 用法：
+//
+//	if errors.Is(err, core.ErrSession) { ... }   // 推荐
+//	// 等价于旧的数字比较：
+//	// if core.GetErrorCode(err) == core.NumSession { ... }
+//
+// sentinel 本身不应直接返回给调用方（它是类别标记，不是具体错误）；
+// 返回具体错误时仍用 NewError/WrapError 携带 Code 与 Message。
+var (
+	ErrConfig     = &Error{NumCode: NumConfig}
+	ErrCredential = &Error{NumCode: NumCredential}
+
+	ErrTransport = &Error{NumCode: NumTransport}
+	ErrTLS       = &Error{NumCode: NumTLS}
+	ErrStream    = &Error{NumCode: NumStream}
+
+	ErrHandshake = &Error{NumCode: NumHandshake}
+	ErrAuth      = &Error{NumCode: NumAuth}
+	ErrSession   = &Error{NumCode: NumSession}
+	ErrProtocol  = &Error{NumCode: NumProtocol}
+
+	ErrBatch      = &Error{NumCode: NumBatch}
+	ErrEnvelope   = &Error{NumCode: NumEnvelope}
+	ErrValidation = &Error{NumCode: NumValidation}
+	ErrHMAC       = &Error{NumCode: NumHMAC}
+
+	ErrWindowFull = &Error{NumCode: NumWindowFull}
+	ErrThrottle   = &Error{NumCode: NumThrottle}
+
+	ErrSpool = &Error{NumCode: NumSpool}
+
+	ErrVersion = &Error{NumCode: NumVersion}
+)
 
 // ---------------------------------------------------------------------------
 // 提取函数
