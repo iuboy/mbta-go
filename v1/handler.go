@@ -224,6 +224,20 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 
 	// Negotiate capabilities
 	result := core.Negotiate(msg.Capabilities, h.config.Policy)
+	// 二次裁剪 (H-4)：若 Negotiate 乐观选中了 tokenless，但注入的 Auth 不实现
+	// TokenResolver，则撤回该能力——服务端无法按 agentID 反查 token，必须回退到
+	// 客户端回传明文 Token 的 legacy 路径。
+	if result.IsCapabilitySelected(core.CapAuthTokenless) {
+		if _, ok := h.config.Auth.(core.TokenResolver); !ok {
+			pruned := result.SelectedCapabilities[:0]
+			for _, c := range result.SelectedCapabilities {
+				if c != core.CapAuthTokenless {
+					pruned = append(pruned, c)
+				}
+			}
+			result.SelectedCapabilities = pruned
+		}
+	}
 	h.negotiated = &result
 
 	// Build HELLO_ACK
@@ -295,23 +309,49 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 		return core.NewError(core.NumAuth, core.CodeAuth, "session_id mismatch")
 	}
 
+	// === H-4：决定用于校验的 token 来源 ===
+	// tokenless 模式：客户端省略明文 Token，服务端按 agentID 反查 token。
+	// legacy 模式：客户端在 AUTH 帧携带明文 Token，服务端直接使用。
+	// 两条路径下游统一过 hmac.Equal 与 Validate 两道关，无捷径旁路。
+	tokenless := h.negotiated != nil && h.negotiated.IsCapabilitySelected(core.CapAuthTokenless)
+	var token string
+	if tokenless {
+		resolver, ok := h.config.Auth.(core.TokenResolver)
+		if !ok || resolver == nil {
+			// handleHello 应已裁剪此能力；防御性处理，避免误置导致旁路。
+			slog.Error("tokenless negotiated but Auth is not a TokenResolver", "session", h.sessionID)
+			h.failAuth("internal_error", "authentication failed")
+			return core.NewError(core.NumConfig, core.CodeConfig, "tokenless negotiated without TokenResolver")
+		}
+		t, err := resolver.ResolveToken(msg.AgentID)
+		if err != nil {
+			// 不区分"agent 不存在"与"token 无效"，避免 agentID 枚举。
+			slog.Warn("resolve token failed", "session", h.sessionID, "agent", msg.AgentID)
+			h.failAuth("invalid_auth", "authentication failed")
+			return core.WrapError(core.NumAuth, core.CodeAuth, "resolve token", err)
+		}
+		token = t
+	} else {
+		token = msg.Token
+	}
+
 	// Challenge-response validation: 使用 HMAC(token, nonce) 验证客户端持有 token
 	if h.challengeNonce != "" {
 		algo := core.HMACAlgoSHA256
 		if h.negotiated != nil && h.negotiated.HMACAlgo != core.HMACAlgoNone {
 			algo = h.negotiated.HMACAlgo
 		}
-		expected := core.ComputeChallengeResponse(msg.Token, h.challengeNonce, algo)
+		expected := core.ComputeChallengeResponse(token, h.challengeNonce, algo)
 		if !hmac.Equal([]byte(msg.AuthNonce), []byte(expected)) {
-			slog.Warn("auth challenge mismatch", "session", h.sessionID)
+			slog.Warn("auth challenge mismatch", "session", h.sessionID, "tokenless", tokenless)
 			h.failAuth("challenge_mismatch", "auth_nonce HMAC verification failed")
 			return core.NewError(core.NumAuth, core.CodeAuth, "challenge nonce mismatch")
 		}
 	}
 
-	// Token validation
+	// Token validation（授权/过期，统一用 token）
 	if h.config.Auth != nil {
-		_, err := h.config.Auth.Validate(msg.Token)
+		_, err := h.config.Auth.Validate(token)
 		if err != nil {
 			h.failAuth("invalid_token", "token validation failed")
 			if h.config.Metrics != nil {

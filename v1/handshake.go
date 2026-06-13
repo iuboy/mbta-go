@@ -87,19 +87,7 @@ func (c *Client) sendAuth() error {
 		return core.NewError(core.NumAuth, core.CodeAuth, "server did not provide challenge_nonce in HELLO_ACK, cannot authenticate")
 	}
 
-	// 使用 HMAC(token, nonce) 代替原始 nonce 回显，证明客户端持有 token
-	algo := core.HMACAlgoSHA256
-	if c.negotiated != nil && c.negotiated.HMACAlgo != core.HMACAlgoNone {
-		algo = c.negotiated.HMACAlgo
-	}
-
-	auth := core.AuthMessage{
-		Token:     c.config.Token,
-		AgentID:   c.config.AgentID,
-		SessionID: c.sessionID,
-		AuthNonce: core.ComputeChallengeResponse(c.config.Token, c.challengeNonce, algo),
-		HMACAlgo:  algo,
-	}
+	auth := c.buildAuthMessage()
 	payload, err := json.Marshal(auth)
 	if err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal auth", err)
@@ -111,6 +99,26 @@ func (c *Client) sendAuth() error {
 		return core.WrapError(core.NumSession, core.CodeSession, "transition to AUTH_SENT", err)
 	}
 	return nil
+}
+
+// buildAuthMessage 构造 AUTH 帧。tokenless 模式（协商选中 CapAuthTokenless）下
+// 省略明文 Token——服务端按 AgentID 反查 token 后验证挑战响应。IsCapabilitySelected
+// 对 nil negotiated 安全（返回 false），故未完成协商的调用方回退到回传 Token 的 legacy 路径。
+func (c *Client) buildAuthMessage() core.AuthMessage {
+	algo := core.HMACAlgoSHA256
+	if c.negotiated != nil && c.negotiated.HMACAlgo != core.HMACAlgoNone {
+		algo = c.negotiated.HMACAlgo
+	}
+	auth := core.AuthMessage{
+		AgentID:   c.config.AgentID,
+		SessionID: c.sessionID,
+		AuthNonce: core.ComputeChallengeResponse(c.config.Token, c.challengeNonce, algo),
+		HMACAlgo:  algo,
+	}
+	if !c.negotiated.IsCapabilitySelected(core.CapAuthTokenless) {
+		auth.Token = c.config.Token
+	}
+	return auth
 }
 
 func (c *Client) recvAuthResult() error {
@@ -132,10 +140,10 @@ func (c *Client) recvAuthResult() error {
 			if err != nil {
 				return core.WrapError(core.NumAuth, core.CodeAuth, "decode hmac key", err)
 			}
-				algo := okMsg.HMACAlgo
-				if algo == "" {
-					algo = core.HMACAlgoSHA256
-				}
+			algo := okMsg.HMACAlgo
+			if algo == "" {
+				algo = core.HMACAlgoSHA256
+			}
 			c.keys = &core.SessionKeys{
 				KeyID:    okMsg.KeyID,
 				HMACKey:  hmacKey,

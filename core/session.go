@@ -232,17 +232,18 @@ invalid:
 
 // Policy controls which capabilities the server accepts and which algorithms it prefers.
 type Policy struct {
-	RequireToken      bool
-	EnableGzip        bool
-	EnableHMACSHA256  bool
-	EnableHMACSM3     bool
-	EnableSM4GCM      bool
-	EnableSM2CertAuth bool
-	EnablePartialAck  bool
-	EnableWindow      bool
-	EnableThrottle    bool
-	EnableDurableAck  bool
-	EnableMultiStream bool
+	RequireToken        bool
+	EnableGzip          bool
+	EnableHMACSHA256    bool
+	EnableHMACSM3       bool
+	EnableSM4GCM        bool
+	EnableSM2CertAuth   bool
+	EnablePartialAck    bool
+	EnableWindow        bool
+	EnableThrottle      bool
+	EnableDurableAck    bool
+	EnableMultiStream   bool
+	EnableAuthTokenless bool // 允许客户端省略明文 Token（需 Auth 实现 TokenResolver）
 }
 
 // NegotiateResult contains the selected capabilities and algorithms.
@@ -255,9 +256,9 @@ type NegotiateResult struct {
 }
 
 // 设计说明：HELLO 和 AUTH 分为两步，原因：
-//   1. 未来支持 token 轮换（无需重新 HELLO）
-//   2. 未来版本的加密协商完成后，AUTH payload 可受加密保护
-//   3. 允许服务器在 HELLO_ACK 中下发 challenge nonce 用于挑战-响应
+//  1. 未来支持 token 轮换（无需重新 HELLO）
+//  2. 未来版本的加密协商完成后，AUTH payload 可受加密保护
+//  3. 允许服务器在 HELLO_ACK 中下发 challenge nonce 用于挑战-响应
 //
 // Negotiate computes the server-selected capabilities based on client offers and server policy.
 func Negotiate(clientCaps []string, policy Policy) NegotiateResult {
@@ -308,6 +309,7 @@ func Negotiate(clientCaps []string, policy Policy) NegotiateResult {
 		{policy.EnableThrottle, CapThrottle},
 		{policy.EnableDurableAck, CapDurableAck},
 		{policy.EnableMultiStream, CapMultiStream},
+		{policy.EnableAuthTokenless, CapAuthTokenless},
 	} {
 		if cap.enable && offered[cap.offered] {
 			res.SelectedCapabilities = append(res.SelectedCapabilities, cap.offered)
@@ -315,6 +317,16 @@ func Negotiate(clientCaps []string, policy Policy) NegotiateResult {
 	}
 
 	return res
+}
+
+// IsCapabilitySelected reports whether cap was among the server-selected
+// capabilities. Safe to call on a nil *NegotiateResult (returns false), so
+// callers need not nil-check before querying.
+func (r *NegotiateResult) IsCapabilitySelected(cap string) bool {
+	if r == nil {
+		return false
+	}
+	return slices.Contains(r.SelectedCapabilities, cap)
 }
 
 // ValidateHello checks the HELLO message is valid for v1.

@@ -22,7 +22,7 @@ type TokenValidator interface {
 
 // AgentIdentity is returned on successful token authentication.
 type AgentIdentity struct {
-	AgentID     string     // unique agent identifier
+	AgentID     string    // unique agent identifier
 	Permissions []string  // granted permissions
 	ExpiresAt   time.Time // token expiration time
 }
@@ -30,14 +30,38 @@ type AgentIdentity struct {
 // ErrInvalidToken is returned when token validation fails.
 var ErrInvalidToken = NewError(NumAuth, CodeAuth, "invalid token")
 
+// TokenResolver resolves a long-term token by agent identifier. Servers whose
+// Auth implementation also satisfies this interface can suppress plaintext
+// token transmission in the AUTH frame: the client omits Token and the server
+// resolves it from the claimed AgentID, then verifies the challenge response.
+// See CapAuthTokenless and v1.ConnectionHandler.handleAuth.
+type TokenResolver interface {
+	ResolveToken(agentID string) (token string, err error)
+}
+
+// ErrAgentNotFound is returned by TokenResolver when no token is registered for
+// the agent. It shares the auth error family with ErrInvalidToken so failures
+// do not reveal whether a given agentID exists (avoids agent enumeration).
+var ErrAgentNotFound = NewError(NumAuth, CodeAuth, "agent not found")
+
 // StaticTokenValidator validates tokens against a static map (dev/test use).
+// It additionally implements TokenResolver via a reverse agentID->token index,
+// so it supports tokenless AUTH out of the box.
 type StaticTokenValidator struct {
-	tokens map[string]string // token -> agentID
+	tokens map[string]string // token  -> agentID (Validate 路径)
+	agents map[string]string // agentID-> token   (ResolveToken 路径)
 }
 
 // NewStaticTokenValidator creates a validator from a token->agentID mapping.
+// It also builds a reverse agentID->token index. When one agentID has multiple
+// tokens, last-write-wins applies (deterministic; production multi-token/agent
+// setups should implement a custom TokenValidator+TokenResolver).
 func NewStaticTokenValidator(tokens map[string]string) *StaticTokenValidator {
-	return &StaticTokenValidator{tokens: tokens}
+	agents := make(map[string]string, len(tokens))
+	for tok, aid := range tokens {
+		agents[aid] = tok
+	}
+	return &StaticTokenValidator{tokens: tokens, agents: agents}
 }
 
 // Validate looks up the token and returns the associated agent identity.
@@ -51,6 +75,22 @@ func (v *StaticTokenValidator) Validate(token string) (*AgentIdentity, error) {
 		ExpiresAt: time.Now().Add(DefaultSessionTTL),
 	}, nil
 }
+
+// ResolveToken looks up the token associated with an agent identifier. Used by
+// servers supporting tokenless AUTH (see CapAuthTokenless) to verify the
+// challenge response without the client transmitting its plaintext token.
+func (v *StaticTokenValidator) ResolveToken(agentID string) (string, error) {
+	if tok, ok := v.agents[agentID]; ok {
+		return tok, nil
+	}
+	return "", ErrAgentNotFound
+}
+
+// 编译期断言：StaticTokenValidator 同时满足 TokenValidator 与 TokenResolver。
+var (
+	_ TokenValidator = (*StaticTokenValidator)(nil)
+	_ TokenResolver  = (*StaticTokenValidator)(nil)
+)
 
 // SessionKeys holds the cryptographic material for an authenticated session.
 type SessionKeys struct {

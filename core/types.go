@@ -25,18 +25,19 @@ const (
 // Capability identifiers.
 const (
 	CapCodecJSON      = "codec_json"
-	CapCodecMsgpack   = "codec_msgpack"    // 保留，v1 未实现，计划未来版本支持
+	CapCodecMsgpack   = "codec_msgpack" // 保留，v1 未实现，计划未来版本支持
 	CapCompressGzip   = "compress_gzip"
-	CapCompressZstd   = "compress_zstd"    // 保留，v1 未实现，计划未来版本支持
+	CapCompressZstd   = "compress_zstd" // 保留，v1 未实现，计划未来版本支持
 	CapHMACSHA256     = "hmac_sha256"
 	CapHMACSM3        = "hmac_sm3"
-	CapSM4GCM         = "sm4_gcm"          // 保留，v1 未实现，计划未来版本支持
-	CapSM2CertAuth    = "sm2_cert_auth"    // 保留，v1 未实现，计划未来版本支持
+	CapSM4GCM         = "sm4_gcm"       // 保留，v1 未实现，计划未来版本支持
+	CapSM2CertAuth    = "sm2_cert_auth" // 保留，v1 未实现，计划未来版本支持
 	CapPartialAck     = "partial_ack"
 	CapWindowFlowCtrl = "window_flow_control"
 	CapThrottle       = "throttle"
 	CapMultiStream    = "multi_data_stream" // 保留，v1 未实现，计划未来版本支持
 	CapDurableAck     = "durable_ack"
+	CapAuthTokenless  = "auth_tokenless" // 客户端可在 AUTH 帧省略明文 Token，由服务端按 agentID 反查
 )
 
 // Algorithm identifiers (envelope fields).
