@@ -279,6 +279,61 @@ func buildTestEnvelope(t *testing.T, batch core.BatchMessage, params core.Params
 	return envPayload
 }
 
+// TestProcessBatch_ServerWindowEnforced 验证服务端 inflight 窗口强制 (M-4)：
+// 服务端窗口已满时新 batch 应被 THROTTLE 拒绝而非投递，防止已认证客户端无视
+// 客户端侧流控持续灌入。
+func TestProcessBatch_ServerWindowEnforced(t *testing.T) {
+	sink := &mockSink{}
+	h := &ConnectionHandler{
+		config:         ConnectionHandlerConfig{Sink: sink, Policy: core.Policy{}},
+		sm:             core.NewServerMachine(),
+		replay:         core.NewReplayCache(),
+		window:         core.NewWindow(1, 1, 1024), // 仅容 1 batch / 1 event / 1024 bytes
+		serverInflight: &core.Inflight{},
+		controlW:       &bytes.Buffer{},
+		negotiated:     &core.NegotiateResult{HMACAlgo: core.HMACAlgoNone},
+		agentID:        "agent-1",
+		sessionID:      "s-win",
+	}
+	// 预填满服务端窗口：模拟 1 个 batch 已在途未 ACK。
+	h.serverInflight.Add(1, 512)
+
+	signalBatch := &core.SignalBatch{
+		Signals: []*core.SignalRecord{{SignalType: "log", TimeUnixMs: 1, Body: "overflow"}},
+	}
+	batchJSON, _ := json.Marshal(signalBatch)
+	batch := core.BatchMessage{Seq: 1, ChunkID: "chunk-win", Batch: batchJSON}
+	params := core.Params{
+		SessionID: "s-win", Seq: 1, ChunkID: "chunk-win",
+		Codec: core.CodecJSON, HMACAlgo: core.HMACAlgoNone,
+	}
+	envPayload := buildTestEnvelope(t, batch, params)
+
+	var buf bytes.Buffer
+	_ = core.Write(&buf, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload)
+	f, err := core.Read(bytes.NewReader(buf.Bytes()), core.DefaultLimits())
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+
+	h.processBatch(context.Background(), nil, f.Payload)
+
+	// 窗口满 → 应被 THROTTLE，未投递给 sink。
+	if len(sink.batches) != 0 {
+		t.Fatalf("expected 0 batches delivered (window full), got %d", len(sink.batches))
+	}
+
+	// controlW 应写入 THROTTLE 帧。
+	out := h.controlW.(*bytes.Buffer).Bytes()
+	frame, err := core.Read(bytes.NewReader(out), core.DefaultLimits())
+	if err != nil {
+		t.Fatalf("expected THROTTLE frame on control stream, got read error: %v", err)
+	}
+	if frame.Header.Type != core.TypeThrottle {
+		t.Errorf("expected THROTTLE frame, got 0x%04x", frame.Header.Type)
+	}
+}
+
 func TestProcessBatch_WithGzipCompression(t *testing.T) {
 	sink := &mockSink{}
 	h := &ConnectionHandler{

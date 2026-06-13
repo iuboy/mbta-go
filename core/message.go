@@ -98,6 +98,13 @@ type AuthFailMessage struct {
 	Code      string `json:"code"`
 	Reason    string `json:"reason"`
 	Retryable bool   `json:"retryable"`
+	// ChallengeNonce carries a freshly rotated server challenge on retryable
+	// failures. Each challenge is valid for exactly one AUTH attempt, so a
+	// client implementing retry MUST recompute AuthNonce against this new nonce
+	// before resending. Older clients that do not recognize this field simply
+	// surface the failure (backwards compatible). Optional: omitted on
+	// non-retryable failures (e.g. too_many_attempts).
+	ChallengeNonce string `json:"challenge_nonce,omitempty"`
 }
 
 // BatchMessage carries a batch of events inside the SecureEnvelope payload.

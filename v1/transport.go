@@ -18,6 +18,14 @@ import (
 // ALPNProtocol is the Application-Layer Protocol Negotiation identifier for MBTA v1 over QUIC.
 const ALPNProtocol = "mbta/1"
 
+// 默认传输参数：配置未显式指定时使用。(H-3)
+// 之前 IdleTimeout 只被映射到 KeepAlivePeriod，从未设为 quic.Config.MaxIdleTimeout，
+// 导致未显式配置 IdleTimeout 的连接在空闲时永不超时，可被慢速攻击长期占用。
+const (
+	defaultIdleTimeout        = 60 * time.Second // 未配置时的连接最大空闲时长
+	defaultMaxIncomingStreams = 256              // 单连接并发 QUIC 流上限
+)
+
 // ServerCredentials holds server-side TLS credentials.
 // Follows Go naming convention (similar to tls.Certificate).
 type ServerCredentials struct {
@@ -48,7 +56,7 @@ type ClientCredentials struct {
 type QUICClientConfig struct {
 	Server      string             // server address (e.g. "localhost:7400")
 	Credentials *ClientCredentials // TLS credentials (nil skips client cert)
-	IdleTimeout time.Duration       // connection idle timeout
+	IdleTimeout time.Duration      // connection idle timeout
 }
 
 // buildServerTLS creates a tls.Config for the server.
@@ -144,9 +152,19 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 		return nil, err
 	}
 
+	// 应用默认值并正确映射到 MaxIdleTimeout (H-3)。
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultIdleTimeout
+	}
+	maxStreams := cfg.MaxIncomingStreams
+	if maxStreams <= 0 {
+		maxStreams = defaultMaxIncomingStreams
+	}
 	quicCfg := &quic.Config{
-		MaxIncomingStreams: cfg.MaxIncomingStreams,
-		KeepAlivePeriod:    cfg.IdleTimeout / 3,
+		MaxIncomingStreams: maxStreams,
+		MaxIdleTimeout:     idleTimeout,
+		KeepAlivePeriod:    idleTimeout / 3,
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Address)
@@ -256,8 +274,14 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 		return nil, err
 	}
 
+	// 客户端同样应用 MaxIdleTimeout 默认值 (H-3)，避免恶意/异常服务端让连接长期挂起。
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultIdleTimeout
+	}
 	quicCfg := &quic.Config{
-		KeepAlivePeriod: cfg.IdleTimeout / 3,
+		MaxIdleTimeout:  idleTimeout,
+		KeepAlivePeriod: idleTimeout / 3,
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Server)

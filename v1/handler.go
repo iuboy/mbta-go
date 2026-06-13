@@ -40,13 +40,14 @@ func (h *ConnectionHandler) loadLastPressure() core.PressureState {
 // NewConnectionHandler creates a new connection handler.
 func NewConnectionHandler(cfg ConnectionHandlerConfig) *ConnectionHandler {
 	return &ConnectionHandler{
-		conn:         cfg.Conn,
-		config:       cfg,
-		sm:           core.NewServerMachine(),
-		replay:       core.NewReplayCache(),
-		window:       core.NewWindow(windowMaxBatches, windowMaxEvents, windowMaxBytes),
-		streamSem:    make(chan struct{}, maxConcurrentDataStreams),
-		lastPressure: func() atomic.Value { v := atomic.Value{}; v.Store(core.PressureNormal); return v }(),
+		conn:           cfg.Conn,
+		config:         cfg,
+		sm:             core.NewServerMachine(),
+		replay:         core.NewReplayCache(),
+		window:         core.NewWindow(windowMaxBatches, windowMaxEvents, windowMaxBytes),
+		streamSem:      make(chan struct{}, maxConcurrentDataStreams),
+		serverInflight: &core.Inflight{},
+		lastPressure:   func() atomic.Value { v := atomic.Value{}; v.Store(core.PressureNormal); return v }(),
 	}
 }
 
@@ -66,42 +67,58 @@ type ConnectionHandler struct {
 	controlMu  sync.Mutex // protects concurrent writes to controlWriter
 	controlW   io.Writer  // control stream writer (set to controlStr in production)
 
-	lastPressure   atomic.Value       // tracks pressure state for WINDOW updates (core.PressureState)
-	challengeNonce string             // server-generated challenge for auth
-	authAttempts   int                // tracks authentication retry count
-	expiresAt      atomic.Int64       // 会话过期时间(Unix秒)，processBatch 检查
+	lastPressure   atomic.Value // tracks pressure state for WINDOW updates (core.PressureState)
+	challengeNonce string       // server-generated challenge for auth
+	authAttempts   int          // tracks authentication retry count
+	expiresAt      atomic.Int64 // 会话过期时间(Unix秒)，processBatch 检查
 
-	acceptOnce    sync.Once     // ensures acceptDataStreams starts only once
-	streamSem     chan struct{} // limits concurrent data-stream goroutines
-	activeStreams atomic.Int32
+	acceptOnce     sync.Once     // ensures acceptDataStreams starts only once
+	streamSem      chan struct{} // limits concurrent data-stream goroutines
+	activeStreams  atomic.Int32
+	streamsWG      sync.WaitGroup // tracks acceptDataStreams + handleDataStream goroutines (H-1)
+	serverInflight *core.Inflight // server-side flow-control accounting (M-4)
 }
 
 const (
-	maxConcurrentDataStreams = 64
-	maxAuthAttempts         = 3
-	heartbeatIntervalSec    = 30
-	maxFramePayloadBytes    = 16 * 1024 * 1024
-	maxBatchBytes           = 8 * 1024 * 1024
-	maxEventBytes           = 256 * 1024
-	maxBatchEvents          = 10000
-	windowMaxBatches        = 100
-	windowMaxEvents         = 10000
-	windowMaxBytes   int64  = 16 * 1024 * 1024
-	throttleRetryMs         = 1000
+	maxConcurrentDataStreams       = 64
+	maxAuthAttempts                = 3
+	heartbeatIntervalSec           = 30
+	maxFramePayloadBytes           = 16 * 1024 * 1024
+	maxBatchBytes                  = 8 * 1024 * 1024
+	maxEventBytes                  = 256 * 1024
+	maxBatchEvents                 = 10000
+	windowMaxBatches               = 100
+	windowMaxEvents                = 10000
+	windowMaxBytes           int64 = 16 * 1024 * 1024
+	throttleRetryMs                = 1000
 )
 
 // HandleConnection orchestrates the full connection lifecycle.
 func (h *ConnectionHandler) HandleConnection(ctx context.Context) error {
 	defer func() {
-		// 安全清除会话密钥
+		// 1. 先关闭 QUIC 连接：让 acceptDataStreams 中阻塞的 AcceptStream 解除阻塞，
+		//    各 handleDataStream 读取循环也随之报错退出。(H-1)
+		if err := h.conn.CloseWithError(0, "done"); err != nil {
+			slog.Debug("connection close error", "session", h.sessionID, "error", err)
+		}
+
+		// 2. 等待所有数据流 goroutine 退出后再触碰 keys，避免与 processBatch 中的
+		//    h.keys 读取产生数据竞态。带超时兜底，防止某个 goroutine 卡死阻塞关闭。
+		done := make(chan struct{})
+		go func() { h.streamsWG.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			slog.Warn("data stream goroutines did not exit within timeout",
+				"session", h.sessionID, "active", h.activeStreams.Load())
+		}
+
+		// 3. 此时已无 goroutine 读 keys，安全清除会话密钥。
 		if h.keys != nil {
 			for i := range h.keys.HMACKey {
 				h.keys.HMACKey[i] = 0
 			}
 			h.keys = nil
-		}
-		if err := h.conn.CloseWithError(0, "done"); err != nil {
-			slog.Debug("connection close error", "session", h.sessionID, "error", err)
 		}
 	}()
 
@@ -175,7 +192,13 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 
 		// After AUTH_OK, also accept data streams (exactly once)
 		if h.sm.State() == core.ServerStateReady {
-			h.acceptOnce.Do(func() { go h.acceptDataStreams(ctx) })
+			h.acceptOnce.Do(func() {
+				h.streamsWG.Add(1)
+				go func() {
+					defer h.streamsWG.Done()
+					h.acceptDataStreams(ctx)
+				}()
+			})
 		}
 	}
 }
@@ -256,19 +279,19 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 
 	if err := msg.Validate(); err != nil {
 		slog.Warn("auth validation failed", "session", h.sessionID, "error", err)
-		h.sendAuthFail("invalid_auth", "authentication failed", false)
+		h.failAuth("invalid_auth", "authentication failed")
 		return err
 	}
 
 	if msg.AgentID != h.agentID {
 		slog.Warn("auth agent_id mismatch", "session", h.sessionID, "hello_agent", h.agentID, "auth_agent", msg.AgentID)
-		h.sendAuthFail("invalid_auth", "authentication failed", false)
+		h.failAuth("invalid_auth", "authentication failed")
 		return core.NewError(core.NumAuth, core.CodeAuth, "agent_id mismatch")
 	}
 
 	if msg.SessionID != h.sessionID {
 		slog.Warn("auth session_id mismatch", "session", h.sessionID, "auth_session", msg.SessionID)
-		h.sendAuthFail("invalid_auth", "authentication failed", false)
+		h.failAuth("invalid_auth", "authentication failed")
 		return core.NewError(core.NumAuth, core.CodeAuth, "session_id mismatch")
 	}
 
@@ -281,7 +304,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 		expected := core.ComputeChallengeResponse(msg.Token, h.challengeNonce, algo)
 		if !hmac.Equal([]byte(msg.AuthNonce), []byte(expected)) {
 			slog.Warn("auth challenge mismatch", "session", h.sessionID)
-			h.sendAuthFail("challenge_mismatch", "auth_nonce HMAC verification failed", false)
+			h.failAuth("challenge_mismatch", "auth_nonce HMAC verification failed")
 			return core.NewError(core.NumAuth, core.CodeAuth, "challenge nonce mismatch")
 		}
 	}
@@ -290,7 +313,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	if h.config.Auth != nil {
 		_, err := h.config.Auth.Validate(msg.Token)
 		if err != nil {
-			h.sendAuthFail("invalid_token", "token validation failed", false)
+			h.failAuth("invalid_token", "token validation failed")
 			if h.config.Metrics != nil {
 				h.config.Metrics.AuthFailureTotal.Inc()
 			}
@@ -372,10 +395,12 @@ func (h *ConnectionHandler) acceptDataStreams(ctx context.Context) {
 			select {
 			case h.streamSem <- struct{}{}:
 				h.activeStreams.Add(1)
+				h.streamsWG.Add(1)
 				go func() {
 					defer func() {
 						<-h.streamSem
 						h.activeStreams.Add(-1)
+						h.streamsWG.Done()
 					}()
 					h.handleDataStream(ctx, s)
 				}()
@@ -488,26 +513,52 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 		return
 	}
 
+	batchEvents := len(signalBatch.Signals)
+	batchBytes := int64(len(batchPayload))
+
+	// 服务端流控强制 (M-4)：客户端侧 window 检查只对正常客户端有效，已认证的恶意/异常
+	// 客户端可无视窗口持续灌入。此处按事件数与字节检查服务端 inflight 窗口，超限发
+	// THROTTLE 让客户端退避重试。检查置于 replay check 之前：窗口满时新包被直接拒绝
+	// 且不进入 replay 缓存，客户端重试时仍按新包正常处理（不会被误判为已处理）。
+	// serverInflight 由 NewConnectionHandler 初始化；enforceWindow 的 nil 分支仅为兼容
+	// 直接构造 ConnectionHandler 字面量的既有测试，生产路径恒为 true。
+	enforceWindow := h.serverInflight != nil && h.window != nil
+	if enforceWindow && !h.window.CanSend(h.serverInflight, batchEvents, batchBytes) {
+		h.sendThrottle(throttleRetryMs, "window_exceeded", "server flow-control window exceeded")
+		return
+	}
+	if enforceWindow {
+		h.serverInflight.Add(batchEvents, batchBytes)
+	}
+
 	// Replay check
 	dedupKey := core.Key(h.agentID, batchMsg.ChunkID)
 	existing := h.replay.SeenOrAdd(dedupKey)
 	if existing != nil {
-		// Already processed — return correct ack_mode based on stored status.
+		// Already processed — 重复包不占用服务端窗口，撤销上方 Add 后返回幂等 ACK。
+		if enforceWindow {
+			h.serverInflight.Remove(batchEvents, batchBytes)
+		}
 		ackMode := core.AckModeAccepted
 		if existing.Status == core.ReplayDurable {
 			ackMode = core.AckModeDurable
 		}
-		h.sendAck(batchMsg.Seq, batchMsg.ChunkID, len(signalBatch.Signals), ackMode)
+		h.sendAck(batchMsg.Seq, batchMsg.ChunkID, batchEvents, ackMode)
 		return
 	}
 
 	// Process events
 	h.replay.Update(dedupKey, core.ReplayAccepted)
-	h.routeAndACK(ctx, dedupKey, &batchMsg, &signalBatch)
+	h.routeAndACK(ctx, dedupKey, &batchMsg, &signalBatch, batchBytes)
 }
 
 // routeAndACK routes the batch to the configured sink and sends the appropriate ACK response.
-func (h *ConnectionHandler) routeAndACK(ctx context.Context, dedupKey string, batchMsg *core.BatchMessage, signalBatch *core.SignalBatch) {
+func (h *ConnectionHandler) routeAndACK(ctx context.Context, dedupKey string, batchMsg *core.BatchMessage, signalBatch *core.SignalBatch, batchBytes int64) {
+	// 处理完成（含所有 ACK/THROTTLE 退出路径）后释放服务端 inflight 占用。(M-4)
+	if h.serverInflight != nil {
+		defer h.serverInflight.Remove(len(signalBatch.Signals), batchBytes)
+	}
+
 	ackMode := core.AckModeAccepted
 
 	if h.config.Sink != nil {
@@ -630,6 +681,29 @@ func (h *ConnectionHandler) sendThrottle(retryDelayMs int, code, reason string) 
 
 	if h.config.Metrics != nil {
 		h.config.Metrics.ThrottledTotal.Inc()
+	}
+}
+
+// failAuth 发送 AUTH_FAIL 帧并在每次调用时轮换 challengeNonce、将新 nonce 随帧下发。
+// 这样保证每个 challenge 仅用于一次在线验证，限制在线穷举窗口（离线穷举由 token 熵兜底）。
+// retryable 始终为 true：凭证类错误本就允许客户端重试；实现重试的客户端必须用返回的
+// 新 nonce 重新计算 AuthNonce，不识别该字段的旧客户端照常报错，向后兼容。(M-1)
+// 不可重试的终态失败（too_many_attempts、internal_error）仍用 sendAuthFail，不轮换 nonce。
+func (h *ConnectionHandler) failAuth(code, reason string) {
+	h.challengeNonce = uuid.Must(uuid.NewV7()).String()
+	fail := core.AuthFailMessage{
+		Code:           code,
+		Reason:         reason,
+		Retryable:      true,
+		ChallengeNonce: h.challengeNonce,
+	}
+	payload, err := json.Marshal(fail)
+	if err != nil {
+		slog.Warn("marshal auth_fail failed", "error", err)
+		return
+	}
+	if err := h.writeControl(core.TypeAuthFail, core.FlagControl, payload); err != nil {
+		slog.Warn("write auth_fail failed", "session", h.sessionID, "error", err)
 	}
 }
 

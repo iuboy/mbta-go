@@ -107,9 +107,9 @@ func WithMaxSize(bytes int64) SpoolOption {
 // NOTE: 当前实现使用全量 JSON 重写（每次 flush 重写整个文件）。
 // 当 spool 接近 512 MiB 上限时，这会成为性能瓶颈。
 // 未来改进方向：
-//   1. 仅 flush dirty records（增量写入）
-//   2. 使用 append-only 格式 + 定期 compaction
-//   3. 使用更高效的序列化格式（如 msgpack 或 protobuf）
+//  1. 仅 flush dirty records（增量写入）
+//  2. 使用 append-only 格式 + 定期 compaction
+//  3. 使用更高效的序列化格式（如 msgpack 或 protobuf）
 //
 // When flushInterval > 0, writes are buffered and flushed periodically by a
 // background goroutine. When flushInterval == 0, every mutation flushes
@@ -131,6 +131,8 @@ type Spool struct {
 
 	// Disk protection
 	maxSize int64 // maximum estimated spool size (default 512 MiB)
+
+	closeOnce sync.Once // (M-2) 保证 Close 幂等，防止二次调用 close(stopCh) panic
 }
 
 const defaultSpoolMaxSize int64 = 512 * 1024 * 1024 // 512 MiB
@@ -343,17 +345,21 @@ func (s *Spool) Sync() error {
 }
 
 // Close stops the background flush goroutine and performs a final flush.
-// The Spool must not be used after Close.
+// The Spool must not be used after Close. Safe to call multiple times — only
+// the first call performs shutdown; subsequent calls return the first result. (M-2)
 func (s *Spool) Close() error {
-	if s.flushInterval > 0 {
-		close(s.stopCh)
-		<-s.doneCh
-	}
-
-	// Final synchronous flush.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.flushAllLocked()
+	var err error
+	s.closeOnce.Do(func() {
+		if s.flushInterval > 0 {
+			close(s.stopCh)
+			<-s.doneCh
+		}
+		// Final synchronous flush.
+		s.mu.Lock()
+		err = s.flushAllLocked()
+		s.mu.Unlock()
+	})
+	return err
 }
 
 // markDirty sets the dirty flags. Must be called with s.mu held.

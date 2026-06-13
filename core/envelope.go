@@ -181,8 +181,17 @@ func VerifyHMAC(key []byte, env *SecureEnvelope) bool {
 	}
 }
 
-// MaxDecompressedSize limits decompressed payload to 100 MB to prevent zip-bomb attacks.
-const MaxDecompressedSize = 100 * 1024 * 1024
+// MaxDecompressedSize limits a decompressed envelope payload to 8 MiB.
+//
+// This is aligned with the protocol's maxBatchBytes cap: a decompressed batch
+// can never legitimately exceed the batch-size limit, so anything larger is an
+// attack (zip-bomb) or a malformed payload. The check runs in Open() — which
+// handler.go calls *before* its own maxBatchBytes check — so this is the bound
+// that actually limits peak allocation during decompression. Setting it to the
+// same value as maxBatchBytes removes the previous 100 MiB window in which a
+// high-ratio gzip payload could force the server to allocate far beyond the
+// batch limit before being rejected.
+const MaxDecompressedSize = 8 * 1024 * 1024
 
 // Open decodes and decompresses an envelope's payload.
 func Open(env *SecureEnvelope) ([]byte, error) {

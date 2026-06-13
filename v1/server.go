@@ -11,20 +11,27 @@ import (
 
 // ServerConfig holds configuration for an MBTA server.
 type ServerConfig struct {
-	Transport QUICServerConfig
-	Auth      core.TokenValidator
-	Policy    core.Policy
-	SpoolDir  string
-	ServerID  string
-	Metrics   *core.MBTAMetrics
-	Sink      core.EventSink // 上层注入的事件投递接口
+	Transport          QUICServerConfig
+	Auth               core.TokenValidator
+	Policy             core.Policy
+	SpoolDir           string
+	ServerID           string
+	Metrics            *core.MBTAMetrics
+	Sink               core.EventSink // 上层注入的事件投递接口
+	MaxConcurrentConns int            // 并发连接上限，0 = 使用 defaultMaxConcurrentConns (H-3)
 }
+
+// defaultMaxConcurrentConns is the concurrent connection cap applied when
+// ServerConfig.MaxConcurrentConns is unset. Bounds memory/goroutine usage
+// against connection-flood DoS. (H-3)
+const defaultMaxConcurrentConns = 10000
 
 // Server accepts and handles MBTA agent connections.
 type Server struct {
 	config   ServerConfig
 	mu       sync.Mutex
 	listener *Listener
+	connSem  chan struct{} // 并发连接上限信号量 (H-3)
 }
 
 // NewServer creates a new MBTA server.
@@ -32,7 +39,11 @@ func NewServer(cfg ServerConfig) *Server {
 	if cfg.ServerID == "" {
 		cfg.ServerID = uuid.Must(uuid.NewV7()).String()
 	}
-	return &Server{config: cfg}
+	maxConns := cfg.MaxConcurrentConns
+	if maxConns <= 0 {
+		maxConns = defaultMaxConcurrentConns
+	}
+	return &Server{config: cfg, connSem: make(chan struct{}, maxConns)}
 }
 
 // Start begins listening for QUIC connections and runs the accept loop.
@@ -50,8 +61,17 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Accept connections until context is cancelled.
 	for {
+		// 并发连接上限 (H-3)：先占一个槽位再 accept，handler 结束时释放。
+		// ctx 取消时立即返回，不会阻塞在满载的信号量上。
+		select {
+		case s.connSem <- struct{}{}:
+		case <-ctx.Done():
+			return nil
+		}
+
 		handler, err := s.Accept(ctx)
 		if err != nil {
+			<-s.connSem // accept 失败，归还槽位
 			// Context cancelled means graceful shutdown — not an error.
 			if ctx.Err() != nil {
 				return nil
@@ -60,6 +80,7 @@ func (s *Server) Start(ctx context.Context) error {
 			continue
 		}
 		go func() {
+			defer func() { <-s.connSem }()
 			if err := handler.HandleConnection(ctx); err != nil {
 				slog.Error("handler error", "error", err)
 			}
