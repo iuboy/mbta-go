@@ -109,11 +109,12 @@ type AuthFailMessage struct {
 
 // BatchMessage carries a batch of events inside the SecureEnvelope payload.
 type BatchMessage struct {
-	Seq     uint64          `json:"seq"`
-	ChunkID string          `json:"chunk_id"`
-	Tag     string          `json:"tag,omitempty"`
-	Source  string          `json:"source,omitempty"`
-	Batch   json.RawMessage `json:"batch"` // 原始 SignalBatch JSON（延迟解码）
+	Seq         uint64          `json:"seq"`
+	ChunkID     string          `json:"chunk_id"`
+	Tag         string          `json:"tag,omitempty"`
+	Source      string          `json:"source,omitempty"`
+	EventsCount int             `json:"events_count,omitempty"` // 事件数，供服务端 RawEventSink 快速路径省去 signalBatch 解码
+	Batch       json.RawMessage `json:"batch"`                   // 原始 SignalBatch JSON（延迟解码）
 }
 
 // Validate 检查BatchMessage的有效性。

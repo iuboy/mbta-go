@@ -552,26 +552,37 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 		return
 	}
 
-	// Decode SignalBatch from the batch payload
+	// RawEventSink fast path：sink 实现该接口且客户端填了 events_count 时，
+	// 跳过 signalBatch 逐事件解码（省反射/map 分配，约 13 allocs/event）。
+	rawSink, _ := h.config.Sink.(core.RawEventSink)
 	var signalBatch core.SignalBatch
-	if err := json.Unmarshal(batchMsg.Batch, &signalBatch); err != nil {
-		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "invalid_signal_batch", err.Error(), false)
-		return
+	var signalBatchPtr *core.SignalBatch
+	var batchEvents int
+	if rawSink != nil && batchMsg.EventsCount > 0 {
+		batchEvents = batchMsg.EventsCount
+		if batchEvents > maxBatchEvents {
+			h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "too_many_events",
+				fmt.Sprintf("event count %d exceeds limit %d", batchEvents, maxBatchEvents), false)
+			return
+		}
+	} else {
+		// Decode SignalBatch from the batch payload
+		if err := json.Unmarshal(batchMsg.Batch, &signalBatch); err != nil {
+			h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "invalid_signal_batch", err.Error(), false)
+			return
+		}
+		if err := signalBatch.Validate(); err != nil {
+			h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "signal_validation", err.Error(), false)
+			return
+		}
+		if len(signalBatch.Signals) > maxBatchEvents {
+			h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "too_many_events",
+				fmt.Sprintf("event count %d exceeds limit %d", len(signalBatch.Signals), maxBatchEvents), false)
+			return
+		}
+		batchEvents = len(signalBatch.Signals)
+		signalBatchPtr = &signalBatch
 	}
-
-	if err := signalBatch.Validate(); err != nil {
-		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "signal_validation", err.Error(), false)
-		return
-	}
-
-	// Enforce event count limit.
-	if len(signalBatch.Signals) > maxBatchEvents {
-		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "too_many_events",
-			fmt.Sprintf("event count %d exceeds limit %d", len(signalBatch.Signals), maxBatchEvents), false)
-		return
-	}
-
-	batchEvents := len(signalBatch.Signals)
 	batchBytes := int64(len(batchPayload))
 
 	// 服务端流控强制 (M-4)：客户端侧 window 检查只对正常客户端有效，已认证的恶意/异常
@@ -607,7 +618,7 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 
 	// Process events
 	h.replay.Update(dedupKey, core.ReplayAccepted)
-	h.routeAndACK(ctx, dedupKey, &batchMsg, &signalBatch, batchBytes)
+	h.routeAndACK(ctx, dedupKey, &batchMsg, signalBatchPtr, batchEvents, batchBytes, rawSink)
 }
 
 // verifyEnvelopeAlgo 强制 envelope 只能使用协商期内选定的压缩/加密算法。
@@ -635,49 +646,36 @@ func (h *ConnectionHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
 }
 
 // routeAndACK routes the batch to the configured sink and sends the appropriate ACK response.
-func (h *ConnectionHandler) routeAndACK(ctx context.Context, dedupKey string, batchMsg *core.BatchMessage, signalBatch *core.SignalBatch, batchBytes int64) {
+// rawSink 非 nil 时走快速路径（不解码 signalBatch）；signalBatch 在原路径下非 nil。
+func (h *ConnectionHandler) routeAndACK(ctx context.Context, dedupKey string, batchMsg *core.BatchMessage, signalBatch *core.SignalBatch, batchEvents int, batchBytes int64, rawSink core.RawEventSink) {
 	// 处理完成（含所有 ACK/THROTTLE 退出路径）后释放服务端 inflight 占用。(M-4)
 	if h.serverInflight != nil {
-		defer h.serverInflight.Remove(len(signalBatch.Signals), batchBytes)
+		defer h.serverInflight.Remove(batchEvents, batchBytes)
 	}
 
 	ackMode := core.AckModeAccepted
 
 	if h.config.Sink != nil {
-		if durable, ok := h.config.Sink.(core.DurableEventSink); ok {
+		// RawEventSink fast path：sink 实现该接口时直接投递原始 batch JSON，
+		// 跳过 signalBatch 解码（processBatch 已省去 Unmarshal/Validate）。
+		if rawSink != nil {
+			result, err := rawSink.OnRawBatch(ctx, h.agentID, batchEvents, batchMsg.Batch)
+			if err != nil {
+				slog.Warn("raw routing failed", "session", h.sessionID, "error", err)
+			} else if h.applyRouteResult(result, dedupKey, &ackMode) {
+				return
+			}
+		} else if durable, ok := h.config.Sink.(core.DurableEventSink); ok {
 			result, err := durable.OnSignalBatchWithResult(ctx, h.agentID, signalBatch)
 			if err != nil {
 				slog.Warn("durable routing failed", "session", h.sessionID, "error", err)
-			} else {
-				switch result.Status {
-				case core.ACKStatusDurable:
-					ackMode = core.AckModeDurable
-					h.replay.Update(dedupKey, core.ReplayDurable)
-				case core.ACKStatusThrottle:
-					h.sendThrottle(throttleRetryMs, "queue_pressure", "queue pressure critical, retry later")
-					slog.Warn("throttling agent due to queue pressure",
-						"session", h.sessionID,
-						"agent", h.agentID,
-						"pressure", result.Pressure)
-					return
-				default:
-					ackMode = core.AckModeAccepted
-				}
-
-				// Send WINDOW update when pressure state changes.
-				// Ignore empty Pressure (zero value — sink did not set it).
-				if result.Pressure != "" && result.Pressure != h.loadLastPressure() {
-					h.lastPressure.Store(result.Pressure)
-					b, e, by := pressureToWindow(result.Pressure)
-					h.window.Update(b, e, by)
-					h.sendWindowUpdate(b, e, by, string(result.Pressure))
-				}
+			} else if h.applyRouteResult(result, dedupKey, &ackMode) {
+				return
 			}
 		} else {
 			if err := h.config.Sink.OnSignalBatch(ctx, h.agentID, signalBatch); err != nil {
 				slog.Warn("event routing failed", "session", h.sessionID, "error", err)
 			}
-			// Check pressure even for basic EventSink.
 			pressure := h.config.Sink.OnPressure(h.agentID)
 			if pressure != "" && pressure != h.loadLastPressure() {
 				h.lastPressure.Store(pressure)
@@ -688,13 +686,38 @@ func (h *ConnectionHandler) routeAndACK(ctx context.Context, dedupKey string, ba
 		}
 	}
 
-	h.sendAck(batchMsg.Seq, batchMsg.ChunkID, len(signalBatch.Signals), ackMode)
+	h.sendAck(batchMsg.Seq, batchMsg.ChunkID, batchEvents, ackMode)
 
 	if h.config.Metrics != nil {
 		h.config.Metrics.BatchesAckedTotal.Inc()
 	}
 
-	slog.Debug("batch processed", "session", h.sessionID, "seq", batchMsg.Seq, "chunk", batchMsg.ChunkID, "signals", len(signalBatch.Signals))
+	slog.Debug("batch processed", "session", h.sessionID, "seq", batchMsg.Seq, "chunk", batchMsg.ChunkID, "events", batchEvents)
+}
+
+// applyRouteResult 处理 sink 返回的 RouteResult：更新 ackMode 与 replay，在压力状态变化时
+// 发送 WINDOW 更新。返回 true 表示结果为 throttle（已发 THROTTLE 帧），调用方应中止 routeAndACK。
+// 提取为方法以复用于 RawEventSink 与 DurableEventSink 两条路径。
+func (h *ConnectionHandler) applyRouteResult(result *core.RouteResult, dedupKey string, ackMode *string) bool {
+	switch result.Status {
+	case core.ACKStatusDurable:
+		*ackMode = core.AckModeDurable
+		h.replay.Update(dedupKey, core.ReplayDurable)
+	case core.ACKStatusThrottle:
+		h.sendThrottle(throttleRetryMs, "queue_pressure", "queue pressure critical, retry later")
+		slog.Warn("throttling agent due to queue pressure",
+			"session", h.sessionID, "agent", h.agentID, "pressure", result.Pressure)
+		return true
+	default:
+		*ackMode = core.AckModeAccepted
+	}
+	if result.Pressure != "" && result.Pressure != h.loadLastPressure() {
+		h.lastPressure.Store(result.Pressure)
+		b, e, by := pressureToWindow(result.Pressure)
+		h.window.Update(b, e, by)
+		h.sendWindowUpdate(b, e, by, string(result.Pressure))
+	}
+	return false
 }
 
 // writeControl writes a frame to the control stream with mutex protection.

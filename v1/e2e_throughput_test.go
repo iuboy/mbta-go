@@ -2,6 +2,7 @@ package v1
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -31,10 +32,13 @@ func (s *countSink) OnSignalBatch(_ context.Context, _ string, batch *core.Signa
 func (s *countSink) OnPressure(_ string) core.PressureState { return core.PressureNormal }
 
 // setupE2E 启动一个本地 v1 Server 并连接一个 v1 Client，返回就绪的 client、计数 sink 与 teardown。
-func setupE2E(b testing.TB, strategy string, streamCount int) (*Client, *countSink, func()) {
+// sink 为 nil 时使用 countSink（非 RawEventSink，走原路径）。
+func setupE2E(b testing.TB, strategy string, streamCount int, sink core.EventSink) (*Client, core.EventSink, func()) {
 	b.Helper()
 
-	sink := &countSink{}
+	if sink == nil {
+		sink = &countSink{}
+	}
 	server := NewServer(ServerConfig{
 		Transport: QUICServerConfig{
 			Address: "127.0.0.1:0",
@@ -161,7 +165,7 @@ func waitForDrain(client *Client, timeout time.Duration) {
 func BenchmarkE2E_SendBatch(b *testing.B) {
 	for _, ev := range []int{100, 1000, 10000} {
 		b.Run(fmt.Sprintf("events=%d", ev), func(b *testing.B) {
-			client, sink, td := setupE2E(b, "hash", 4)
+			client, sink, td := setupE2E(b, "hash", 4, nil)
 			defer td()
 			batch := makeBatch(ev)
 			b.ResetTimer()
@@ -173,7 +177,7 @@ func BenchmarkE2E_SendBatch(b *testing.B) {
 			waitForDrain(client, 5*time.Second)
 			secs := b.Elapsed().Seconds()
 			b.ReportMetric(float64(b.N)/secs, "batch/s")
-			b.ReportMetric(float64(sink.events.Load())/secs, "events/s")
+			b.ReportMetric(float64(sink.(*countSink).events.Load())/secs, "events/s")
 		})
 	}
 }
@@ -183,7 +187,7 @@ func BenchmarkE2E_SendBatch(b *testing.B) {
 func BenchmarkE2E_Concurrent(b *testing.B) {
 	for _, p := range []int{1, 4, 16} {
 		b.Run(fmt.Sprintf("senders=%d", p), func(b *testing.B) {
-			client, sink, td := setupE2E(b, "hash", 4)
+			client, sink, td := setupE2E(b, "hash", 4, nil)
 			defer td()
 			batch := makeBatch(1000)
 			b.SetParallelism(p)
@@ -197,7 +201,7 @@ func BenchmarkE2E_Concurrent(b *testing.B) {
 			b.StopTimer()
 			waitForDrain(client, 5*time.Second)
 			secs := b.Elapsed().Seconds()
-			b.ReportMetric(float64(sink.events.Load())/secs, "events/s")
+			b.ReportMetric(float64(sink.(*countSink).events.Load())/secs, "events/s")
 		})
 	}
 }
@@ -211,7 +215,7 @@ func BenchmarkE2E_SingleVsMultiStream(b *testing.B) {
 			if sc == 1 {
 				strategy = "single"
 			}
-			client, sink, td := setupE2E(b, strategy, sc)
+			client, sink, td := setupE2E(b, strategy, sc, nil)
 			defer td()
 			batch := makeBatch(1000)
 			b.SetParallelism(8)
@@ -225,6 +229,48 @@ func BenchmarkE2E_SingleVsMultiStream(b *testing.B) {
 			b.StopTimer()
 			waitForDrain(client, 5*time.Second)
 			secs := b.Elapsed().Seconds()
+			b.ReportMetric(float64(sink.(*countSink).events.Load())/secs, "events/s")
+		})
+	}
+}
+
+// rawCountSink 实现 RawEventSink，服务端走快速路径（不解码 signalBatch）。
+// 对比 countSink（原路径）可量化 RawEventSink 的 server 端解码省去收益。
+type rawCountSink struct {
+	events atomic.Int64
+}
+
+func (s *rawCountSink) OnRawBatch(_ context.Context, _ string, events int, _ json.RawMessage) (*core.RouteResult, error) {
+	s.events.Add(int64(events))
+	return &core.RouteResult{Status: core.ACKStatusAccepted}, nil
+}
+func (s *rawCountSink) OnSignalBatchWithResult(_ context.Context, _ string, batch *core.SignalBatch) (*core.RouteResult, error) {
+	s.events.Add(int64(len(batch.Signals)))
+	return &core.RouteResult{Status: core.ACKStatusAccepted}, nil
+}
+func (s *rawCountSink) OnSignalBatch(_ context.Context, _ string, batch *core.SignalBatch) error {
+	s.events.Add(int64(len(batch.Signals)))
+	return nil
+}
+func (s *rawCountSink) OnPressure(_ string) core.PressureState { return core.PressureNormal }
+
+// BenchmarkE2E_RawSink：RawEventSink 快速路径（服务端跳过 signalBatch 解码）的端到端吞吐。
+func BenchmarkE2E_RawSink(b *testing.B) {
+	for _, ev := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprintf("events=%d", ev), func(b *testing.B) {
+			sink := &rawCountSink{}
+			client, _, td := setupE2E(b, "hash", 4, sink)
+			defer td()
+			batch := makeBatch(ev)
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				sendOrYield(b, client, batch)
+			}
+			b.StopTimer()
+			waitForDrain(client, 5*time.Second)
+			secs := b.Elapsed().Seconds()
+			b.ReportMetric(float64(b.N)/secs, "batch/s")
 			b.ReportMetric(float64(sink.events.Load())/secs, "events/s")
 		})
 	}

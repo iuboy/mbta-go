@@ -340,7 +340,7 @@ func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEven
 	seq := c.seq.Next()
 	chunkID := uuid.Must(uuid.NewV7()).String()
 
-	batchPayload := buildBatchPayload(seq, chunkID, tag, source, batchJSON)
+	batchPayload := buildBatchPayload(seq, chunkID, tag, source, batchEvents, batchJSON)
 	batchBytes := int64(len(batchPayload))
 
 	// 窗口检查与 inflight 登记同处一个临界区，防止并发调用双双通过后超限。
@@ -364,8 +364,9 @@ func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEven
 // （整个 signalBatch JSON）做 O(n) compact 扫描。字段顺序与 json tag 一致，
 // Tag/Source 的 omitempty 用空串判断，字符串字段用 strconv.AppendQuote 保证 escape
 // 与 encoding/json 一致，server 端 json.Unmarshal 完全兼容。
-func buildBatchPayload(seq uint64, chunkID, tag, source string, batchJSON []byte) []byte {
-	buf := make([]byte, 0, 128+len(batchJSON))
+// eventsCount 写入 events_count 字段，供服务端 RawEventSink 快速路径省去解码。
+func buildBatchPayload(seq uint64, chunkID, tag, source string, eventsCount int, batchJSON []byte) []byte {
+	buf := make([]byte, 0, 160+len(batchJSON))
 	buf = append(buf, `{"seq":`...)
 	buf = strconv.AppendUint(buf, seq, 10)
 	buf = append(buf, `,"chunk_id":`...)
@@ -377,6 +378,10 @@ func buildBatchPayload(seq uint64, chunkID, tag, source string, batchJSON []byte
 	if source != "" {
 		buf = append(buf, `,"source":`...)
 		buf = strconv.AppendQuote(buf, source)
+	}
+	if eventsCount > 0 {
+		buf = append(buf, `,"events_count":`...)
+		buf = strconv.AppendInt(buf, int64(eventsCount), 10)
 	}
 	buf = append(buf, `,"batch":`...)
 	buf = append(buf, batchJSON...)

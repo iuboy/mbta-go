@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -52,6 +53,18 @@ type DurableEventSink interface {
 	EventSink
 	// OnSignalBatchWithResult 投递 SignalBatch 并返回路由结果。
 	OnSignalBatchWithResult(ctx context.Context, agentID string, batch *SignalBatch) (*RouteResult, error)
+}
+
+// RawEventSink 扩展 DurableEventSink，提供「不解码 signalBatch」的快速路径。
+// 实现此接口的 sink（通常是纯转发/落盘场景，不需读取 signal 字段详情）接收原始
+// batch JSON 字节与事件数，服务端跳过 json.Unmarshal(signalBatch) 与 Validate，
+// 省去逐事件解码的反射与 map 分配（约 13 allocs/event）。
+// 不实现此接口的 sink 走原路径（完整解码 SignalBatch 后调用 OnSignalBatchWithResult）。
+type RawEventSink interface {
+	DurableEventSink
+	// OnRawBatch 投递原始 batch JSON 与事件数，返回路由结果。
+	// eventsCount 来自 BatchMessage.EventsCount（客户端填充），batchJSON 为未解码的 SignalBatch JSON。
+	OnRawBatch(ctx context.Context, agentID string, eventsCount int, batchJSON json.RawMessage) (*RouteResult, error)
 }
 
 // AgentQueue 跟踪每个 agent 的投递状态。
