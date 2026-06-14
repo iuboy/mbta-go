@@ -3,7 +3,6 @@ package v1
 import (
 	"context"
 	"crypto/hmac"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -205,7 +204,7 @@ func (h *ConnectionHandler) handleControlStream(ctx context.Context) error {
 
 func (h *ConnectionHandler) handleHello(payload []byte) error {
 	var msg core.HelloMessage
-	if err := json.Unmarshal(payload, &msg); err != nil {
+	if err := core.FastUnmarshal(payload, &msg); err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "decode hello", err)
 	}
 
@@ -263,7 +262,7 @@ func (h *ConnectionHandler) handleHello(payload []byte) error {
 		ChallengeNonce: h.challengeNonce,
 	}
 
-	ackPayload, err := json.Marshal(helloAck)
+	ackPayload, err := core.FastMarshal(helloAck)
 	if err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal hello_ack", err)
 	}
@@ -287,7 +286,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	h.authAttempts++
 
 	var msg core.AuthMessage
-	if err := json.Unmarshal(payload, &msg); err != nil {
+	if err := core.FastUnmarshal(payload, &msg); err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "decode auth", err)
 	}
 
@@ -365,7 +364,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 		HMACAlgo:      keys.HMACAlgo,
 		ExpiresAtUnix: h.expiresAt.Load(),
 	}
-	okPayload, err := json.Marshal(authOK)
+	okPayload, err := core.FastMarshal(authOK)
 	if err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal auth_ok", err)
 	}
@@ -414,7 +413,7 @@ func (h *ConnectionHandler) resolveAuthToken(msg *core.AuthMessage) (token strin
 
 func (h *ConnectionHandler) handlePing(payload []byte) {
 	var msg core.PingMessage
-	if err := json.Unmarshal(payload, &msg); err != nil {
+	if err := core.FastUnmarshal(payload, &msg); err != nil {
 		slog.Debug("invalid ping payload", "error", err)
 		return
 	}
@@ -424,7 +423,7 @@ func (h *ConnectionHandler) handlePing(payload []byte) {
 		Nonce:      msg.Nonce,
 		Status:     "ok",
 	}
-	pongPayload, err := json.Marshal(pong)
+	pongPayload, err := core.FastMarshal(pong)
 	if err != nil {
 		slog.Warn("marshal pong failed", "error", err)
 		return
@@ -492,7 +491,7 @@ func (h *ConnectionHandler) handleDataStream(ctx context.Context, s *quic.Stream
 func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, payload []byte) {
 	// Decode envelope
 	var env core.SecureEnvelope
-	if err := json.Unmarshal(payload, &env); err != nil {
+	if err := core.FastUnmarshal(payload, &env); err != nil {
 		// envelope 无法解码时 seq/chunkID 未知，发送 ERROR 而非 NACK。
 		// 零值 NACK 会导致客户端 pendingAcks 无法清理，最终 inflight 死锁。
 		slog.Debug("invalid envelope", "session", h.sessionID, "error", err)
@@ -542,7 +541,7 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 
 	// Decode batch message (protocol metadata wrapper)
 	var batchMsg core.BatchMessage
-	if err := json.Unmarshal(batchPayload, &batchMsg); err != nil {
+	if err := core.FastUnmarshal(batchPayload, &batchMsg); err != nil {
 		h.sendNack(env.Seq, env.ChunkID, "invalid_batch", err.Error(), false)
 		return
 	}
@@ -614,7 +613,7 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 // 返回 (signalBatch, true) 成功；失败返回 (nil, false)，调用方应直接 return。
 func (h *ConnectionHandler) decodeSignalBatch(batchMsg *core.BatchMessage) (*core.SignalBatch, bool) {
 	var sb core.SignalBatch
-	if err := json.Unmarshal(batchMsg.Batch, &sb); err != nil {
+	if err := core.FastUnmarshal(batchMsg.Batch, &sb); err != nil {
 		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "invalid_signal_batch", err.Error(), false)
 		return nil, false
 	}
@@ -746,7 +745,7 @@ func (h *ConnectionHandler) sendAck(seq uint64, chunkID string, count int, ackMo
 		AckMode:    ackMode,
 		ReceivedAt: time.Now().UnixMilli(),
 	}
-	payload, err := json.Marshal(ack)
+	payload, err := core.FastMarshal(ack)
 	if err != nil {
 		slog.Warn("marshal ack failed", "error", err)
 		return
@@ -764,7 +763,7 @@ func (h *ConnectionHandler) sendNack(seq uint64, chunkID, code, reason string, r
 		Reason:    reason,
 		Retryable: retryable,
 	}
-	payload, err := json.Marshal(nack)
+	payload, err := core.FastMarshal(nack)
 	if err != nil {
 		slog.Warn("marshal nack failed", "error", err)
 		return
@@ -784,7 +783,7 @@ func (h *ConnectionHandler) sendThrottle(retryDelayMs int, code, reason string) 
 		Code:         code,
 		Reason:       reason,
 	}
-	payload, err := json.Marshal(throttle)
+	payload, err := core.FastMarshal(throttle)
 	if err != nil {
 		slog.Warn("marshal throttle failed", "error", err)
 		return
@@ -811,7 +810,7 @@ func (h *ConnectionHandler) failAuth(code, reason string) {
 		Retryable:      true,
 		ChallengeNonce: h.challengeNonce,
 	}
-	payload, err := json.Marshal(fail)
+	payload, err := core.FastMarshal(fail)
 	if err != nil {
 		slog.Warn("marshal auth_fail failed", "error", err)
 		return
@@ -827,7 +826,7 @@ func (h *ConnectionHandler) sendAuthFail(code, reason string, retryable bool) {
 		Reason:    reason,
 		Retryable: retryable,
 	}
-	payload, err := json.Marshal(fail)
+	payload, err := core.FastMarshal(fail)
 	if err != nil {
 		slog.Warn("marshal auth_fail failed", "error", err)
 		return
@@ -844,7 +843,7 @@ func (h *ConnectionHandler) sendError(code, reason string, fatal bool) {
 		Fatal:     fatal,
 		Retryable: !fatal,
 	}
-	payload, err := json.Marshal(errMsg)
+	payload, err := core.FastMarshal(errMsg)
 	if err != nil {
 		slog.Warn("marshal error frame failed", "error", err)
 		return
@@ -862,7 +861,7 @@ func (h *ConnectionHandler) sendWindowUpdate(batches, events int, maxBytes int64
 		MaxInflightBytes:   maxBytes,
 		Reason:             reason,
 	}
-	payload, err := json.Marshal(win)
+	payload, err := core.FastMarshal(win)
 	if err != nil {
 		slog.Warn("marshal window failed", "error", err)
 		return

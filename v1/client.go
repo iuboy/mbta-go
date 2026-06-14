@@ -2,7 +2,6 @@ package v1
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -303,7 +302,7 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 		return "", fmt.Errorf("%w, retry after %v", ErrThrottled, c.throttle.WaitDuration())
 	}
 
-	batchJSON, err := json.Marshal(signalBatch)
+	batchJSON, err := core.FastMarshal(signalBatch)
 	if err != nil {
 		return "", core.WrapError(core.NumBatch, core.CodeBatch, "marshal signal batch", err)
 	}
@@ -424,7 +423,7 @@ func (c *Client) buildAndSend(seq uint64, chunkID, tag, source string, batchPayl
 	if err != nil {
 		return core.WrapError(core.NumEnvelope, core.CodeEnvelope, "build envelope", err)
 	}
-	envPayload, err := json.Marshal(env)
+	envPayload, err := core.FastMarshal(env)
 	if err != nil {
 		return core.WrapError(core.NumEnvelope, core.CodeEnvelope, "marshal envelope", err)
 	}
@@ -522,7 +521,7 @@ func (c *Client) close() {
 	if c.controlStr != nil {
 		c.controlMu.Lock()
 		closeMsg := core.CloseMessage{Code: "shutdown", Reason: "client closing"}
-		if payload, err := json.Marshal(closeMsg); err == nil {
+		if payload, err := core.FastMarshal(closeMsg); err == nil {
 			if err := core.Write(c.controlStr, core.TypeClose, core.FlagControl, payload); err != nil {
 				slog.Warn("write close frame", "error", err)
 			}
@@ -696,7 +695,7 @@ func (c *Client) heartbeatLoop(ctx context.Context) {
 				TimeUnixMs: time.Now().UnixMilli(),
 				Nonce:      uuid.Must(uuid.NewV7()).String(),
 			}
-			payload, err := json.Marshal(ping)
+			payload, err := core.FastMarshal(ping)
 			if err != nil {
 				slog.Debug("marshal ping failed", "error", err)
 				continue

@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -328,13 +327,13 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 
 // EncodeEnvelope JSON-encodes the envelope.
 func EncodeEnvelope(env *SecureEnvelope) ([]byte, error) {
-	return json.Marshal(env)
+	return FastMarshal(env)
 }
 
 // DecodeEnvelope JSON-decodes into a SecureEnvelope.
 func DecodeEnvelope(data []byte) (*SecureEnvelope, error) {
 	var env SecureEnvelope
-	if err := json.Unmarshal(data, &env); err != nil {
+	if err := FastUnmarshal(data, &env); err != nil {
 		return nil, WrapError(NumEnvelope, CodeEnvelope, "decode envelope", err)
 	}
 	return &env, nil

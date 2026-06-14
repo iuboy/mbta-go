@@ -2,7 +2,6 @@ package v1
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 
 	"github.com/iuboy/mbta-go/core"
@@ -45,7 +44,7 @@ func (c *Client) readControlLoop(ctx context.Context) {
 			c.handlePing(f.Payload)
 		case core.TypeError:
 			var errMsg core.ErrorMessage
-			if err := json.Unmarshal(f.Payload, &errMsg); err != nil {
+			if err := core.FastUnmarshal(f.Payload, &errMsg); err != nil {
 				slog.Debug("invalid error payload", "error", err)
 			} else {
 				slog.Warn("server error", "code", errMsg.Code, "reason", core.SanitizeForLog(errMsg.Reason), "fatal", errMsg.Fatal)
@@ -61,7 +60,7 @@ func (c *Client) readControlLoop(ctx context.Context) {
 // and invokes the registered ACK handler callback.
 func (c *Client) handleAck(payload []byte) {
 	var ack core.AckMessage
-	if err := json.Unmarshal(payload, &ack); err != nil {
+	if err := core.FastUnmarshal(payload, &ack); err != nil {
 		slog.Debug("invalid ack payload", "error", err)
 		return
 	}
@@ -87,7 +86,7 @@ func (c *Client) handleAck(payload []byte) {
 // and invokes the ACK handler with "nack" mode for retry logic.
 func (c *Client) handleNack(payload []byte) {
 	var nack core.NackMessage
-	if err := json.Unmarshal(payload, &nack); err != nil {
+	if err := core.FastUnmarshal(payload, &nack); err != nil {
 		slog.Debug("invalid nack payload", "error", err)
 		return
 	}
@@ -111,7 +110,7 @@ func (c *Client) handleNack(payload []byte) {
 // handleWindow processes a WINDOW frame: updates the local flow-control limits.
 func (c *Client) handleWindow(payload []byte) {
 	var win core.WindowMessage
-	if err := json.Unmarshal(payload, &win); err != nil {
+	if err := core.FastUnmarshal(payload, &win); err != nil {
 		slog.Debug("invalid window payload", "error", err)
 		return
 	}
@@ -123,7 +122,7 @@ func (c *Client) handleWindow(payload []byte) {
 // overwhelming the server.
 func (c *Client) handleThrottle(payload []byte) {
 	var throt core.ThrottleMessage
-	if err := json.Unmarshal(payload, &throt); err != nil {
+	if err := core.FastUnmarshal(payload, &throt); err != nil {
 		slog.Debug("invalid throttle payload", "error", err)
 		return
 	}
@@ -134,7 +133,7 @@ func (c *Client) handleThrottle(payload []byte) {
 // handlePing responds to a server PING with a PONG frame.
 func (c *Client) handlePing(payload []byte) {
 	var ping core.PingMessage
-	if err := json.Unmarshal(payload, &ping); err != nil {
+	if err := core.FastUnmarshal(payload, &ping); err != nil {
 		slog.Debug("invalid ping payload", "error", err)
 		return
 	}
@@ -144,7 +143,7 @@ func (c *Client) handlePing(payload []byte) {
 		Nonce:      ping.Nonce,
 		Status:     "ok",
 	}
-	pongPayload, err := json.Marshal(pong)
+	pongPayload, err := core.FastMarshal(pong)
 	if err != nil {
 		slog.Warn("marshal pong failed", "error", err)
 		return

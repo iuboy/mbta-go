@@ -2,7 +2,6 @@ package v1
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -21,7 +20,7 @@ func (c *Client) sendHello() error {
 		InstanceID:    uuid.Must(uuid.NewV7()).String(),
 		StartedAtUnix: time.Now().Unix(),
 	}
-	payload, err := json.Marshal(hello)
+	payload, err := core.FastMarshal(hello)
 	if err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal hello", err)
 	}
@@ -41,7 +40,7 @@ func (c *Client) recvHelloAck() (*core.HelloAckMessage, error) {
 	}
 	if f.Header.Type == core.TypeError {
 		var errMsg core.ErrorMessage
-		if uerr := json.Unmarshal(f.Payload, &errMsg); uerr != nil {
+		if uerr := core.FastUnmarshal(f.Payload, &errMsg); uerr != nil {
 			slog.Debug("failed to decode error frame", "error", uerr)
 		}
 		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, fmt.Sprintf("server error: %s", errMsg.Reason))
@@ -51,7 +50,7 @@ func (c *Client) recvHelloAck() (*core.HelloAckMessage, error) {
 	}
 
 	var ack core.HelloAckMessage
-	if err := json.Unmarshal(f.Payload, &ack); err != nil {
+	if err := core.FastUnmarshal(f.Payload, &ack); err != nil {
 		return nil, err
 	}
 
@@ -88,7 +87,7 @@ func (c *Client) sendAuth() error {
 	}
 
 	auth := c.buildAuthMessage()
-	payload, err := json.Marshal(auth)
+	payload, err := core.FastMarshal(auth)
 	if err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal auth", err)
 	}
@@ -130,7 +129,7 @@ func (c *Client) recvAuthResult() error {
 	switch f.Header.Type {
 	case core.TypeAuthOK:
 		var okMsg core.AuthOKMessage
-		if err := json.Unmarshal(f.Payload, &okMsg); err != nil {
+		if err := core.FastUnmarshal(f.Payload, &okMsg); err != nil {
 			return err
 		}
 
@@ -164,7 +163,7 @@ func (c *Client) recvAuthResult() error {
 
 	case core.TypeAuthFail:
 		var failMsg core.AuthFailMessage
-		if uerr := json.Unmarshal(f.Payload, &failMsg); uerr != nil {
+		if uerr := core.FastUnmarshal(f.Payload, &failMsg); uerr != nil {
 			slog.Debug("failed to decode auth_fail frame", "error", uerr)
 		}
 		return core.NewError(core.NumAuth, core.CodeAuth, fmt.Sprintf("auth failed: %s (%s)", failMsg.Reason, failMsg.Code))
