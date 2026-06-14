@@ -197,6 +197,15 @@ func (s *Server) Start(ctx context.Context) error {
 	s.listener = l
 	s.mu.Unlock()
 	slog.Info("MBTA-NTLS server listening", "addr", l.Addr().String())
+
+	// ctx 取消时关闭 listener：被 l.Accept() 阻塞的循环因此解除并退出。
+	// 否则若取消信号到达时循环正卡在 Accept（而非上方的 select），Start 将永久不返回。
+	// 监听器 Close 幂等，与 Server.Close 并发调用安全。
+	go func() {
+		<-ctx.Done()
+		l.Close()
+	}()
+
 	for {
 		select {
 		case s.connSem <- struct{}{}:

@@ -93,6 +93,57 @@ func TestServer_Close(t *testing.T) {
 	_ = s.Close()
 }
 
+// TestServer_Start_ReturnsOnCtxCancel 验证 Start 在 ctx 取消时及时返回。
+// 回归：旧实现仅在 select 阶段响应 ctx.Done，若取消到达时循环正阻塞在 Accept，
+// Start 永不返回（竞态）。修复后由 ctx-Done watcher 关闭 listener 解除 Accept。
+func TestServer_Start_ReturnsOnCtxCancel(t *testing.T) {
+	s, err := NewServer(ServerConfig{
+		Address:      "127.0.0.1:0",
+		SignCertFile: signCertFile,
+		SignKeyFile:  signKeyFile,
+		EncCertFile:  encCertFile,
+		EncKeyFile:   encKeyFile,
+		Auth:         core.NewStaticTokenValidator(map[string]string{"tok": "agent-1"}),
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	startErr := make(chan error, 1)
+	go func() { startErr <- s.Start(ctx) }()
+
+	// 等监听就绪：此时循环已进入 Accept 阻塞，复现竞态窗口。
+	var addr string
+	for i := 0; i < 200; i++ {
+		addr = s.Addr()
+		if addr != "" {
+			break
+		}
+		select {
+		case err := <-startErr:
+			t.Fatalf("server start failed: %v", err)
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if addr == "" {
+		t.Fatal("server did not start listening")
+	}
+
+	cancel()
+
+	// Start 必须在合理时间内返回；旧实现在此永久挂起。
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("start returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server.Start did not return within 3s after ctx cancel")
+	}
+}
+
 // --- E2E smoke：TLCP server + client 完整握手 + SendBatch ---
 
 func TestE2E_NTLS_SendBatch(t *testing.T) {
