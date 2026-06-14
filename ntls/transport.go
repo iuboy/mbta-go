@@ -37,6 +37,8 @@ type ServerConfig struct {
 	Policy       core.Policy
 	Sink         core.EventSink
 	Metrics      *core.MBTAMetrics
+	ServerID           string // 服务端标识，回填 HELLO_ACK；空则 NewServer 自动生成 UUID v7
+	MaxConcurrentConns int    // 并发连接上限，0 = 使用 defaultMaxConcurrentConns
 }
 
 // ClientCredentials holds NTLS client credentials（双 SM2 证书）。
@@ -176,7 +178,14 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.SignCertFile == "" || cfg.EncCertFile == "" {
 		return nil, core.NewError(core.NumConfig, core.CodeConfig, "dual SM2 certificates required")
 	}
-	return &Server{config: cfg, connSem: make(chan struct{}, defaultMaxConcurrentConns)}, nil
+	if cfg.ServerID == "" {
+		cfg.ServerID = uuid.Must(uuid.NewV7()).String()
+	}
+	maxConns := cfg.MaxConcurrentConns
+	if maxConns <= 0 {
+		maxConns = defaultMaxConcurrentConns
+	}
+	return &Server{config: cfg, connSem: make(chan struct{}, maxConns)}, nil
 }
 
 func (s *Server) Addr() string {
@@ -224,11 +233,12 @@ func (s *Server) Start(ctx context.Context) error {
 		go func() {
 			defer func() { <-s.connSem }()
 			h := NewConnectionHandler(ConnectionHandlerConfig{
-				Conn:    conn,
-				Auth:    s.config.Auth,
-				Policy:  s.config.Policy,
-				Sink:    s.config.Sink,
-				Metrics: s.config.Metrics,
+				Conn:     conn,
+				Auth:     s.config.Auth,
+				Policy:   s.config.Policy,
+				Sink:     s.config.Sink,
+				Metrics:  s.config.Metrics,
+				ServerID: s.config.ServerID,
 			})
 			if err := h.HandleConnection(ctx); err != nil {
 				slog.Error("handler error", "error", err)
@@ -247,6 +257,3 @@ func (s *Server) Close() error {
 }
 
 // --- Client（完整类型定义与方法在 client.go）---
-
-// ServerID generates a UUID for server identification.
-func ServerID() string { return uuid.Must(uuid.NewV7()).String() }

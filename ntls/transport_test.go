@@ -49,6 +49,28 @@ func TestNewServer_Valid(t *testing.T) {
 	if s == nil {
 		t.Error("server should not be nil")
 	}
+	// ServerID 未显式设置时自动生成（回填 HELLO_ACK，旧实现恒为空串）。
+	if s.config.ServerID == "" {
+		t.Error("ServerID should be auto-generated when unset")
+	}
+}
+
+// TestNewServer_PreservesServerID 验证显式 ServerID 被保留，不被自动生成覆盖。
+func TestNewServer_PreservesServerID(t *testing.T) {
+	s, err := NewServer(ServerConfig{
+		Address:      "127.0.0.1:0",
+		SignCertFile: signCertFile,
+		SignKeyFile:  signKeyFile,
+		EncCertFile:  encCertFile,
+		EncKeyFile:   encKeyFile,
+		ServerID:     "my-server-7",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.config.ServerID != "my-server-7" {
+		t.Errorf("ServerID = %q, want my-server-7", s.config.ServerID)
+	}
 }
 
 func TestNewClient_EmptyServer(t *testing.T) {
