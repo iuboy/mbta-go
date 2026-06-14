@@ -496,6 +496,9 @@ func (c *Client) close() {
 		for i := range c.keys.HMACKey {
 			c.keys.HMACKey[i] = 0
 		}
+		for i := range c.keys.SM4Key {
+			c.keys.SM4Key[i] = 0
+		}
 		c.keys = nil
 	}
 	c.sendMu.Unlock()
