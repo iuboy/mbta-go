@@ -69,6 +69,8 @@ func (c *Client) handleAck(payload []byte) {
 		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
 			c.inflight.Remove(pb.Events, pb.Bytes)
+			// ACK 即持久化确认：删除 spool 中对应 batch + records。
+			c.deleteSpooled(pb)
 		}
 	}
 
@@ -95,6 +97,11 @@ func (c *Client) handleNack(payload []byte) {
 		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
 			c.inflight.Remove(pb.Events, pb.Bytes)
+			// 毒消息（不可重试）：从 spool 丢弃，避免无限重试循环。
+			// retryable 的 NACK 保留 spool 条目，待重连 drain 重发（at-least-once）。
+			if !nack.Retryable {
+				c.deleteSpooled(pb)
+			}
 		}
 	}
 
