@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -308,14 +309,15 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	}
 	batchEvents := len(signalBatch.Signals)
 
-	// --- 锁内：原子完成取 seq/chunkID、marshal batch wrapper、窗口检查、inflight/pending 登记 ---
-	seq, chunkID, batchBytes, err := c.reserveInflight(tag, source, batchJSON, batchEvents)
+	// --- 锁内：原子完成取 seq/chunkID、手写构造 batch wrapper、窗口检查、inflight/pending 登记 ---
+	seq, chunkID, batchPayload, err := c.reserveInflight(tag, source, batchJSON, batchEvents)
 	if err != nil {
 		return "", err
 	}
+	batchBytes := int64(len(batchPayload))
 
 	// --- 锁外：Build envelope（gzip+HMAC）+ marshal env + 选流 + 网络写 ---
-	if writeErr := c.buildAndSend(seq, chunkID, tag, source, batchJSON); writeErr != nil {
+	if writeErr := c.buildAndSend(seq, chunkID, tag, source, batchPayload); writeErr != nil {
 		// 写失败：回滚已登记的 inflight/pending，避免窗口被永久占用。
 		c.inflight.Remove(batchEvents, batchBytes)
 		if _, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
@@ -328,32 +330,22 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	return chunkID, nil
 }
 
-// reserveInflight 在 sendMu 保护下原子完成：取 seq/chunkID、marshal batch wrapper
-// （轻量，SignalBatch 已是 RawMessage）、窗口检查、inflight 与 pending 登记。
-// 返回 seq、chunkID 与 batchPayload 字节数。
-func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEvents int) (uint64, string, int64, error) {
+// reserveInflight 在 sendMu 保护下原子完成：取 seq/chunkID、构造 batch wrapper
+// （手写，避免 json.Marshal 对 RawMessage 的 compact 扫描）、窗口检查、inflight 与 pending 登记。
+// 返回 seq、chunkID 与构造好的 batchPayload（供 buildAndSend 直接 Build，避免重复 marshal）。
+func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEvents int) (uint64, string, []byte, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
 	seq := c.seq.Next()
 	chunkID := uuid.Must(uuid.NewV7()).String()
 
-	// marshal batch wrapper（轻：Batch 是 RawMessage 透传，仅外层字段重编）。
-	batchPayload, err := json.Marshal(core.BatchMessage{
-		Seq:     seq,
-		ChunkID: chunkID,
-		Tag:     tag,
-		Source:  source,
-		Batch:   json.RawMessage(batchJSON),
-	})
-	if err != nil {
-		return 0, "", 0, core.WrapError(core.NumBatch, core.CodeBatch, "marshal batch", err)
-	}
+	batchPayload := buildBatchPayload(seq, chunkID, tag, source, batchJSON)
 	batchBytes := int64(len(batchPayload))
 
 	// 窗口检查与 inflight 登记同处一个临界区，防止并发调用双双通过后超限。
 	if !c.window.CanSend(c.inflight, batchEvents, batchBytes) {
-		return 0, "", 0, ErrWindowFull
+		return 0, "", nil, ErrWindowFull
 	}
 	c.inflight.Add(batchEvents, batchBytes)
 	c.pendingAcks.Store(chunkID, &pendingBatch{
@@ -365,21 +357,42 @@ func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEven
 	})
 	c.pendingCount.Add(1)
 
-	return seq, chunkID, batchBytes, nil
+	return seq, chunkID, batchPayload, nil
+}
+
+// buildBatchPayload 手写 BatchMessage 的 JSON，避免 json.Marshal 对 RawMessage
+// （整个 signalBatch JSON）做 O(n) compact 扫描。字段顺序与 json tag 一致，
+// Tag/Source 的 omitempty 用空串判断，字符串字段用 strconv.AppendQuote 保证 escape
+// 与 encoding/json 一致，server 端 json.Unmarshal 完全兼容。
+func buildBatchPayload(seq uint64, chunkID, tag, source string, batchJSON []byte) []byte {
+	buf := make([]byte, 0, 128+len(batchJSON))
+	buf = append(buf, `{"seq":`...)
+	buf = strconv.AppendUint(buf, seq, 10)
+	buf = append(buf, `,"chunk_id":`...)
+	buf = strconv.AppendQuote(buf, chunkID)
+	if tag != "" {
+		buf = append(buf, `,"tag":`...)
+		buf = strconv.AppendQuote(buf, tag)
+	}
+	if source != "" {
+		buf = append(buf, `,"source":`...)
+		buf = strconv.AppendQuote(buf, source)
+	}
+	buf = append(buf, `,"batch":`...)
+	buf = append(buf, batchJSON...)
+	buf = append(buf, '}')
+	return buf
 }
 
 // buildAndSend 在锁外完成 envelope 构建（gzip+HMAC）、envelope marshal、流选择与网络写。
-func (c *Client) buildAndSend(seq uint64, chunkID, tag, source string, batchJSON []byte) error {
+// batchPayload 由 reserveInflight 已构造（手写），此处直接 Build，不再重复 marshal。
+func (c *Client) buildAndSend(seq uint64, chunkID, tag, source string, batchPayload []byte) error {
+	// batch 仅用于 picker.Pick 的 tag+source 哈希，不含 Batch RawMessage，不 marshal。
 	batch := core.BatchMessage{
 		Seq:     seq,
 		ChunkID: chunkID,
 		Tag:     tag,
 		Source:  source,
-		Batch:   json.RawMessage(batchJSON),
-	}
-	batchPayload, err := json.Marshal(batch)
-	if err != nil {
-		return core.WrapError(core.NumBatch, core.CodeBatch, "marshal batch", err)
 	}
 
 	params := core.Params{
