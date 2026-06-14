@@ -508,6 +508,29 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 		}
 	}
 
+	// Algorithm consistency: an authenticated client may only use the
+	// compression/encryption selected during negotiation. A client holding the
+	// HMAC key can produce a valid MAC over a non-negotiated algorithm, so the
+	// check is enforced here (after HMAC, before Open) against the authoritative
+	// negotiated result rather than relying solely on Open's allow-list. An
+	// unset negotiated field is treated as "none" (the default when the
+	// corresponding capability is not negotiated).
+	if h.negotiated != nil {
+		wantComp := h.negotiated.Compression
+		if wantComp == "" {
+			wantComp = core.CompressionNone
+		}
+		wantEnc := h.negotiated.Encryption
+		if wantEnc == "" {
+			wantEnc = core.EncryptionNone
+		}
+		if env.Compression != wantComp || env.Encryption != wantEnc {
+			h.sendNack(env.Seq, env.ChunkID, "envelope_algo_mismatch",
+				"compression/encryption not negotiated", false)
+			return
+		}
+	}
+
 	// Open envelope
 	batchPayload, err := core.Open(&env)
 	if err != nil {

@@ -51,6 +51,17 @@ type Params struct {
 
 // Build creates a SecureEnvelope from a batch payload.
 func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
+	// Normalize empty algorithm selectors to "none" so envelopes always carry a
+	// concrete, allow-listed value (Open rejects anything else).
+	compression := params.Compression
+	if compression == "" {
+		compression = CompressionNone
+	}
+	encryption := params.Encryption
+	if encryption == "" {
+		encryption = EncryptionNone
+	}
+
 	env := &SecureEnvelope{
 		EnvelopeVersion: EnvelopeVersion,
 		MessageType:     "batch",
@@ -60,8 +71,8 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 		ChunkID:         params.ChunkID,
 		CreatedAtUnixMs: nowUnixMs(),
 		Codec:           params.Codec,
-		Compression:     params.Compression,
-		Encryption:      params.Encryption,
+		Compression:     compression,
+		Encryption:      encryption,
 		HMACAlgo:        params.HMACAlgo,
 	}
 
@@ -76,7 +87,7 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 
 	// Step 1: Compress
 	processed := batchPayload
-	if params.Compression == CompressionGzip {
+	if compression == CompressionGzip {
 		var buf bytes.Buffer
 		w := gzip.NewWriter(&buf)
 		if _, err := w.Write(batchPayload); err != nil {
@@ -195,6 +206,23 @@ const MaxDecompressedSize = 8 * 1024 * 1024
 
 // Open decodes and decompresses an envelope's payload.
 func Open(env *SecureEnvelope) ([]byte, error) {
+	// Algorithm allow-list (defense in depth): v1 only supports none/gzip
+	// compression and none encryption. zstd/sm4_gcm are reserved algorithm
+	// identifiers that are not implemented yet, so any other value is rejected
+	// rather than silently treated as uncompressed raw bytes. The caller (server
+	// processBatch) additionally enforces that these equal the negotiated
+	// selection; this check guards against callers that forget to.
+	switch env.Compression {
+	case CompressionNone, CompressionGzip:
+	default:
+		return nil, NewError(NumEnvelope, CodeEnvelope,
+			fmt.Sprintf("unsupported compression: %q", env.Compression))
+	}
+	if env.Encryption != EncryptionNone {
+		return nil, NewError(NumEnvelope, CodeEnvelope,
+			fmt.Sprintf("unsupported encryption: %q", env.Encryption))
+	}
+
 	// Base64 decode
 	raw, err := base64.StdEncoding.DecodeString(env.Payload)
 	if err != nil {

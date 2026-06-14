@@ -27,21 +27,21 @@ type ClientConfig struct {
 
 // Client is an MBTA agent that connects to a server and sends event batches.
 type Client struct {
-	config     ClientConfig
-	conn       *Conn
-	sm         *core.StateMachine
-	negotiated *core.NegotiateResult
-	keys       *core.SessionKeys
-	spool      *Spool
-	seq        *core.SeqGenerator
-	inflight   *core.Inflight
-	window     *core.Window
-	throttle   *core.ThrottleState
-	picker     StreamPicker
-	controlStr *quic.Stream
-	controlMu  sync.Mutex // protects concurrent writes to controlStr
-	sessionID  string
-	challengeNonce string // server challenge from HELLO_ACK
+	config         ClientConfig
+	conn           *Conn
+	sm             *core.StateMachine
+	negotiated     *core.NegotiateResult
+	keys           *core.SessionKeys
+	spool          *Spool
+	seq            *core.SeqGenerator
+	inflight       *core.Inflight
+	window         *core.Window
+	throttle       *core.ThrottleState
+	picker         StreamPicker
+	controlStr     *quic.Stream
+	controlMu      sync.Mutex // protects concurrent writes to controlStr
+	sessionID      string
+	challengeNonce string    // server challenge from HELLO_ACK
 	expiresAt      time.Time // 会话过期时间，从 AUTH_OK 的 expires_at_unix 获取
 
 	// sendMu serializes SendBatch calls so that the throttle/window check
@@ -71,9 +71,16 @@ type Client struct {
 	reaperDone    chan struct{}
 	heartbeatDone chan struct{}
 
-	drainCh   chan struct{}   // signaled when pendingAcks reaches 0 during drain
-	closeOnce sync.Once       // makes Close idempotent
-	connErr   error           // captured inside closeOnce.Do for return
+	// ackQueue serializes user ACK/NACK callbacks onto a single worker so a
+	// slow handler cannot head-of-line block readControlLoop. dispatchACK is
+	// non-blocking; on a full queue the callback is dropped (the ackReaper
+	// still reclaims inflight for unacked batches).
+	ackQueue      chan ackTask
+	ackWorkerDone chan struct{}
+
+	drainCh   chan struct{} // signaled when pendingAcks reaches 0 during drain
+	closeOnce sync.Once     // makes Close idempotent
+	connErr   error         // captured inside closeOnce.Do for return
 }
 
 type pendingBatch struct {
@@ -83,6 +90,16 @@ type pendingBatch struct {
 	SentAt   time.Time
 	Deadline time.Time // when this batch expires if no ACK received
 }
+
+// ackTask is a queued user ACK/NACK callback invocation.
+type ackTask struct {
+	chunkID string
+	mode    string
+}
+
+// ackQueueSize bounds the ACK callback backlog. When full, dispatchACK drops
+// the callback (logged) rather than blocking the control loop.
+const ackQueueSize = 1024
 
 // quicStreamWrapper adapts *quic.Stream to the DataStream interface.
 type quicStreamWrapper struct {
@@ -186,12 +203,17 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.ackDone = make(chan struct{})
 	c.reaperDone = make(chan struct{})
 	c.heartbeatDone = make(chan struct{})
+	c.ackQueue = make(chan ackTask, ackQueueSize)
+	c.ackWorkerDone = make(chan struct{})
 
 	// readControlLoop processes ACK/NACK/window/throttle frames. Each goroutine
 	// closes its done channel on exit so Close() can wait.
 	go func() { defer close(c.ackDone); c.readControlLoop(c.lifecycleCtx) }()
 	go func() { defer close(c.reaperDone); c.ackReaper(c.lifecycleCtx) }()
 	go func() { defer close(c.heartbeatDone); c.heartbeatLoop(c.lifecycleCtx) }()
+	// runACKWorker drains ackQueue so user ACK callbacks run off the control
+	// loop (M-3: a slow handler no longer blocks NACK/WINDOW/THROTTLE reads).
+	go func() { defer close(c.ackWorkerDone); c.runACKWorker(c.lifecycleCtx) }()
 
 	// Open initial data stream
 	if c.picker == nil {
@@ -330,6 +352,53 @@ func (c *Client) loadACKHandler() func(chunkID, ackMode string) {
 	return nil
 }
 
+// dispatchACK enqueues a user ACK/NACK callback for asynchronous execution by
+// runACKWorker. It never blocks: a full queue would stall the control loop, so
+// the callback is dropped with a warning instead. Only the callback
+// notification is lost — pendingAcks/inflight are still updated synchronously
+// in handleAck/handleNack, and the ackReaper reclaims inflight for any batch
+// that never gets acknowledged.
+func (c *Client) dispatchACK(chunkID, mode string) {
+	select {
+	case c.ackQueue <- ackTask{chunkID: chunkID, mode: mode}:
+	default:
+		slog.Warn("ack callback queue full, dropping callback",
+			"chunk", chunkID, "mode", mode)
+	}
+}
+
+// runACKWorker consumes ackTask values and invokes the registered handler on a
+// single goroutine, preserving ACK arrival order (important for reliable
+// delivery). On shutdown it drains the queue first so already-enqueued
+// callbacks are still delivered.
+func (c *Client) runACKWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			// Best-effort drain: deliver already-enqueued callbacks before exit.
+			for {
+				select {
+				case t := <-c.ackQueue:
+					c.invokeACKHandler(t)
+				default:
+					return
+				}
+			}
+		case t := <-c.ackQueue:
+			c.invokeACKHandler(t)
+		}
+	}
+}
+
+// invokeACKHandler runs the currently-registered handler for one task. The
+// handler is loaded fresh each time so a SetACKHandler update takes effect
+// immediately.
+func (c *Client) invokeACKHandler(t ackTask) {
+	if h := c.loadACKHandler(); h != nil {
+		h(t.chunkID, t.mode)
+	}
+}
+
 // Close sends a CLOSE frame, drains pending ACKs, and shuts down.
 // It is idempotent: subsequent calls return the error from the first close.
 //
@@ -428,7 +497,7 @@ func (c *Client) waitGoroutines() {
 	const waitTimeout = 5 * time.Second
 	deadline := time.NewTimer(waitTimeout)
 	defer deadline.Stop()
-	for _, done := range []chan struct{}{c.ackDone, c.reaperDone, c.heartbeatDone} {
+	for _, done := range []chan struct{}{c.ackDone, c.reaperDone, c.heartbeatDone, c.ackWorkerDone} {
 		if done == nil {
 			continue
 		}
@@ -490,7 +559,7 @@ func (c *Client) ackReaper(ctx context.Context) {
 				}
 				return true
 			})
-				c.notifyDrainIfEmpty()
+			c.notifyDrainIfEmpty()
 		}
 	}
 }

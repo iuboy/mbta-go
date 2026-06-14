@@ -37,6 +37,30 @@ func (b *SignalBatch) Validate() error {
 				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: body is required for log type", i))
 			}
 		}
+
+		// 字段长度与控制字符约束 (L-2)：在协议入口拒绝异常长输入与日志注入面。
+		// 仅校验非空字段；Body/Attributes 等结构化字段不在此处递归校验。
+		for _, f := range []struct{ name, val string }{
+			{"signal_type", s.SignalType},
+			{"event_id", s.EventID},
+			{"trace_id", s.TraceID},
+			{"span_id", s.SpanID},
+			{"parent_span_id", s.ParentSpanID},
+			{"metric_name", s.MetricName},
+			{"unit", s.Unit},
+			{"name", s.Name},
+			{"kind", s.Kind},
+			{"status_code", s.StatusCode},
+			{"status_message", s.StatusMessage},
+			{"severity_text", s.SeverityText},
+		} {
+			if f.val == "" {
+				continue
+			}
+			if err := validateTextField(f.name, f.val); err != nil {
+				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+			}
+		}
 	}
 	return nil
 }

@@ -14,8 +14,9 @@ import (
 // and invokes the registered ACK handler callback.
 func TestHandleAck(t *testing.T) {
 	c := &Client{
-		inflight:   &core.Inflight{},
+		inflight:    &core.Inflight{},
 		pendingAcks: sync.Map{},
+		ackQueue:    make(chan ackTask, 4),
 	}
 
 	// Simulate a pending batch
@@ -55,6 +56,15 @@ func TestHandleAck(t *testing.T) {
 	}
 
 	c.handleAck(payload)
+
+	// M-3: handleAck 把回调投递到 ackQueue 异步执行。同步消费一次以验证
+	// 投递契约（chunkID/mode 正确）。
+	select {
+	case task := <-c.ackQueue:
+		c.invokeACKHandler(task)
+	case <-time.After(time.Second):
+		t.Fatal("ack task was not enqueued by dispatchACK")
+	}
 
 	// Verify inflight was decremented
 	batches, events, bytes := c.inflight.Snapshot()
@@ -102,6 +112,7 @@ func TestHandleNack(t *testing.T) {
 	c := &Client{
 		inflight:    &core.Inflight{},
 		pendingAcks: sync.Map{},
+		ackQueue:    make(chan ackTask, 4),
 	}
 
 	chunkID := "chunk-nack"
@@ -132,6 +143,15 @@ func TestHandleNack(t *testing.T) {
 	payload, _ := json.Marshal(nack)
 
 	c.handleNack(payload)
+
+	// M-3: handleNack 把回调投递到 ackQueue 异步执行。同步消费一次以验证
+	// 投递契约（mode=="nack"）。
+	select {
+	case task := <-c.ackQueue:
+		c.invokeACKHandler(task)
+	case <-time.After(time.Second):
+		t.Fatal("nack task was not enqueued by dispatchACK")
+	}
 
 	if called.Load() != 1 {
 		t.Errorf("handler called %d times, want 1", called.Load())

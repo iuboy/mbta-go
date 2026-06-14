@@ -48,7 +48,7 @@ func (c *Client) readControlLoop(ctx context.Context) {
 			if err := json.Unmarshal(f.Payload, &errMsg); err != nil {
 				slog.Debug("invalid error payload", "error", err)
 			} else {
-				slog.Warn("server error", "code", errMsg.Code, "reason", errMsg.Reason, "fatal", errMsg.Fatal)
+				slog.Warn("server error", "code", errMsg.Code, "reason", core.SanitizeForLog(errMsg.Reason), "fatal", errMsg.Fatal)
 				if errMsg.Fatal {
 					return
 				}
@@ -72,10 +72,10 @@ func (c *Client) handleAck(payload []byte) {
 		}
 	}
 
-	// Notify ACK handler (e.g., EnhancedSender for reliable delivery)
-	if handler := c.loadACKHandler(); handler != nil {
-		handler(ack.ChunkID, ack.AckMode)
-	}
+	// Notify ACK handler asynchronously (e.g., EnhancedSender for reliable
+	// delivery). Dispatching off the control loop prevents a slow handler from
+	// head-of-line blocking NACK/WINDOW/THROTTLE processing.
+	c.dispatchACK(ack.ChunkID, ack.AckMode)
 
 	c.notifyDrainIfEmpty()
 
@@ -97,14 +97,13 @@ func (c *Client) handleNack(payload []byte) {
 		}
 	}
 
-	// Notify ACK handler with "nack" mode so the sender can handle retry logic
-	if handler := c.loadACKHandler(); handler != nil {
-		handler(nack.ChunkID, "nack")
-	}
+	// Notify ACK handler asynchronously with "nack" mode so the sender can
+	// handle retry logic (see dispatchACK — never blocks the control loop).
+	c.dispatchACK(nack.ChunkID, "nack")
 
 	c.notifyDrainIfEmpty()
 
-	slog.Warn("nack received", "seq", nack.Seq, "code", nack.Code, "reason", nack.Reason, "retryable", nack.Retryable)
+	slog.Warn("nack received", "seq", nack.Seq, "code", nack.Code, "reason", core.SanitizeForLog(nack.Reason), "retryable", nack.Retryable)
 }
 
 // handleWindow processes a WINDOW frame: updates the local flow-control limits.
@@ -127,7 +126,7 @@ func (c *Client) handleThrottle(payload []byte) {
 		return
 	}
 	c.throttle.Apply(throt.RetryDelayMs)
-	slog.Info("throttled", "delay_ms", throt.RetryDelayMs, "reason", throt.Reason)
+	slog.Info("throttled", "delay_ms", throt.RetryDelayMs, "reason", core.SanitizeForLog(throt.Reason))
 }
 
 // handlePing responds to a server PING with a PONG frame.
