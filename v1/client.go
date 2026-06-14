@@ -142,6 +142,11 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 }
 
 // Connect dials the server and completes the HELLO/AUTH handshake.
+//
+// ctx 仅用于控制握手阶段（Dial、开 stream、HELLO/AUTH）的超时与取消——可用
+// context.WithTimeout 限定握手时长。握手成功后，client 的后台 goroutine 运行在
+// 独立的 lifecycle ctx 上，不随 ctx 取消而退出；client 生命周期由 Close() 终结。
+// 因此用 WithTimeout + defer cancel 调用本方法是安全的，不会误停后台。
 func (c *Client) Connect(ctx context.Context) error {
 	// Dial QUIC
 	if err := c.sm.Transition(core.StateConnecting); err != nil {
@@ -204,9 +209,14 @@ func (c *Client) Connect(ctx context.Context) error {
 		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth_result", err)
 	}
 
-	// Start background goroutines on a single lifecycle context derived from
-	// the caller's ctx. All three exit when ctx is cancelled OR on Close().
-	c.lifecycleCtx, c.lifecycleCancel = context.WithCancel(ctx)
+	// lifecycleCtx 驱动后台 goroutine（readControlLoop/ackReaper/heartbeat/ackWorker），
+	// 独立于 caller ctx。caller 传入的 ctx 仅用于握手超时控制（Dial/OpenStream/HELLO/AUTH）；
+	// 握手成功后 client 生命周期完全由 Close() 控制。
+	//
+	// 不派生自 ctx 是为了避免陷阱：若 caller 用 WithTimeout + defer cancel 调 Connect，
+	// ctx 在 Connect 返回后立即取消，会级联停掉后台 goroutine，导致 ACK 无人读取。
+	// 若需要「ctx 取消即停止 client」，调用方应自行监听 ctx 并调 Close()。
+	c.lifecycleCtx, c.lifecycleCancel = context.WithCancel(context.Background())
 	c.ackDone = make(chan struct{})
 	c.reaperDone = make(chan struct{})
 	c.heartbeatDone = make(chan struct{})
