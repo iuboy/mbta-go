@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iuboy/mbta-go/core"
+	"github.com/iuboy/mbta-go/spool"
 )
 
 // Client 是 MBTA-NTLS 客户端：单 TCP（TLCP）连接上多路复用 control/data 帧。
@@ -25,6 +27,7 @@ type Client struct {
 	sm         *core.StateMachine
 	negotiated *core.NegotiateResult
 	keys       *core.SessionKeys
+	spool      *spool.Spool
 	seq        *core.SeqGenerator
 	inflight   *core.Inflight
 	window     *core.Window
@@ -82,6 +85,8 @@ type pendingBatch struct {
 	Bytes    int64
 	SentAt   time.Time
 	Deadline time.Time // 此 batch 若无 ACK 的超时时刻
+	RecordIDs    []string // spool 删除用；无 spool 时为空
+	SpoolChunkID string   // spool key；全新发送==wire chunkID，重发==原 spool key
 }
 
 // ackTask 是排队等待执行的用户 ACK/NACK 回调。
@@ -108,6 +113,13 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		throttle:   &core.ThrottleState{},
 		ackTimeout: 5 * time.Minute,
 		drainCh:    make(chan struct{}, 1),
+	}
+	if cfg.SpoolDir != "" {
+		s, err := spool.New(cfg.SpoolDir)
+		if err != nil {
+			return nil, core.WrapError(core.NumSpool, core.CodeSpool, "open spool", err)
+		}
+		c.spool = s
 	}
 	return c, nil
 }
@@ -194,6 +206,9 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// ntls 无 openDataStreams：所有 batch 帧直接通过 c.writeFrame 写入同一连接。
 
+	// 重连/崩溃恢复：重发 spool 中所有未 ACK 的 batch（background goroutine 已启动，ACK 可被处理）。
+	c.drainSpoolAfterConnect(ctx)
+
 	slog.Info("MBTA-NTLS client connected", "agent", c.config.AgentID, "session", c.sessionID)
 	return nil
 }
@@ -244,6 +259,18 @@ func (c *Client) writeFrameCtx(ctx context.Context, typ uint16, flags byte, payl
 // 锁粒度：sendMu 仅保护「window 检查 + 取 seq/chunkID + inflight/pending 登记」，
 // 重的 CPU 工作（marshal、gzip+HMAC Build、网络写）全部在锁外，使多调用方可并行利用多核。
 func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string) (string, error) {
+	return c.sendTracked(ctx, signalBatch, tag, source, nil)
+}
+
+// sendTracked 发送一个 batch 并按需持久化到 spool，是 SendBatch 与重连重发的共用底层路径。
+// 语义与 v1 sendTracked 一致：
+//   - alreadySpooledChunkID == nil：全新发送，PutBatch 持久化，pendingBatch.SpoolChunkID == wire chunkID。
+//   - alreadySpooledChunkID != nil：重发，跳过 PutBatch（防双重持久化），wire 用新 seq/chunkID
+//     （服务端 ReplayCache per-connection，跨重连不去重），pendingBatch.SpoolChunkID == 原 spool key。
+//
+// PutBatch 成功后即使 write 失败也保留 spool 条目（at-least-once，重连重发）。
+// ctx 约束网络写（见 writeFrameCtx）。
+func (c *Client) sendTracked(ctx context.Context, signalBatch *core.SignalBatch, tag, source string, alreadySpooledChunkID *string) (string, error) {
 	if signalBatch == nil {
 		return "", core.NewError(core.NumBatch, core.CodeBatch, "batch must not be nil")
 	}
@@ -262,8 +289,16 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	}
 	batchEvents := len(signalBatch.Signals)
 
-	// --- 锁内：取 seq/chunkID、构造 batch wrapper、窗口检查、inflight/pending 登记 ---
-	seq, chunkID, batchPayload, err := c.reserveInflight(tag, source, batchJSON, batchEvents)
+	// 全新发送：为每个 event 构造 spool Record（锁外，CPU 工作）。
+	var records []spool.Record
+	var recordIDs []string
+	fresh := alreadySpooledChunkID == nil
+	if c.spool != nil && fresh {
+		records, recordIDs = buildRecords(c.config.AgentID, tag, source, signalBatch.Signals)
+	}
+
+	// --- 锁内：取 seq/chunkID、窗口检查、inflight/spool/pending 登记 ---
+	seq, chunkID, batchPayload, err := c.reserveInflight(tag, source, batchJSON, batchEvents, records, recordIDs, alreadySpooledChunkID)
 	if err != nil {
 		return "", err
 	}
@@ -271,7 +306,7 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 
 	// --- 锁外：Build envelope（gzip+HMAC）+ marshal env + 网络写 ---
 	if writeErr := c.buildAndSend(ctx, seq, chunkID, tag, source, batchPayload); writeErr != nil {
-		// 写失败：回滚已登记的 inflight/pending，避免窗口被永久占用。
+		// 写失败：回滚 inflight/pending，但保留 spool 条目（at-least-once，重连重发）。
 		c.inflight.Remove(batchEvents, batchBytes)
 		if _, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
 			c.pendingCount.Add(-1)
@@ -279,14 +314,83 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 		return "", writeErr
 	}
 
-	slog.Debug("batch sent", "seq", seq, "chunk", chunkID, "events", batchEvents)
+	slog.Debug("batch sent", "seq", seq, "chunk", chunkID, "events", batchEvents, "retransmit", !fresh)
 	return chunkID, nil
 }
 
-// reserveInflight 在 sendMu 保护下原子完成：取 seq/chunkID、构造 batch wrapper
-// （手写，避免 json.Marshal 对 RawMessage 的 compact 扫描）、窗口检查、inflight 与 pending 登记。
-// 返回 seq、chunkID 与构造好的 batchPayload（供 buildAndSend 直接 Build，避免重复 marshal）。
-func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEvents int) (uint64, string, []byte, error) {
+// buildRecords 为一批 event 构造 spool Record 与对应 RecordID（每 event 一个 UUID v7）。
+func buildRecords(agentID, tag, source string, signals []*core.SignalRecord) ([]spool.Record, []string) {
+	records := make([]spool.Record, len(signals))
+	ids := make([]string, len(signals))
+	now := time.Now().UnixMilli()
+	for i, sig := range signals {
+		id := uuid.Must(uuid.NewV7()).String()
+		ids[i] = id
+		records[i] = spool.Record{
+			RecordID:        id,
+			AgentID:         agentID,
+			Event:           sig,
+			Tag:             tag,
+			Source:          source,
+			CreatedAtUnixMs: now,
+		}
+	}
+	return records, ids
+}
+
+// deleteSpooled 删除已 ACK（或毒消息丢弃）的 batch 对应 spool 条目。删除失败仅 warn。
+func (c *Client) deleteSpooled(pb *pendingBatch) {
+	if c.spool == nil || pb.SpoolChunkID == "" {
+		return
+	}
+	if err := c.spool.DeleteBatch(pb.SpoolChunkID); err != nil {
+		slog.Warn("spool delete batch failed", "chunk", pb.SpoolChunkID, "error", err)
+	}
+	if err := c.spool.DeleteRecords(pb.RecordIDs); err != nil {
+		slog.Warn("spool delete records failed", "error", err)
+	}
+}
+
+// drainSpoolAfterConnect 握手成功后重发所有未 ACK 的 spool batch（崩溃/重连恢复）。
+// 按 Seq 升序重发；重发跳过 PutBatch，wire 用新 seq/chunkID，pendingBatch.SpoolChunkID
+// 指向原 key 以便 ACK 删除原条目。单条失败不删 spool，下次重连再试。
+func (c *Client) drainSpoolAfterConnect(ctx context.Context) {
+	if c.spool == nil {
+		return
+	}
+	batches := c.spool.PendingBatches()
+	if len(batches) == 0 {
+		return
+	}
+	sort.Slice(batches, func(i, j int) bool { return batches[i].Seq < batches[j].Seq })
+	slog.Info("draining spooled batches after reconnect", "count", len(batches))
+	for _, b := range batches {
+		recs := c.spool.GetRecords(b.RecordIDs)
+		if len(recs) == 0 {
+			continue
+		}
+		sb := &core.SignalBatch{Signals: make([]*core.SignalRecord, len(recs))}
+		var tag, source string
+		for i, r := range recs {
+			sb.Signals[i] = r.Event
+			if i == 0 {
+				tag, source = r.Tag, r.Source
+			}
+		}
+		origChunkID := b.ChunkID
+		if _, err := c.sendTracked(ctx, sb, tag, source, &origChunkID); err != nil {
+			slog.Warn("spool retransmit failed", "chunk", origChunkID, "error", err)
+			continue
+		}
+		if err := c.spool.UpdateBatchAttempt(origChunkID); err != nil {
+			slog.Warn("spool update attempt failed", "chunk", origChunkID, "error", err)
+		}
+	}
+}
+
+// reserveInflight 在 sendMu 保护下原子完成：取 seq/chunkID、构造 batch wrapper、窗口检查、
+// inflight/spool/pending 登记。PutBatch 与 inflight/pending 同临界区保证原子。
+func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEvents int, records []spool.Record, recordIDs []string, alreadySpooledChunkID *string) (uint64, string, []byte, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
@@ -301,12 +405,34 @@ func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEven
 		return 0, "", nil, ErrWindowFull
 	}
 	c.inflight.Add(batchEvents, batchBytes)
+
+	// spool 持久化（buffered 模式仅 map 写无 I/O）。
+	var spoolChunkID string
+	if c.spool != nil {
+		if alreadySpooledChunkID != nil {
+			spoolChunkID = *alreadySpooledChunkID
+		} else {
+			if err := c.spool.PutBatch(records, spool.Batch{
+				Seq:             seq,
+				ChunkID:         chunkID,
+				RecordIDs:       recordIDs,
+				CreatedAtUnixMs: time.Now().UnixMilli(),
+			}); err != nil {
+				c.inflight.Remove(batchEvents, batchBytes)
+				return 0, "", nil, core.WrapError(core.NumSpool, core.CodeSpool, "spool put batch", err)
+			}
+			spoolChunkID = chunkID
+		}
+	}
+
 	c.pendingAcks.Store(chunkID, &pendingBatch{
-		Seq:      seq,
-		Events:   batchEvents,
-		Bytes:    batchBytes,
-		SentAt:   time.Now(),
-		Deadline: time.Now().Add(c.ackTimeout),
+		Seq:          seq,
+		Events:       batchEvents,
+		Bytes:        batchBytes,
+		SentAt:       time.Now(),
+		Deadline:     time.Now().Add(c.ackTimeout),
+		RecordIDs:    recordIDs,
+		SpoolChunkID: spoolChunkID,
 	})
 	c.pendingCount.Add(1)
 
@@ -536,9 +662,14 @@ func (c *Client) close() {
 		c.keys = nil
 	}
 	c.sendMu.Unlock()
-}
 
-// waitGoroutines 阻塞直到所有后台 goroutine 退出或等待超时。
+	// 关闭 spool：置于 waitGoroutines 之后，drain/ackReaper 阶段触发的 spool 删除已落定。
+	if c.spool != nil {
+		if err := c.spool.Close(); err != nil {
+			slog.Warn("spool close failed", "error", err)
+		}
+	}
+}
 // 超时为 Close 设上限，防止某个 goroutine 卡在不可中断的读取上无限挂起。
 func (c *Client) waitGoroutines() {
 	const waitTimeout = 5 * time.Second
