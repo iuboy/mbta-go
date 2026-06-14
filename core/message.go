@@ -130,9 +130,7 @@ func (m *BatchMessage) Validate() error {
 	if len(m.Batch) == 0 {
 		return NewError(NumValidation, CodeValidation, "batch must not be empty")
 	}
-	if !json.Valid(m.Batch) {
-		return NewError(NumValidation, CodeValidation, "batch must be valid JSON")
-	}
+	// JSON 合法性由下游 Unmarshal 强制校验，此处不再重复扫描。
 	return nil
 }
 

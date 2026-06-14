@@ -10,9 +10,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/iuboy/pollux-go/sm3"
+)
+
+// gzipWriterPool / gzipReaderPool 复用 gzip 内部 flate 压缩表（~32KB huffman 表），
+// 避免每帧 Build/Open 重建。Writer Reset 到目标 buffer，Reader Reset 到数据源。
+var (
+	gzipWriterPool = sync.Pool{
+		New: func() any {
+			// DefaultCompression 永不返回错误；io.Discard 仅作 Reset 占位。
+			w, _ := gzip.NewWriterLevel(io.Discard, gzip.DefaultCompression)
+			return w
+		},
+	}
+	gzipReaderPool = sync.Pool{
+		New: func() any { return new(gzip.Reader) },
+	}
 )
 
 // EnvelopeVersion is the current wire-format version for secure envelopes.
@@ -89,13 +106,19 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 	processed := batchPayload
 	if compression == CompressionGzip {
 		var buf bytes.Buffer
-		w := gzip.NewWriter(&buf)
+		w := gzipWriterPool.Get().(*gzip.Writer)
+		w.Reset(&buf)
 		if _, err := w.Write(batchPayload); err != nil {
+			w.Close()
+			gzipWriterPool.Put(w)
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip compress", err)
 		}
 		if err := w.Close(); err != nil {
+			gzipWriterPool.Put(w)
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip close", err)
 		}
+		// Close 后 writer 状态归零，可安全归还 pool。
+		gzipWriterPool.Put(w)
 		processed = buf.Bytes()
 	}
 
@@ -125,22 +148,67 @@ func nowUnixMs() int64 {
 }
 
 // CanonicalSigningString builds the deterministic HMAC input.
+// 直接 append 预分配 []byte，避免 fmt.Fprintf 的反射装箱与 bytes.Buffer 堆分配。
+// 字段拼接顺序必须与历史版本逐字节一致，否则破坏 MAC 兼容性。
 func CanonicalSigningString(env *SecureEnvelope) []byte {
-	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "envelope_version=%d\n", env.EnvelopeVersion)
-	fmt.Fprintf(&buf, "message_type=%s\n", env.MessageType)
-	fmt.Fprintf(&buf, "session_id=%s\n", env.SessionID)
-	fmt.Fprintf(&buf, "key_id=%s\n", env.KeyID)
-	fmt.Fprintf(&buf, "seq=%d\n", env.Seq)
-	fmt.Fprintf(&buf, "chunk_id=%s\n", env.ChunkID)
-	fmt.Fprintf(&buf, "created_at_unix_ms=%d\n", env.CreatedAtUnixMs)
-	fmt.Fprintf(&buf, "codec=%s\n", env.Codec)
-	fmt.Fprintf(&buf, "compression=%s\n", env.Compression)
-	fmt.Fprintf(&buf, "encryption=%s\n", env.Encryption)
-	fmt.Fprintf(&buf, "hmac_algo=%s\n", env.HMACAlgo)
-	fmt.Fprintf(&buf, "nonce=%s\n", env.Nonce)
-	fmt.Fprintf(&buf, "payload=%s", env.Payload) // no trailing newline
-	return buf.Bytes()
+	// 预估容量：各字符串字段长度 + 固定前缀与数字字段余量。
+	const fixedOverhead = 256
+	estCap := fixedOverhead + len(env.MessageType) + len(env.SessionID) + len(env.KeyID) +
+		len(env.ChunkID) + len(env.Codec) + len(env.Compression) + len(env.Encryption) +
+		len(env.HMACAlgo) + len(env.Nonce) + len(env.Payload)
+	buf := make([]byte, 0, estCap)
+
+	buf = append(buf, "envelope_version="...)
+	buf = strconv.AppendUint(buf, uint64(env.EnvelopeVersion), 10) //nolint:gosec // G115: EnvelopeVersion 是小常量，无溢出
+	buf = append(buf, '\n')
+
+	buf = append(buf, "message_type="...)
+	buf = append(buf, env.MessageType...)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "session_id="...)
+	buf = append(buf, env.SessionID...)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "key_id="...)
+	buf = append(buf, env.KeyID...)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "seq="...)
+	buf = strconv.AppendUint(buf, env.Seq, 10)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "chunk_id="...)
+	buf = append(buf, env.ChunkID...)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "created_at_unix_ms="...)
+	buf = strconv.AppendInt(buf, env.CreatedAtUnixMs, 10)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "codec="...)
+	buf = append(buf, env.Codec...)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "compression="...)
+	buf = append(buf, env.Compression...)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "encryption="...)
+	buf = append(buf, env.Encryption...)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "hmac_algo="...)
+	buf = append(buf, env.HMACAlgo...)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "nonce="...)
+	buf = append(buf, env.Nonce...)
+	buf = append(buf, '\n')
+
+	buf = append(buf, "payload="...)
+	buf = append(buf, env.Payload...) // no trailing newline
+	return buf
 }
 
 func computeHMACSHA256(key, data []byte) []byte {
@@ -234,22 +302,25 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 
 	// Decompress
 	if env.Compression == CompressionGzip {
-		r, err := gzip.NewReader(bytes.NewReader(raw))
-		if err != nil {
+		r := gzipReaderPool.Get().(*gzip.Reader)
+		if err := r.Reset(bytes.NewReader(raw)); err != nil {
+			gzipReaderPool.Put(r)
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip reader", err)
 		}
-		defer r.Close()
+		defer gzipReaderPool.Put(r) // Reset 会重置状态，无需 Close 即可复用
 
 		// Limit decompressed size to prevent zip-bomb OOM
 		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
-		decompressed, err := io.ReadAll(lr)
-		if err != nil {
+		// 预分配解压缓冲（gzip 典型压缩比 3-4x），避免 io.ReadAll 的多次 grow+copy。
+		var buf bytes.Buffer
+		buf.Grow(len(raw) * 4)
+		if _, err := io.Copy(&buf, lr); err != nil {
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip decompress", err)
 		}
 		if lr.N == 0 {
 			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed payload exceeds %d bytes limit", MaxDecompressedSize))
 		}
-		return decompressed, nil
+		return buf.Bytes(), nil
 	}
 
 	return raw, nil

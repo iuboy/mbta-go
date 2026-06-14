@@ -1,6 +1,7 @@
 package core
 
 import (
+	"container/list"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -46,12 +47,22 @@ type ReplayEntry struct {
 	// ACK/NACK response is stored for duplicate returns.
 }
 
+// replayNode 是 ReplayCache 中的条目节点，承载状态与所在双向链表的元素指针。
+// Processing 条目挂在 processingList，已完成（非 Processing）条目挂在 doneList，
+// 两链表均按各自插入序 FIFO，使淘汰可在 O(1) 完成。
+type replayNode struct {
+	key   string
+	entry ReplayEntry
+	el    *list.Element // 在 processingList 或 doneList 中
+}
+
 // ReplayCache prevents duplicate processing of the same chunk_id from an agent.
 type ReplayCache struct {
-	mu      sync.Mutex
-	entries map[string]*ReplayEntry // key: agent_id + chunk_id
-	maxSize int
-	order   []string // FIFO insertion order for bounded eviction
+	mu             sync.Mutex
+	entries        map[string]*replayNode // key: agent_id + chunk_id
+	maxSize        int
+	processingList *list.List // Processing 条目，FIFO（最早插入在队首）
+	doneList       *list.List // 已完成条目，FIFO（最早完成在队首），淘汰优先取此
 }
 
 const defaultReplayMaxSize = 50000
@@ -68,9 +79,10 @@ func NewReplayCacheWithSize(maxSize int) *ReplayCache {
 		maxSize = defaultReplayMaxSize
 	}
 	return &ReplayCache{
-		entries: make(map[string]*ReplayEntry, min(maxSize, 1024)),
-		maxSize: maxSize,
-		order:   make([]string, 0, maxSize),
+		entries:        make(map[string]*replayNode, min(maxSize, 1024)),
+		maxSize:        maxSize,
+		processingList: list.New(),
+		doneList:       list.New(),
 	}
 }
 
@@ -81,59 +93,63 @@ func Key(agentID, chunkID string) string {
 
 // SeenOrAdd checks if a key has been seen. Returns the entry if so.
 // If not seen, creates a new Processing entry and returns nil.
-// When the cache exceeds maxSize, evicts the oldest entry regardless of status.
+//
+// 淘汰策略（O(1)）：缓存满时优先从 doneList 队首驱逐一个已完成条目；
+// 若 doneList 为空（全部 Processing），则从 processingList 队首驱逐最早条目并记录告警。
 func (rc *ReplayCache) SeenOrAdd(key string) *ReplayEntry {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
-	if e, ok := rc.entries[key]; ok {
-		return e
+	if n, ok := rc.entries[key]; ok {
+		return &n.entry
 	}
 
-	// 当缓存超过容量时，优先驱逐非 Processing 的条目。
-	// 如果全部为 Processing，则回退驱逐最早的条目（防止内存无限增长）。
-	//
-	// TODO(perf): 当前淘汰逻辑最坏情况 O(n)——当 maxSize=50000 且全部为 Processing 时，
-	// 每次插入新条目都遍历整个 order 列表。改进方案：
-	//   1. 维护两个链表：processingList 和 completedList，分别跟踪不同状态的条目
-	//   2. 或使用 container/list + map 的双向链表实现 O(1) 淘汰
-	//   3. 当前 maxSize=50000 在正常负载下几乎不会全部为 Processing，因此实际影响有限
-	for len(rc.entries) >= rc.maxSize && len(rc.order) > 0 {
-		evicted := false
-		for i, k := range rc.order {
-			if e, ok := rc.entries[k]; ok && e.Status != ReplayProcessing {
-				delete(rc.entries, k)
-				rc.order = append(rc.order[:i], rc.order[i+1:]...)
-				evicted = true
-				break
-			}
+	// 容量满时淘汰：优先已完成条目，O(1)。
+	for len(rc.entries) >= rc.maxSize {
+		if rc.doneList.Len() > 0 {
+			el := rc.doneList.Front()
+			n := el.Value.(*replayNode)
+			rc.doneList.Remove(el)
+			delete(rc.entries, n.key)
+			continue
 		}
-		if !evicted {
-			// 全部为 Processing，回退驱逐最早的条目。
-			// 这意味着有一个正在处理的 batch 可能被重复处理——记录警告。
-			oldest := rc.order[0]
-			rc.order = rc.order[1:]
-			delete(rc.entries, oldest)
-			slog.Warn("replay cache evicted processing entry",
-				"evicted_key", oldest,
-				"cache_size", len(rc.entries),
-				"max_size", rc.maxSize,
-			)
+		// 全部为 Processing：驱逐最早的 Processing 条目。
+		// 这意味着有一个正在处理的 batch 可能被重复处理——记录警告。
+		el := rc.processingList.Front()
+		if el == nil {
+			break // entries 非空则必在某一链表，防御性退出
 		}
+		n := el.Value.(*replayNode)
+		rc.processingList.Remove(el)
+		delete(rc.entries, n.key)
+		slog.Warn("replay cache evicted processing entry",
+			"evicted_key", n.key,
+			"cache_size", len(rc.entries),
+			"max_size", rc.maxSize,
+		)
 	}
 
-	rc.entries[key] = &ReplayEntry{Status: ReplayProcessing}
-	rc.order = append(rc.order, key)
+	n := &replayNode{key: key, entry: ReplayEntry{Status: ReplayProcessing}}
+	n.el = rc.processingList.PushBack(n)
+	rc.entries[key] = n
 	return nil
 }
 
 // Update changes the status of an existing entry.
+// 条目从 Processing 迁移到完成态时，同步从 processingList 移到 doneList。
 func (rc *ReplayCache) Update(key string, status ReplayStatus) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
-	if e, ok := rc.entries[key]; ok {
-		e.Status = status
+	n, ok := rc.entries[key]
+	if !ok {
+		return
+	}
+	wasProcessing := n.entry.Status == ReplayProcessing
+	n.entry.Status = status
+	if wasProcessing && status != ReplayProcessing {
+		rc.processingList.Remove(n.el)
+		n.el = rc.doneList.PushBack(n)
 	}
 }
 
@@ -141,7 +157,10 @@ func (rc *ReplayCache) Update(key string, status ReplayStatus) {
 func (rc *ReplayCache) Get(key string) *ReplayEntry {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
-	return rc.entries[key]
+	if n, ok := rc.entries[key]; ok {
+		return &n.entry
+	}
+	return nil
 }
 
 // Len returns the number of entries.

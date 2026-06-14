@@ -76,7 +76,7 @@ func Write(w io.Writer, typ uint16, flags byte, payload []byte) error {
 		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("payload exceeds max size (%d > %d)", len(payload), MaxPayloadSize))
 	}
 
-	hdr := make([]byte, HeaderSz)
+	var hdr [HeaderSz]byte
 	copy(hdr[0:4], Magic)
 	hdr[4] = Version
 	hdr[5] = flags
@@ -84,7 +84,7 @@ func Write(w io.Writer, typ uint16, flags byte, payload []byte) error {
 	binary.BigEndian.PutUint32(hdr[8:12], uint32(len(payload))) // #nosec G115 -- payload size checked above
 	binary.BigEndian.PutUint32(hdr[12:16], crc32.ChecksumIEEE(payload))
 
-	if _, err := w.Write(hdr); err != nil {
+	if _, err := w.Write(hdr[:]); err != nil {
 		return WrapError(NumProtocol, CodeProtocol, "write header", err)
 	}
 	if len(payload) > 0 {
@@ -110,8 +110,8 @@ func DefaultLimits() Limits {
 // the remaining declared payload bytes are drained so the reader stays aligned
 // for the next frame.
 func Read(r io.Reader, lim Limits) (Frame, error) {
-	hdr := make([]byte, HeaderSz)
-	if _, err := io.ReadFull(r, hdr); err != nil {
+	var hdr [HeaderSz]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return Frame{}, WrapError(NumProtocol, CodeProtocol, "read header", err)
 	}
 
