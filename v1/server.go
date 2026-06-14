@@ -88,6 +88,17 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// Addr 返回服务器监听地址（Start 完成监听后有效；启动前返回空串）。
+// 便于端到端测试与外部客户端在 OS 分配端口（Address 含 :0）的场景下发现实际端口。
+func (s *Server) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == nil {
+		return ""
+	}
+	return s.listener.Addr().String()
+}
+
 // Accept waits for and returns the next connection handler.
 // This is a low-level API for callers who want to manage the accept loop
 // themselves. When using Start(), the accept loop is handled automatically
