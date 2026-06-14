@@ -50,8 +50,7 @@ type ServerConfig struct {
 	V2QUIC v2.QUICServerConfig
 
 	// NTLS specific configuration
-	NTLSAddr string
-	NTLSCfg  ntls.ServerConfig
+	NTLSCfg ntls.ServerConfig
 }
 
 // NewServer creates a multi-version MBTA server.
@@ -248,10 +247,9 @@ func WithV2(cfg v2.QUICServerConfig) ServerOption {
 }
 
 // WithNTLS enables NTLS support with custom configuration.
-func WithNTLS(addr string, cfg ntls.ServerConfig) ServerOption {
+func WithNTLS(cfg ntls.ServerConfig) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.EnableNTLS = true
-		sc.NTLSAddr = addr
 		sc.NTLSCfg = cfg
 		return nil
 	}

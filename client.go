@@ -245,56 +245,18 @@ func (c *Client) initV1Client() (versionedClient, error) {
 	return &v1ClientWrapper{client: client}, nil
 }
 
-// initV2Client initializes the V2 client wrapper.
+// initV2Client 尚未实现：v2（QUIC + RFC 8998 国密 TLS）依赖未集成的 GM TLS 库。
+// 早失败：在 NewClient 阶段直接返回 error，而非构造一个运行期才报错的 wrapper。
 func (c *Client) initV2Client() (versionedClient, error) {
-	slog.Warn("v2 protocol is not yet implemented — all operations will return errors")
-
-	if c.cfg.V2Creds == nil {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "v2 GM credentials not provided")
-	}
-
-	cfg := v2.ClientConfig{
-		Transport: v2.QUICClientConfig{
-			Server:      c.cfg.Server,
-			Credentials: c.cfg.V2Creds,
-		},
-		AgentID:  c.cfg.AgentID,
-		Hostname: c.cfg.Hostname,
-		Token:    c.cfg.Token,
-	}
-
-	client, err := v2.NewClient(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	return &v2ClientWrapper{client: client}, nil
+	return nil, core.NewError(core.NumVersion, core.CodeVersion,
+		"v2 protocol not yet implemented (requires GM TLS library)")
 }
 
-// initNTLSClient initializes the NTLS client wrapper.
+// initNTLSClient 尚未实现：ntls（TCP + NTLS/TLCP）依赖未集成的 NTLS 库。
+// 早失败：在 NewClient 阶段直接返回 error，而非构造一个运行期才报错的 wrapper。
 func (c *Client) initNTLSClient() (versionedClient, error) {
-	slog.Warn("ntls protocol is not yet implemented — all operations will return errors")
-
-	if c.cfg.NTLSCreds == nil {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "ntls credentials not provided")
-	}
-
-	cfg := ntls.ClientConfig{
-		Server:     c.cfg.Server,
-		CertFile:   c.cfg.NTLSCreds.CertFile,
-		KeyFile:    c.cfg.NTLSCreds.KeyFile,
-		CAFile:     c.cfg.NTLSCreds.CAFile,
-		ServerName: c.cfg.NTLSCreds.ServerName,
-		AgentID:    c.cfg.AgentID,
-		Token:      c.cfg.Token,
-	}
-
-	client, err := ntls.NewClient(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ntlsClientWrapper{client: client}, nil
+	return nil, core.NewError(core.NumVersion, core.CodeVersion,
+		"ntls protocol not yet implemented (requires NTLS/TLCP library)")
 }
 
 // Client wrappers for versionedClient interface
@@ -311,33 +273,9 @@ func (w *v1ClientWrapper) Close() error                     { return w.client.Cl
 func (w *v1ClientWrapper) State() string                    { return w.client.State().String() }
 func (w *v1ClientWrapper) SetACKHandler(handler ACKHandler) { w.client.SetACKHandler(handler) }
 
-type v2ClientWrapper struct {
-	client *v2.Client
-}
-
-func (w *v2ClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
-func (w *v2ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
-	return w.client.SendBatch(ctx, batch, tag, source)
-}
-func (w *v2ClientWrapper) Close() error  { return w.client.Close() }
-func (w *v2ClientWrapper) State() string { return w.client.State().String() }
-func (w *v2ClientWrapper) SetACKHandler(ACKHandler) {
-	slog.Warn("SetACKHandler ignored: v2 ACK handling not yet implemented")
-}
-
-type ntlsClientWrapper struct {
-	client *ntls.Client
-}
-
-func (w *ntlsClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
-func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
-	return w.client.SendBatch(ctx, batch, tag, source)
-}
-func (w *ntlsClientWrapper) Close() error  { return w.client.Close() }
-func (w *ntlsClientWrapper) State() string { return w.client.State().String() }
-func (w *ntlsClientWrapper) SetACKHandler(ACKHandler) {
-	slog.Warn("SetACKHandler ignored: ntls ACK handling not yet implemented")
-}
+// 注：v2ClientWrapper / ntlsClientWrapper 已移除。v2/ntls 协议尚未实现，
+// initV2Client/initNTLSClient 在 NewClient 阶段直接返回 error（早失败），
+// 不再构造运行期才报错的 wrapper。待 v2/ntls 落地时按 v1ClientWrapper 模式重建。
 
 // Client Options (functional options pattern)
 

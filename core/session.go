@@ -232,7 +232,6 @@ invalid:
 
 // Policy controls which capabilities the server accepts and which algorithms it prefers.
 type Policy struct {
-	RequireToken        bool
 	EnableGzip          bool
 	EnableHMACSHA256    bool
 	EnableHMACSM3       bool

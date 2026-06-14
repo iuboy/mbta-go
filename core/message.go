@@ -64,7 +64,7 @@ type AuthMessage struct {
 	AgentID    string `json:"agent_id"`
 	SessionID  string `json:"session_id"`
 	HMACAlgo   string `json:"hmac_algo,omitempty"`
-	SM2CertPEM string `json:"sm2_cert_pem,omitempty"`
+	SM2CertPEM string `json:"sm2_cert_pem,omitempty"` // reserved：sm2_cert_auth 协商时填充（v1 未实现，当前无生产赋值）
 	AuthNonce  string `json:"auth_nonce"`
 }
 
@@ -86,10 +86,10 @@ func (m *AuthMessage) Validate() error {
 type AuthOKMessage struct {
 	SessionID        string `json:"session_id"`
 	KeyID            string `json:"key_id"`
-	HMACKey          string `json:"hmac_key,omitempty"`  // Base64(32 bytes)
-	HMACAlgo         string `json:"hmac_algo,omitempty"` // "sha256" or "sm3"
-	SM4Key           string `json:"sm4_key,omitempty"`   // Base64(16 bytes)
-	ServerSM2CertPEM string `json:"server_sm2_cert_pem,omitempty"`
+	HMACKey          string `json:"hmac_key,omitempty"`            // Base64(32 bytes)
+	HMACAlgo         string `json:"hmac_algo,omitempty"`           // "sha256" or "sm3"
+	SM4Key           string `json:"sm4_key,omitempty"`             // reserved：sm4_gcm 协商时下发（v1 未实现，当前无生产赋值）
+	ServerSM2CertPEM string `json:"server_sm2_cert_pem,omitempty"` // reserved：sm2_cert_auth 协商时下发（v1 未实现）
 	ExpiresAtUnix    int64  `json:"expires_at_unix,omitempty"`
 }
 

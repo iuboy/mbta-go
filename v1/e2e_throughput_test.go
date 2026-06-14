@@ -50,7 +50,6 @@ func setupE2E(b testing.TB, strategy string, streamCount int, sink core.EventSin
 		},
 		Auth: core.NewStaticTokenValidator(map[string]string{"tok": "agent-1"}),
 		Policy: core.Policy{
-			RequireToken:     true,
 			EnableGzip:       true,
 			EnableHMACSHA256: true,
 			EnableWindow:     true,

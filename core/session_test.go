@@ -341,9 +341,6 @@ func TestPolicyDefaults(t *testing.T) {
 	policy := Policy{}
 
 	// All optional features should be disabled
-	if policy.RequireToken {
-		t.Error("RequireToken should be false by default")
-	}
 	if policy.EnableGzip {
 		t.Error("EnableGzip should be false by default")
 	}
