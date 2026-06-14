@@ -67,6 +67,7 @@ func (c *Client) handleAck(payload []byte) {
 	}
 
 	if val, ok := c.pendingAcks.LoadAndDelete(ack.ChunkID); ok {
+		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
 			c.inflight.Remove(pb.Events, pb.Bytes)
 		}
@@ -92,6 +93,7 @@ func (c *Client) handleNack(payload []byte) {
 	}
 
 	if val, ok := c.pendingAcks.LoadAndDelete(nack.ChunkID); ok {
+		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
 			c.inflight.Remove(pb.Events, pb.Bytes)
 		}

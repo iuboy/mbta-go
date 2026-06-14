@@ -26,6 +26,16 @@ const (
 	defaultMaxIncomingStreams = 256              // 单连接并发 QUIC 流上限
 )
 
+// QUIC 流控接收窗口。默认窗口偏小（~512KB-1MB），小于 maxBatchBytes(8MiB)，
+// 大 batch 会触发额外的 BLOCKED 帧往返。这里按 batch 上限调优，跨地域高 BDP 链路
+// 下避免每帧多一个 RTT。
+const (
+	initialStreamWnd     = 8 * 1024 * 1024   // 8 MiB，匹配单 batch 上限
+	initialConnectionWnd = 64 * 1024 * 1024  // 64 MiB
+	maxStreamWnd         = 16 * 1024 * 1024  // 16 MiB
+	maxConnectionWnd     = 128 * 1024 * 1024 // 128 MiB
+)
+
 // ServerCredentials holds server-side TLS credentials.
 // Follows Go naming convention (similar to tls.Certificate).
 type ServerCredentials struct {
@@ -162,9 +172,13 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 		maxStreams = defaultMaxIncomingStreams
 	}
 	quicCfg := &quic.Config{
-		MaxIncomingStreams: maxStreams,
-		MaxIdleTimeout:     idleTimeout,
-		KeepAlivePeriod:    idleTimeout / 3,
+		MaxIncomingStreams:             maxStreams,
+		MaxIdleTimeout:                 idleTimeout,
+		KeepAlivePeriod:                idleTimeout / 3,
+		InitialStreamReceiveWindow:     initialStreamWnd,
+		InitialConnectionReceiveWindow: initialConnectionWnd,
+		MaxStreamReceiveWindow:         maxStreamWnd,
+		MaxConnectionReceiveWindow:     maxConnectionWnd,
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Address)
@@ -280,8 +294,12 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 		idleTimeout = defaultIdleTimeout
 	}
 	quicCfg := &quic.Config{
-		MaxIdleTimeout:  idleTimeout,
-		KeepAlivePeriod: idleTimeout / 3,
+		MaxIdleTimeout:                 idleTimeout,
+		KeepAlivePeriod:                idleTimeout / 3,
+		InitialStreamReceiveWindow:     initialStreamWnd,
+		InitialConnectionReceiveWindow: initialConnectionWnd,
+		MaxStreamReceiveWindow:         maxStreamWnd,
+		MaxConnectionReceiveWindow:     maxConnectionWnd,
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Server)

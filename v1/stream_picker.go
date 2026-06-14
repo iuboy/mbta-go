@@ -1,12 +1,17 @@
 package v1
 
 import (
-	"hash/fnv"
 	"io"
 	"sort"
 	"sync"
 
 	"github.com/iuboy/mbta-go/core"
+)
+
+// FNV-1a 32-bit 常量。手写以消除 hash/fnv 的对象分配（每帧一次的发送热路径）。
+const (
+	fnvOffset32 = 2166136261
+	fnvPrime32  = 16777619
 )
 
 // DataStream represents an opened QUIC data stream with an integer index.
@@ -37,7 +42,7 @@ func NewSingleStream(ds DataStream) StreamPicker {
 func (s *singleStream) Pick(_ core.BatchMessage) (DataStream, error) { return s.ds, nil }
 func (s *singleStream) AddStream(_ DataStream)                       {}
 func (s *singleStream) RemoveStream(_ int)                           {}
-func (s *singleStream) Len() int                                      { return 1 }
+func (s *singleStream) Len() int                                     { return 1 }
 
 // --- HashStreamPicker: distributes by tag+source hash ---
 
@@ -72,8 +77,7 @@ func (h *hashStreamPicker) Pick(batch core.BatchMessage) (DataStream, error) {
 		return nil, ErrNoStreams
 	}
 
-	key := batch.Tag + "\x00" + batch.Source
-	target := hashKey(key)
+	target := hashTagSource(batch.Tag, batch.Source)
 	idx := sort.Search(len(h.ring), func(i int) bool {
 		return h.ring[i].hash >= target
 	})
@@ -116,16 +120,26 @@ func (h *hashStreamPicker) rebuildRing() {
 	})
 }
 
-// hashKey produces a 32-bit hash from a string key for ring lookup.
-func hashKey(key string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(key)) // fnv.Write never returns an error
-	return h.Sum32()
+// hashTagSource 对 tag + '\x00' + source 计算 FNV-1a 32 位哈希，
+// 直接按字节遍历两段字符串，避免拼接分配。与原 hashKey(tag+"\x00"+source) 结果一致。
+func hashTagSource(tag, source string) uint32 {
+	h := uint32(fnvOffset32)
+	for i := 0; i < len(tag); i++ {
+		h ^= uint32(tag[i])
+		h *= fnvPrime32
+	}
+	h ^= 0 // 分隔符 '\x00'：XOR 0 不变值，仅乘 prime
+	h *= fnvPrime32
+	for i := 0; i < len(source); i++ {
+		h ^= uint32(source[i])
+		h *= fnvPrime32
+	}
+	return h
 }
 
 // fnvHash produces a deterministic 32-bit hash from a stream index + virtual node number.
 func fnvHash(streamIdx, vnode uint32) uint32 {
-	h := fnv.New32a()
+	h := uint32(fnvOffset32)
 	var buf [8]byte
 	buf[0] = byte(streamIdx >> 24)
 	buf[1] = byte(streamIdx >> 16)
@@ -135,6 +149,9 @@ func fnvHash(streamIdx, vnode uint32) uint32 {
 	buf[5] = byte(vnode >> 16)
 	buf[6] = byte(vnode >> 8)
 	buf[7] = byte(vnode)
-	h.Write(buf[:])
-	return h.Sum32()
+	for i := 0; i < len(buf); i++ {
+		h ^= uint32(buf[i])
+		h *= fnvPrime32
+	}
+	return h
 }

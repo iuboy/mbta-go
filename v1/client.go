@@ -23,6 +23,7 @@ type ClientConfig struct {
 	Capabilities []string         // negotiated capabilities (e.g. gzip, hmac-sha256)
 	SpoolDir     string           // directory for durable event spooling (empty disables spool)
 	PickStrategy string           // stream selection strategy: "single" or "hash"
+	StreamCount  int              // hash 模式下打开的数据流数量（<=0 用 defaultStreamCount）
 }
 
 // Client is an MBTA agent that connects to a server and sends event batches.
@@ -50,7 +51,8 @@ type Client struct {
 	sendMu sync.Mutex
 
 	// pendingAcks tracks chunk_id -> batch info for ACK correlation.
-	pendingAcks sync.Map // chunkID -> pendingBatch
+	pendingAcks  sync.Map     // chunkID -> pendingBatch
+	pendingCount atomic.Int64 // 与 pendingAcks 同步增减，notifyDrainIfEmpty 用它免 Range 扫描
 
 	// ackHandler is called when an ACK is received from the server.
 	// The handler receives the chunkID and ack_mode (e.g. "durable", "accepted").
@@ -100,6 +102,11 @@ type ackTask struct {
 // ackQueueSize bounds the ACK callback backlog. When full, dispatchACK drops
 // the callback (logged) rather than blocking the control loop.
 const ackQueueSize = 1024
+
+// defaultStreamCount 是 hash 模式下默认打开的数据流数量。
+// 取值小于服务端 MaxIncomingStreams(256)，开启多流以绕过单流的队头阻塞、
+// 并行利用多核做加密/压缩，提升吞吐。
+const defaultStreamCount = 4
 
 // quicStreamWrapper adapts *quic.Stream to the DataStream interface.
 type quicStreamWrapper struct {
@@ -215,51 +222,144 @@ func (c *Client) Connect(ctx context.Context) error {
 	// loop (M-3: a slow handler no longer blocks NACK/WINDOW/THROTTLE reads).
 	go func() { defer close(c.ackWorkerDone); c.runACKWorker(c.lifecycleCtx) }()
 
-	// Open initial data stream
+	// Open data stream(s) per PickStrategy.
 	if c.picker == nil {
-		ds, err := c.conn.OpenDataStream(ctx)
+		p, err := c.openDataStreams(ctx)
 		if err != nil {
-			// Cancel goroutines and wait for them to exit before returning,
-			// otherwise they leak on a failed Connect.
-			c.lifecycleCancel()
-			c.waitGoroutines()
-			return core.WrapError(core.NumStream, core.CodeStream, "open data stream", err)
+			return err
 		}
-		c.picker = NewSingleStream(&quicStreamWrapper{stream: ds, idx: 0})
+		c.picker = p
 	}
 
 	slog.Info("MBTA client connected", "agent", c.config.AgentID, "session", c.sessionID)
 	return nil
 }
 
+// openDataStreams 按 PickStrategy 打开数据流并构造 StreamPicker。
+// "hash" 模式开启多条流并按 tag+source 一致哈希分发，绕过单流队头阻塞、并行利用
+// 多核做加密/压缩；其余（含 "single" 与未设置）走单流。
+func (c *Client) openDataStreams(ctx context.Context) (StreamPicker, error) {
+	if c.config.PickStrategy == "hash" {
+		picker := NewHashStreamPicker()
+		n := c.config.StreamCount
+		if n <= 0 {
+			n = defaultStreamCount
+		}
+		opened := make([]*quic.Stream, 0, n)
+		for i := 0; i < n; i++ {
+			ds, err := c.conn.OpenDataStream(ctx)
+			if err != nil {
+				for _, s := range opened {
+					_ = s.Close()
+				}
+				c.lifecycleCancel()
+				c.waitGoroutines()
+				return nil, core.WrapError(core.NumStream, core.CodeStream, "open data stream", err)
+			}
+			opened = append(opened, ds)
+			picker.AddStream(&quicStreamWrapper{stream: ds, idx: i})
+		}
+		return picker, nil
+	}
+
+	ds, err := c.conn.OpenDataStream(ctx)
+	if err != nil {
+		// Cancel goroutines and wait for them to exit before returning,
+		// otherwise they leak on a failed Connect.
+		c.lifecycleCancel()
+		c.waitGoroutines()
+		return nil, core.WrapError(core.NumStream, core.CodeStream, "open data stream", err)
+	}
+	return NewSingleStream(&quicStreamWrapper{stream: ds, idx: 0}), nil
+}
+
 // SendBatch sends a SignalBatch through the MBTA protocol.
 // Returns the chunkID assigned to this batch for ACK correlation, or an error.
+//
+// 锁粒度（P2）：sendMu 仅保护「window 检查 + 取 seq/chunkID + inflight/pending 登记」
+// 这一小段，保证并发调用不会同时通过窗口后超限。重的 CPU 工作（marshal signalBatch、
+// gzip+HMAC 的 Build、网络写）全部在锁外，使多调用方可跨 batch 并行利用多核。
 func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string) (string, error) {
 	if signalBatch == nil {
 		return "", core.NewError(core.NumBatch, core.CodeBatch, "batch must not be nil")
 	}
 
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
-
+	// --- 锁外：无状态前置检查 + marshal SignalBatch（CPU 密集，可并行）---
 	if c.sm.State() != core.StateReady {
 		return "", fmt.Errorf("%w, state=%s", ErrNotReady, c.sm.State())
 	}
-
-	// Check throttle
 	if c.throttle.Active() {
 		return "", fmt.Errorf("%w, retry after %v", ErrThrottled, c.throttle.WaitDuration())
 	}
 
-	seq := c.seq.Next()
-	chunkID := uuid.Must(uuid.NewV7()).String()
-
-	// Marshal SignalBatch to JSON for embedding in BatchMessage
 	batchJSON, err := json.Marshal(signalBatch)
 	if err != nil {
 		return "", core.WrapError(core.NumBatch, core.CodeBatch, "marshal signal batch", err)
 	}
+	batchEvents := len(signalBatch.Signals)
 
+	// --- 锁内：原子完成取 seq/chunkID、marshal batch wrapper、窗口检查、inflight/pending 登记 ---
+	seq, chunkID, batchBytes, err := c.reserveInflight(tag, source, batchJSON, batchEvents)
+	if err != nil {
+		return "", err
+	}
+
+	// --- 锁外：Build envelope（gzip+HMAC）+ marshal env + 选流 + 网络写 ---
+	if writeErr := c.buildAndSend(seq, chunkID, tag, source, batchJSON); writeErr != nil {
+		// 写失败：回滚已登记的 inflight/pending，避免窗口被永久占用。
+		c.inflight.Remove(batchEvents, batchBytes)
+		if _, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
+			c.pendingCount.Add(-1)
+		}
+		return "", writeErr
+	}
+
+	slog.Debug("batch sent", "seq", seq, "chunk", chunkID, "events", batchEvents)
+	return chunkID, nil
+}
+
+// reserveInflight 在 sendMu 保护下原子完成：取 seq/chunkID、marshal batch wrapper
+// （轻量，SignalBatch 已是 RawMessage）、窗口检查、inflight 与 pending 登记。
+// 返回 seq、chunkID 与 batchPayload 字节数。
+func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEvents int) (uint64, string, int64, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
+	seq := c.seq.Next()
+	chunkID := uuid.Must(uuid.NewV7()).String()
+
+	// marshal batch wrapper（轻：Batch 是 RawMessage 透传，仅外层字段重编）。
+	batchPayload, err := json.Marshal(core.BatchMessage{
+		Seq:     seq,
+		ChunkID: chunkID,
+		Tag:     tag,
+		Source:  source,
+		Batch:   json.RawMessage(batchJSON),
+	})
+	if err != nil {
+		return 0, "", 0, core.WrapError(core.NumBatch, core.CodeBatch, "marshal batch", err)
+	}
+	batchBytes := int64(len(batchPayload))
+
+	// 窗口检查与 inflight 登记同处一个临界区，防止并发调用双双通过后超限。
+	if !c.window.CanSend(c.inflight, batchEvents, batchBytes) {
+		return 0, "", 0, ErrWindowFull
+	}
+	c.inflight.Add(batchEvents, batchBytes)
+	c.pendingAcks.Store(chunkID, &pendingBatch{
+		Seq:      seq,
+		Events:   batchEvents,
+		Bytes:    batchBytes,
+		SentAt:   time.Now(),
+		Deadline: time.Now().Add(c.ackTimeout),
+	})
+	c.pendingCount.Add(1)
+
+	return seq, chunkID, batchBytes, nil
+}
+
+// buildAndSend 在锁外完成 envelope 构建（gzip+HMAC）、envelope marshal、流选择与网络写。
+func (c *Client) buildAndSend(seq uint64, chunkID, tag, source string, batchJSON []byte) error {
 	batch := core.BatchMessage{
 		Seq:     seq,
 		ChunkID: chunkID,
@@ -269,22 +369,11 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	}
 	batchPayload, err := json.Marshal(batch)
 	if err != nil {
-		return "", core.WrapError(core.NumBatch, core.CodeBatch, "marshal batch", err)
+		return core.WrapError(core.NumBatch, core.CodeBatch, "marshal batch", err)
 	}
 
-	batchBytes := int64(len(batchPayload))
-	batchEvents := len(signalBatch.Signals)
-
-	// Check window — protected by sendMu so concurrent callers cannot
-	// both pass and exceed inflight limits.
-	if !c.window.CanSend(c.inflight, batchEvents, batchBytes) {
-		return "", ErrWindowFull
-	}
-
-	// Build envelope
 	params := core.Params{
 		SessionID:   c.sessionID,
-		KeyID:       "",
 		Seq:         seq,
 		ChunkID:     chunkID,
 		Codec:       "json",
@@ -292,7 +381,6 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 		Encryption:  "none",
 		HMACAlgo:    "none",
 	}
-
 	if c.negotiated != nil {
 		params.Codec = c.negotiated.Codec
 		params.Compression = c.negotiated.Compression
@@ -306,37 +394,22 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 
 	env, err := core.Build(params, batchPayload)
 	if err != nil {
-		return "", core.WrapError(core.NumEnvelope, core.CodeEnvelope, "build envelope", err)
+		return core.WrapError(core.NumEnvelope, core.CodeEnvelope, "build envelope", err)
 	}
-
 	envPayload, err := json.Marshal(env)
 	if err != nil {
-		return "", core.WrapError(core.NumEnvelope, core.CodeEnvelope, "marshal envelope", err)
+		return core.WrapError(core.NumEnvelope, core.CodeEnvelope, "marshal envelope", err)
 	}
 
-	// Pick stream
 	ds, err := c.picker.Pick(batch)
 	if err != nil {
-		return "", core.WrapError(core.NumBatch, core.CodeBatch, "pick stream", err)
+		return core.WrapError(core.NumBatch, core.CodeBatch, "pick stream", err)
 	}
 
-	// Write frame
 	if err := core.Write(ds, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
-		return "", core.WrapError(core.NumBatch, core.CodeBatch, "write batch", err)
+		return core.WrapError(core.NumBatch, core.CodeBatch, "write batch", err)
 	}
-
-	// Track inflight — still under sendMu, so the window check remains valid.
-	c.inflight.Add(batchEvents, batchBytes)
-	c.pendingAcks.Store(chunkID, &pendingBatch{
-		Seq:      seq,
-		Events:   batchEvents,
-		Bytes:    batchBytes,
-		SentAt:   time.Now(),
-		Deadline: time.Now().Add(c.ackTimeout),
-	})
-
-	slog.Debug("batch sent", "seq", seq, "chunk", chunkID, "events", batchEvents)
-	return chunkID, nil
+	return nil
 }
 
 // SetACKHandler registers a callback invoked when the server acknowledges a batch.
@@ -469,6 +542,7 @@ func (c *Client) close() {
 		c.pendingAcks.Delete(key)
 		return true
 	})
+	c.pendingCount.Store(0) // 此刻 readControlLoop/ackReaper 已退出，无并发
 
 	// 6. Acquire sendMu so the field clearing below cannot race a concurrent
 	// SendBatch. A SendBatch that already passed its StateReady check may
@@ -551,6 +625,7 @@ func (c *Client) ackReaper(ctx context.Context) {
 				}
 				if !pb.Deadline.IsZero() && now.After(pb.Deadline) {
 					c.pendingAcks.Delete(key)
+					c.pendingCount.Add(-1)
 					c.inflight.Remove(pb.Events, pb.Bytes)
 					slog.Warn("reaped expired pending ACK",
 						"chunk", key,
@@ -565,14 +640,9 @@ func (c *Client) ackReaper(ctx context.Context) {
 }
 
 // notifyDrainIfEmpty signals the drain channel when no pending ACKs remain.
-// This is called after each ACK/NACK/reaper removal to unblock the Close drain loop.
+// 读 pendingCount 原子值判断空，免去每次 ACK/NACK 的 sync.Map.Range 扫描。
 func (c *Client) notifyDrainIfEmpty() {
-	pending := 0
-	c.pendingAcks.Range(func(_, _ any) bool {
-		pending++
-		return false // one hit is enough to know it's non-empty
-	})
-	if pending == 0 {
+	if c.pendingCount.Load() == 0 {
 		select {
 		case c.drainCh <- struct{}{}:
 		default: // already signaled, no need to block
