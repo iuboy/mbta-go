@@ -305,7 +305,7 @@ func (c *Client) openDataStreams(ctx context.Context) (StreamPicker, error) {
 // 这一小段，保证并发调用不会同时通过窗口后超限。重的 CPU 工作（marshal signalBatch、
 // gzip+HMAC 的 Build、网络写）全部在锁外，使多调用方可跨 batch 并行利用多核。
 func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string) (string, error) {
-	return c.sendTracked(ctx, signalBatch, tag, source, nil)
+	return c.sendTracked(ctx, signalBatch, tag, source, nil, nil)
 }
 
 // sendTracked 发送一个 batch 并按需持久化到 spool，是 SendBatch 与重连重发的共用底层路径。
@@ -314,11 +314,12 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 // 模式仅 map 写无 I/O），pendingBatch.SpoolChunkID == wire chunkID，ACK 时删除该条目。
 // alreadySpooledChunkID != nil：重发——跳过 PutBatch（数据已在 spool，避免双重持久化），
 // wire 用新 seq/chunkID（服务端 ReplayCache per-connection，跨重连不去重，必须用新 ID），
-// pendingBatch.SpoolChunkID == 原 spool key，ACK 时删原条目。
+// pendingBatch.SpoolChunkID == 原 spool key、RecordIDs == retransmitRecordIDs（来自原 spool batch），
+// ACK 时删原条目与 records。
 //
 // 持久化语义（at-least-once）：PutBatch 成功后即使 write 失败也保留 spool 条目，
 // 由重连 drain 重发。PutBatch 失败（如 spool 满）则 abort，返回错误让调用方降速。
-func (c *Client) sendTracked(ctx context.Context, signalBatch *core.SignalBatch, tag, source string, alreadySpooledChunkID *string) (string, error) {
+func (c *Client) sendTracked(ctx context.Context, signalBatch *core.SignalBatch, tag, source string, alreadySpooledChunkID *string, retransmitRecordIDs []string) (string, error) {
 	if signalBatch == nil {
 		return "", core.NewError(core.NumBatch, core.CodeBatch, "batch must not be nil")
 	}
@@ -338,11 +339,14 @@ func (c *Client) sendTracked(ctx context.Context, signalBatch *core.SignalBatch,
 	batchEvents := len(signalBatch.Signals)
 
 	// 全新发送：为每个 event 构造 spool Record（锁外，CPU 工作）。
+	// 重发：recordIDs 来自原 spool batch（retransmitRecordIDs），用于 ACK 时删除 records。
 	var records []spool.Record
 	var recordIDs []string
 	fresh := alreadySpooledChunkID == nil
 	if c.spool != nil && fresh {
 		records, recordIDs = buildRecords(c.config.AgentID, tag, source, signalBatch.Signals)
+	} else if !fresh {
+		recordIDs = retransmitRecordIDs
 	}
 
 	// --- 锁内：取 seq/chunkID、窗口检查、inflight/spool/pending 登记 ---
@@ -430,7 +434,7 @@ func (c *Client) drainSpoolAfterConnect(ctx context.Context) {
 			}
 		}
 		origChunkID := b.ChunkID
-		if _, err := c.sendTracked(ctx, sb, tag, source, &origChunkID); err != nil {
+		if _, err := c.sendTracked(ctx, sb, tag, source, &origChunkID, b.RecordIDs); err != nil {
 			slog.Warn("spool retransmit failed", "chunk", origChunkID, "error", err)
 			continue
 		}
