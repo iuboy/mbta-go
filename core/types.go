@@ -37,7 +37,7 @@ const (
 	CapThrottle       = "throttle"
 	CapMultiStream    = "multi_data_stream" // 保留，v1 未实现，计划未来版本支持
 	CapDurableAck     = "durable_ack"
-	CapAuthTokenless  = "auth_tokenless" // 客户端可在 AUTH 帧省略明文 Token，由服务端按 agentID 反查
+	CapAuthTokenless  = "auth_tokenless" //nolint:gosec // G101: 协议能力标识名，非凭据；客户端省略明文 Token 由服务端反查
 )
 
 // Algorithm identifiers (envelope fields).

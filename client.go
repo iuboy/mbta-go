@@ -303,13 +303,13 @@ type v1ClientWrapper struct {
 	client *v1.Client
 }
 
-func (w *v1ClientWrapper) Connect(ctx context.Context) error      { return w.client.Connect(ctx) }
+func (w *v1ClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
 func (w *v1ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	return w.client.SendBatch(ctx, batch, tag, source)
 }
-func (w *v1ClientWrapper) Close() error                           { return w.client.Close() }
-func (w *v1ClientWrapper) State() string                          { return w.client.State().String() }
-func (w *v1ClientWrapper) SetACKHandler(handler ACKHandler)       { w.client.SetACKHandler(handler) }
+func (w *v1ClientWrapper) Close() error                     { return w.client.Close() }
+func (w *v1ClientWrapper) State() string                    { return w.client.State().String() }
+func (w *v1ClientWrapper) SetACKHandler(handler ACKHandler) { w.client.SetACKHandler(handler) }
 
 type v2ClientWrapper struct {
 	client *v2.Client
@@ -319,8 +319,8 @@ func (w *v2ClientWrapper) Connect(ctx context.Context) error { return w.client.C
 func (w *v2ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	return w.client.SendBatch(ctx, batch, tag, source)
 }
-func (w *v2ClientWrapper) Close() error    { return w.client.Close() }
-func (w *v2ClientWrapper) State() string   { return w.client.State().String() }
+func (w *v2ClientWrapper) Close() error  { return w.client.Close() }
+func (w *v2ClientWrapper) State() string { return w.client.State().String() }
 func (w *v2ClientWrapper) SetACKHandler(ACKHandler) {
 	slog.Warn("SetACKHandler ignored: v2 ACK handling not yet implemented")
 }
@@ -333,8 +333,8 @@ func (w *ntlsClientWrapper) Connect(ctx context.Context) error { return w.client
 func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
 	return w.client.SendBatch(ctx, batch, tag, source)
 }
-func (w *ntlsClientWrapper) Close() error    { return w.client.Close() }
-func (w *ntlsClientWrapper) State() string   { return w.client.State().String() }
+func (w *ntlsClientWrapper) Close() error  { return w.client.Close() }
+func (w *ntlsClientWrapper) State() string { return w.client.State().String() }
 func (w *ntlsClientWrapper) SetACKHandler(ACKHandler) {
 	slog.Warn("SetACKHandler ignored: ntls ACK handling not yet implemented")
 }

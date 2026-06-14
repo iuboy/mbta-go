@@ -74,7 +74,7 @@ func (s *Server) Start(ctx context.Context) error {
 			<-s.connSem // accept 失败，归还槽位
 			// Context cancelled means graceful shutdown — not an error.
 			if ctx.Err() != nil {
-				return nil
+				return nil //nolint:nilerr // ctx 取消属优雅关闭，accept 错误不应上抛
 			}
 			slog.Warn("accept error", "error", err)
 			continue

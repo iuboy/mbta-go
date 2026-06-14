@@ -82,6 +82,21 @@ func lastControlFrame(t *testing.T, buf *bytes.Buffer, wantType uint16) *core.Fr
 	return &last
 }
 
+// decodePayload 取出最近一个 wantType 控制帧并解码到 T，任意步骤失败即终止测试。
+func decodePayload[T any](t *testing.T, buf *bytes.Buffer, wantType uint16) T {
+	t.Helper()
+	var m T
+	if err := json.Unmarshal(lastControlFrame(t, buf, wantType).Payload, &m); err != nil {
+		t.Fatalf("decode payload (type 0x%04x): %v", wantType, err)
+	}
+	return m
+}
+
+// decodeHelloAck 取出最近一个 HelloAck 控制帧并解码，任意步骤失败即终止测试。
+func decodeHelloAck(t *testing.T, buf *bytes.Buffer) core.HelloAckMessage {
+	return decodePayload[core.HelloAckMessage](t, buf, core.TypeHelloAck)
+}
+
 func containsCap(caps []string, want string) bool {
 	for _, c := range caps {
 		if c == want {
@@ -107,8 +122,7 @@ func TestHandleHello_TokenlessRetainedWithResolver(t *testing.T) {
 	if err := h.handleHello(helloOffering(core.CapCodecJSON, core.CapHMACSHA256, core.CapAuthTokenless)); err != nil {
 		t.Fatalf("handleHello: %v", err)
 	}
-	var ack core.HelloAckMessage
-	json.Unmarshal(lastControlFrame(t, h.controlW.(*bytes.Buffer), core.TypeHelloAck).Payload, &ack)
+	ack := decodeHelloAck(t, h.controlW.(*bytes.Buffer))
 
 	if !containsCap(ack.SelectedCapabilities, core.CapAuthTokenless) {
 		t.Errorf("expected auth_tokenless retained; got %v", ack.SelectedCapabilities)
@@ -128,8 +142,7 @@ func TestHandleHello_TokenlessPrunedWithoutResolver(t *testing.T) {
 	if err := h.handleHello(helloOffering(core.CapCodecJSON, core.CapHMACSHA256, core.CapAuthTokenless)); err != nil {
 		t.Fatalf("handleHello: %v", err)
 	}
-	var ack core.HelloAckMessage
-	json.Unmarshal(lastControlFrame(t, h.controlW.(*bytes.Buffer), core.TypeHelloAck).Payload, &ack)
+	ack := decodeHelloAck(t, h.controlW.(*bytes.Buffer))
 
 	if containsCap(ack.SelectedCapabilities, core.CapAuthTokenless) {
 		t.Errorf("auth_tokenless must be pruned when Auth is not a TokenResolver; got %v", ack.SelectedCapabilities)
@@ -147,8 +160,7 @@ func TestHandleAuth_TokenlessSuccess(t *testing.T) {
 	if err := h.handleHello(helloOffering(core.CapCodecJSON, core.CapHMACSHA256, core.CapAuthTokenless)); err != nil {
 		t.Fatalf("handleHello: %v", err)
 	}
-	var ack core.HelloAckMessage
-	json.Unmarshal(lastControlFrame(t, buf, core.TypeHelloAck).Payload, &ack)
+	ack := decodeHelloAck(t, buf)
 
 	// AUTH: Token 刻意留空，AuthNonce 用真实 token 计算（客户端持有自己的 token）。
 	auth := core.AuthMessage{
@@ -162,9 +174,7 @@ func TestHandleAuth_TokenlessSuccess(t *testing.T) {
 		t.Fatalf("handleAuth tokenless: %v", err)
 	}
 
-	okFrame := lastControlFrame(t, buf, core.TypeAuthOK)
-	var ok core.AuthOKMessage
-	json.Unmarshal(okFrame.Payload, &ok)
+	_ = decodePayload[core.AuthOKMessage](t, buf, core.TypeAuthOK)
 	if h.keys == nil {
 		t.Error("session keys should be generated on tokenless success")
 	}
@@ -181,8 +191,7 @@ func TestHandleAuth_TokenlessResolveFails(t *testing.T) {
 	if err := h.handleHello(helloOffering(core.CapCodecJSON, core.CapHMACSHA256, core.CapAuthTokenless)); err != nil {
 		t.Fatalf("handleHello: %v", err)
 	}
-	var ack core.HelloAckMessage
-	json.Unmarshal(lastControlFrame(t, buf, core.TypeHelloAck).Payload, &ack)
+	ack := decodeHelloAck(t, buf)
 
 	auth := core.AuthMessage{
 		AgentID:   "agent-1",
@@ -195,8 +204,7 @@ func TestHandleAuth_TokenlessResolveFails(t *testing.T) {
 		t.Fatal("expected auth error when ResolveToken fails, got nil")
 	}
 
-	var fail core.AuthFailMessage
-	json.Unmarshal(lastControlFrame(t, buf, core.TypeAuthFail).Payload, &fail)
+	fail := decodePayload[core.AuthFailMessage](t, buf, core.TypeAuthFail)
 	if fail.Code != "invalid_auth" {
 		t.Errorf("AUTH_FAIL code = %q, want invalid_auth (must not leak agent existence)", fail.Code)
 	}
@@ -213,8 +221,7 @@ func TestHandleAuth_LegacyRequiresToken(t *testing.T) {
 	if err := h.handleHello(helloOffering(core.CapCodecJSON, core.CapHMACSHA256)); err != nil {
 		t.Fatalf("handleHello: %v", err)
 	}
-	var ack core.HelloAckMessage
-	json.Unmarshal(lastControlFrame(t, buf, core.TypeHelloAck).Payload, &ack)
+	ack := decodeHelloAck(t, buf)
 
 	// legacy 路径下，客户端若不发 Token（Token=""），服务端用 "" 重算 HMAC，
 	// 与客户端用真实 token 算的 AuthNonce 不匹配 -> challenge_mismatch。
@@ -229,8 +236,7 @@ func TestHandleAuth_LegacyRequiresToken(t *testing.T) {
 		t.Fatal("expected auth failure in legacy mode with empty token, got nil")
 	}
 
-	var fail core.AuthFailMessage
-	json.Unmarshal(lastControlFrame(t, buf, core.TypeAuthFail).Payload, &fail)
+	fail := decodePayload[core.AuthFailMessage](t, buf, core.TypeAuthFail)
 	if fail.Code != "challenge_mismatch" {
 		t.Errorf("AUTH_FAIL code = %q, want challenge_mismatch", fail.Code)
 	}

@@ -21,7 +21,7 @@ type MBTAMetrics struct {
 
 	ReplayCacheHitsTotal prometheus.Counter
 
-		ReplayCacheEvictions prometheus.Counter
+	ReplayCacheEvictions prometheus.Counter
 
 	HMACFailuresTotal    prometheus.Counter
 	DecryptFailuresTotal prometheus.Counter

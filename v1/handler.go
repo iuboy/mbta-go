@@ -313,26 +313,9 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 	// tokenless 模式：客户端省略明文 Token，服务端按 agentID 反查 token。
 	// legacy 模式：客户端在 AUTH 帧携带明文 Token，服务端直接使用。
 	// 两条路径下游统一过 hmac.Equal 与 Validate 两道关，无捷径旁路。
-	tokenless := h.negotiated != nil && h.negotiated.IsCapabilitySelected(core.CapAuthTokenless)
-	var token string
-	if tokenless {
-		resolver, ok := h.config.Auth.(core.TokenResolver)
-		if !ok || resolver == nil {
-			// handleHello 应已裁剪此能力；防御性处理，避免误置导致旁路。
-			slog.Error("tokenless negotiated but Auth is not a TokenResolver", "session", h.sessionID)
-			h.failAuth("internal_error", "authentication failed")
-			return core.NewError(core.NumConfig, core.CodeConfig, "tokenless negotiated without TokenResolver")
-		}
-		t, err := resolver.ResolveToken(msg.AgentID)
-		if err != nil {
-			// 不区分"agent 不存在"与"token 无效"，避免 agentID 枚举。
-			slog.Warn("resolve token failed", "session", h.sessionID, "agent", msg.AgentID)
-			h.failAuth("invalid_auth", "authentication failed")
-			return core.WrapError(core.NumAuth, core.CodeAuth, "resolve token", err)
-		}
-		token = t
-	} else {
-		token = msg.Token
+	token, tokenless, err := h.resolveAuthToken(&msg)
+	if err != nil {
+		return err
 	}
 
 	// Challenge-response validation: 使用 HMAC(token, nonce) 验证客户端持有 token
@@ -351,7 +334,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 
 	// Token validation（授权/过期，统一用 token）
 	if h.config.Auth != nil {
-		_, err := h.config.Auth.Validate(token)
+		_, err = h.config.Auth.Validate(token)
 		if err != nil {
 			h.failAuth("invalid_token", "token validation failed")
 			if h.config.Metrics != nil {
@@ -401,6 +384,32 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 
 	slog.Info("auth succeeded", "agent", h.agentID, "session", h.sessionID, "key_id", keys.KeyID)
 	return nil
+}
+
+// resolveAuthToken 决定本次 AUTH 校验所用 token 来源：
+// tokenless 模式下由服务端按 agentID 反查，legacy 模式下直接采用客户端明文 Token。
+// 两条路径下游统一过 hmac.Equal 与 Validate 两道关，无捷径旁路。
+// 失败时已通过 failAuth 向客户端回送 AUTH_FAIL，调用方仅需上抛错误。
+func (h *ConnectionHandler) resolveAuthToken(msg *core.AuthMessage) (token string, tokenless bool, err error) {
+	tokenless = h.negotiated != nil && h.negotiated.IsCapabilitySelected(core.CapAuthTokenless)
+	if !tokenless {
+		return msg.Token, tokenless, nil
+	}
+	resolver, ok := h.config.Auth.(core.TokenResolver)
+	if !ok || resolver == nil {
+		// handleHello 应已裁剪此能力；防御性处理，避免误置导致旁路。
+		slog.Error("tokenless negotiated but Auth is not a TokenResolver", "session", h.sessionID)
+		h.failAuth("internal_error", "authentication failed")
+		return "", tokenless, core.NewError(core.NumConfig, core.CodeConfig, "tokenless negotiated without TokenResolver")
+	}
+	t, rerr := resolver.ResolveToken(msg.AgentID)
+	if rerr != nil {
+		// 不区分"agent 不存在"与"token 无效"，避免 agentID 枚举。
+		slog.Warn("resolve token failed", "session", h.sessionID, "agent", msg.AgentID)
+		h.failAuth("invalid_auth", "authentication failed")
+		return "", tokenless, core.WrapError(core.NumAuth, core.CodeAuth, "resolve token", rerr)
+	}
+	return t, tokenless, nil
 }
 
 func (h *ConnectionHandler) handlePing(payload []byte) {
@@ -512,23 +521,9 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	// compression/encryption selected during negotiation. A client holding the
 	// HMAC key can produce a valid MAC over a non-negotiated algorithm, so the
 	// check is enforced here (after HMAC, before Open) against the authoritative
-	// negotiated result rather than relying solely on Open's allow-list. An
-	// unset negotiated field is treated as "none" (the default when the
-	// corresponding capability is not negotiated).
-	if h.negotiated != nil {
-		wantComp := h.negotiated.Compression
-		if wantComp == "" {
-			wantComp = core.CompressionNone
-		}
-		wantEnc := h.negotiated.Encryption
-		if wantEnc == "" {
-			wantEnc = core.EncryptionNone
-		}
-		if env.Compression != wantComp || env.Encryption != wantEnc {
-			h.sendNack(env.Seq, env.ChunkID, "envelope_algo_mismatch",
-				"compression/encryption not negotiated", false)
-			return
-		}
+	// negotiated result rather than relying solely on Open's allow-list.
+	if h.verifyEnvelopeAlgo(&env) {
+		return
 	}
 
 	// Open envelope
@@ -613,6 +608,30 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	// Process events
 	h.replay.Update(dedupKey, core.ReplayAccepted)
 	h.routeAndACK(ctx, dedupKey, &batchMsg, &signalBatch, batchBytes)
+}
+
+// verifyEnvelopeAlgo 强制 envelope 只能使用协商期内选定的压缩/加密算法。
+// 客户端持有 HMAC 密钥即可对未协商算法产出合法 MAC，故在 Open 前依据权威协商结果
+// 复核，而非仅依赖 Open 的 allow-list。未协商字段按 "none" 处理。
+// 返回 true 表示已发送 NACK 且调用方应中止处理。
+func (h *ConnectionHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
+	if h.negotiated == nil {
+		return false
+	}
+	wantComp := h.negotiated.Compression
+	if wantComp == "" {
+		wantComp = core.CompressionNone
+	}
+	wantEnc := h.negotiated.Encryption
+	if wantEnc == "" {
+		wantEnc = core.EncryptionNone
+	}
+	if env.Compression != wantComp || env.Encryption != wantEnc {
+		h.sendNack(env.Seq, env.ChunkID, "envelope_algo_mismatch",
+			"compression/encryption not negotiated", false)
+		return true
+	}
+	return false
 }
 
 // routeAndACK routes the batch to the configured sink and sends the appropriate ACK response.

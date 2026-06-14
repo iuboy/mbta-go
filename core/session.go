@@ -319,14 +319,14 @@ func Negotiate(clientCaps []string, policy Policy) NegotiateResult {
 	return res
 }
 
-// IsCapabilitySelected reports whether cap was among the server-selected
+// IsCapabilitySelected reports whether capability was among the server-selected
 // capabilities. Safe to call on a nil *NegotiateResult (returns false), so
 // callers need not nil-check before querying.
-func (r *NegotiateResult) IsCapabilitySelected(cap string) bool {
+func (r *NegotiateResult) IsCapabilitySelected(capability string) bool {
 	if r == nil {
 		return false
 	}
-	return slices.Contains(r.SelectedCapabilities, cap)
+	return slices.Contains(r.SelectedCapabilities, capability)
 }
 
 // ValidateHello checks the HELLO message is valid for v1.

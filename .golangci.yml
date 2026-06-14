@@ -80,6 +80,9 @@ issues:
     - linters: [gosec]
       text: "G404"
       path: _test\.go
+    # delivery.go: 已知性能待办（淘汰逻辑最坏 O(n)），保留追踪，正常负载下影响有限
+    - linters: [godox]
+      text: "TODO\\(perf\\): 当前淘汰逻辑"
     # test files: relax rules
     - linters: [gocognit, maintidx, gocritic, revive]
       path: _test\.go

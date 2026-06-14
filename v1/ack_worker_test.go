@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/iuboy/mbta-go/core"
 )
 
 // TestDispatchACK_AsyncExecutes: dispatchACK 投递后回调由 runACKWorker 异步执行，
@@ -20,10 +22,10 @@ func TestDispatchACK_AsyncExecutes(t *testing.T) {
 	defer cancel()
 	go c.runACKWorker(ctx)
 
-	c.dispatchACK("chunk-1", "durable")
+	c.dispatchACK("chunk-1", core.AckModeDurable)
 	select {
 	case task := <-got:
-		if task.chunkID != "chunk-1" || task.mode != "durable" {
+		if task.chunkID != "chunk-1" || task.mode != core.AckModeDurable {
 			t.Errorf("callback got %+v, want chunk-1/durable", task)
 		}
 	case <-time.After(time.Second):
@@ -35,12 +37,12 @@ func TestDispatchACK_AsyncExecutes(t *testing.T) {
 // 绝不阻塞调用方（控制流不能因回调积压而 stall）。
 func TestDispatchACK_QueueFullDrops(t *testing.T) {
 	c := &Client{ackQueue: make(chan ackTask, 2)}
-	c.dispatchACK("a", "durable")
-	c.dispatchACK("b", "durable")
+	c.dispatchACK("a", core.AckModeDurable)
+	c.dispatchACK("b", core.AckModeDurable)
 
 	// 队列已满：第 3 次必须立即返回（drop），不得阻塞。
 	done := make(chan struct{})
-	go func() { c.dispatchACK("c", "durable"); close(done) }()
+	go func() { c.dispatchACK("c", core.AckModeDurable); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -70,7 +72,7 @@ func TestRunACKWorker_DrainsOnClose(t *testing.T) {
 
 	// 预填充 3 个任务（worker 尚未启动）。
 	for i := 0; i < 3; i++ {
-		c.ackQueue <- ackTask{chunkID: fmt.Sprintf("c%d", i), mode: "durable"}
+		c.ackQueue <- ackTask{chunkID: fmt.Sprintf("c%d", i), mode: core.AckModeDurable}
 		wg.Add(1)
 	}
 
