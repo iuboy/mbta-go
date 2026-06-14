@@ -287,15 +287,13 @@ func Negotiate(clientCaps []string, policy Policy) NegotiateResult {
 		res.SelectedCapabilities = append(res.SelectedCapabilities, CapHMACSHA256)
 	}
 
-	// Encryption (SM4GCM) 与 SM2 证书认证尚未实现：envelope.Open 会拒绝非 none 加密，
-	// 协商选中这些能力会导致客户端按 SM4 加密发送、服务端却无法解密（NACK）。
-	// 因此即使 Policy.EnableSM4GCM / EnableSM2CertAuth 为 true 也不响应，避免协商到
-	// 无法兑现的能力。待 sm4_gcm / sm2_cert_auth 落地后恢复以下响应块：
-	//
-	// if policy.EnableSM4GCM && offered[CapSM4GCM] {
-	// 	res.Encryption = EncryptionSM4
-	// 	res.SelectedCapabilities = append(res.SelectedCapabilities, CapSM4GCM)
-	// }
+	// Encryption: SM4-GCM（pollux-go/sm4 实现）。双方 EnableSM4GCM 且客户端 offer 时选中。
+	if policy.EnableSM4GCM && offered[CapSM4GCM] {
+		res.Encryption = EncryptionSM4
+		res.SelectedCapabilities = append(res.SelectedCapabilities, CapSM4GCM)
+	}
+	// SM2 证书认证（mTLS）属传输层（TLS），依赖国密 TLS 栈（v2/RFC 8998），
+	// v1 标准 TLS 1.3 无法实现，暂不响应。待 v2 落地后恢复：
 	// if policy.EnableSM2CertAuth && offered[CapSM2CertAuth] {
 	// 	res.SelectedCapabilities = append(res.SelectedCapabilities, CapSM2CertAuth)
 	// }

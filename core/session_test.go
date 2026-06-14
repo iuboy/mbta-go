@@ -188,17 +188,16 @@ func TestNegotiate(t *testing.T) {
 			},
 		},
 		{
-			// SM4GCM 尚未实现（Open 拒绝非 none 加密），Negotiate 即使 EnableSM4GCM=true
-			// 也不响应，避免协商到无法兑现的能力。
-			name:       "client offers SM4 encryption (not yet implemented, not selected)",
+			// SM4-GCM 已实现（pollux-go/sm4）：双方 Enable 且 offer 时选中。
+			name:       "client offers SM4 encryption",
 			clientCaps: []string{CapCodecJSON, CapSM4GCM},
 			policy:     Policy{EnableSM4GCM: true},
 			wantResult: NegotiateResult{
-				SelectedCapabilities: []string{CapCodecJSON},
+				SelectedCapabilities: []string{CapCodecJSON, CapSM4GCM},
 				Codec:                CodecJSON,
 				Compression:          CompressionNone,
 				HMACAlgo:             HMACAlgoNone,
-				Encryption:           EncryptionNone,
+				Encryption:           EncryptionSM4,
 			},
 		},
 		{

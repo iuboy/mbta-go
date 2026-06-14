@@ -96,15 +96,21 @@ var (
 type SessionKeys struct {
 	KeyID    string
 	HMACKey  []byte // 32 bytes
+	SM4Key   []byte // 16 bytes，SM4-GCM 加密密钥（encryption=sm4_gcm 协商时使用）
 	HMACAlgo string // sha256 or sm3
 }
 
 // GenerateSessionKeys creates fresh session keys for an authenticated agent.
+// HMAC key（32B）与 SM4 key（16B）总是生成；SM4 key 在未协商 sm4_gcm 时不使用。
 // If hmacAlgo is empty, it defaults to "sha256".
 func GenerateSessionKeys(hmacAlgo ...string) (*SessionKeys, error) {
 	hmacKey := make([]byte, 32)
 	if _, err := rand.Read(hmacKey); err != nil {
 		return nil, WrapError(NumHMAC, CodeHMAC, "generate HMAC key", err)
+	}
+	sm4Key := make([]byte, 16)
+	if _, err := rand.Read(sm4Key); err != nil {
+		return nil, WrapError(NumEnvelope, CodeEnvelope, "generate SM4 key", err)
 	}
 
 	algo := HMACAlgoSHA256
@@ -115,6 +121,7 @@ func GenerateSessionKeys(hmacAlgo ...string) (*SessionKeys, error) {
 	return &SessionKeys{
 		KeyID:    uuid.Must(uuid.NewV7()).String(),
 		HMACKey:  hmacKey,
+		SM4Key:   sm4Key,
 		HMACAlgo: algo,
 	}, nil
 }
@@ -122,6 +129,11 @@ func GenerateSessionKeys(hmacAlgo ...string) (*SessionKeys, error) {
 // HMACKeyBase64 returns the HMAC key as a base64 string for AUTH_OK messages.
 func (sk *SessionKeys) HMACKeyBase64() string {
 	return base64.StdEncoding.EncodeToString(sk.HMACKey)
+}
+
+// SM4KeyBase64 returns the SM4 key as a base64 string for AUTH_OK messages.
+func (sk *SessionKeys) SM4KeyBase64() string {
+	return base64.StdEncoding.EncodeToString(sk.SM4Key)
 }
 
 // ComputeChallengeResponse 计算挑战-响应值 HMAC(token, nonce)。

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/iuboy/pollux-go/sm3"
+	"github.com/iuboy/pollux-go/sm4"
 )
 
 // gzipWriterPool / gzipReaderPool 复用 gzip 内部 flate 压缩表（~32KB huffman 表），
@@ -63,6 +64,7 @@ type Params struct {
 	Encryption  string // none, sm4_gcm
 	HMACAlgo    string // none, sha256, sm3
 	HMACKey     []byte // 32 bytes when hmac enabled
+	SM4Key      []byte // 16 bytes when encryption=sm4_gcm
 }
 
 // Build creates a SecureEnvelope from a batch payload.
@@ -121,8 +123,27 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 		processed = buf.Bytes()
 	}
 
-	// Step 2: Encrypt (v1 phase 5: encryption=none, but field is ready)
-	// When sm4_gcm is enabled, encrypt processed here.
+	// Step 2: Encrypt (SM4-GCM)。密文格式：nonce(12) + ciphertext + GCM tag(16)。
+	if encryption == EncryptionSM4 {
+		if len(params.SM4Key) != 16 {
+			return nil, NewError(NumEnvelope, CodeEnvelope,
+				fmt.Sprintf("SM4 key must be 16 bytes, got %d", len(params.SM4Key)))
+		}
+		gcm, err := sm4.NewGCM(params.SM4Key)
+		if err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "SM4-GCM init", err)
+		}
+		nonce := make([]byte, gcm.NonceSize()) // 12
+		if _, err := rand.Read(nonce); err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "generate SM4 nonce", err)
+		}
+		sealed := gcm.Seal(nil, nonce, processed, nil)
+		// 密文格式：nonce(12) + ciphertext + tag。prepend nonce 到 sealed。
+		out := make([]byte, len(nonce)+len(sealed))
+		copy(out, nonce)
+		copy(out[len(nonce):], sealed)
+		processed = out
+	}
 
 	// Step 3: Base64 payload
 	env.Payload = base64.StdEncoding.EncodeToString(processed)
@@ -271,21 +292,22 @@ func VerifyHMAC(key []byte, env *SecureEnvelope) bool {
 // batch limit before being rejected.
 const MaxDecompressedSize = 8 * 1024 * 1024
 
-// Open decodes and decompresses an envelope's payload.
-func Open(env *SecureEnvelope) ([]byte, error) {
+// Open decodes, decrypts (SM4-GCM), and decompresses an envelope's payload.
+// sm4Key 在 encryption=sm4_gcm 时必须为 16 字节；encryption=none 时忽略（可 nil）。
+func Open(env *SecureEnvelope, sm4Key []byte) ([]byte, error) {
 	// Algorithm allow-list (defense in depth): v1 only supports none/gzip
-	// compression and none encryption. zstd/sm4_gcm are reserved algorithm
-	// identifiers that are not implemented yet, so any other value is rejected
-	// rather than silently treated as uncompressed raw bytes. The caller (server
-	// processBatch) additionally enforces that these equal the negotiated
-	// selection; this check guards against callers that forget to.
+	// compression and none/sm4_gcm encryption. Other values are rejected rather
+	// than silently treated as raw bytes. The caller additionally enforces that
+	// these equal the negotiated selection.
 	switch env.Compression {
 	case CompressionNone, CompressionGzip:
 	default:
 		return nil, NewError(NumEnvelope, CodeEnvelope,
 			fmt.Sprintf("unsupported compression: %q", env.Compression))
 	}
-	if env.Encryption != EncryptionNone {
+	switch env.Encryption {
+	case EncryptionNone, EncryptionSM4:
+	default:
 		return nil, NewError(NumEnvelope, CodeEnvelope,
 			fmt.Sprintf("unsupported encryption: %q", env.Encryption))
 	}
@@ -296,8 +318,26 @@ func Open(env *SecureEnvelope) ([]byte, error) {
 		return nil, WrapError(NumEnvelope, CodeEnvelope, "base64 decode payload", err)
 	}
 
-	// Decrypt (when encryption enabled)
-	// ...
+	// Decrypt (SM4-GCM)。密文格式：nonce(12) + ciphertext + tag。
+	if env.Encryption == EncryptionSM4 {
+		if len(sm4Key) != 16 {
+			return nil, NewError(NumEnvelope, CodeEnvelope,
+				fmt.Sprintf("SM4 key must be 16 bytes, got %d", len(sm4Key)))
+		}
+		gcm, err := sm4.NewGCM(sm4Key)
+		if err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "SM4-GCM init", err)
+		}
+		nonceSize := gcm.NonceSize()
+		if len(raw) < nonceSize+gcm.Overhead() {
+			return nil, NewError(NumEnvelope, CodeEnvelope, "ciphertext too short for SM4-GCM")
+		}
+		nonce, ct := raw[:nonceSize], raw[nonceSize:]
+		raw, err = gcm.Open(nil, nonce, ct, nil)
+		if err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "SM4-GCM decrypt", err)
+		}
+	}
 
 	// Decompress
 	if env.Compression == CompressionGzip {

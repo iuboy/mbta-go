@@ -207,7 +207,7 @@ func TestOpenEnvelopeRoundTrip(t *testing.T) {
 	env, err := Build(params, original)
 	mbtatest.AssertNoError(t, err, "Build")
 
-	recovered, err := Open(env)
+	recovered, err := Open(env, nil)
 	mbtatest.AssertNoError(t, err, "Open")
 
 	if string(recovered) != string(original) {
@@ -232,7 +232,7 @@ func TestOpenEnvelopeGzipRoundTrip(t *testing.T) {
 	env, err := Build(params, original)
 	mbtatest.AssertNoError(t, err, "Build with gzip")
 
-	recovered, err := Open(env)
+	recovered, err := Open(env, nil)
 	mbtatest.AssertNoError(t, err, "Open with gzip")
 
 	if string(recovered) != string(original) {
@@ -247,7 +247,7 @@ func TestOpenInvalidBase64(t *testing.T) {
 		Payload:     "not-valid-base64!!!",
 	}
 
-	_, err := Open(env)
+	_, err := Open(env, nil)
 	mbtatest.AssertError(t, err, "invalid base64 should error")
 }
 

@@ -111,7 +111,7 @@ func BenchmarkOpen(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_, err := Open(env)
+		_, err := Open(env, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -141,7 +141,7 @@ func BenchmarkOpenGzip(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_, err := Open(env)
+		_, err := Open(env, nil)
 		if err != nil {
 			b.Fatal(err)
 		}

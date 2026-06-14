@@ -362,6 +362,7 @@ func (h *ConnectionHandler) handleAuth(payload []byte) error {
 		KeyID:         keys.KeyID,
 		HMACKey:       keys.HMACKeyBase64(),
 		HMACAlgo:      keys.HMACAlgo,
+		SM4Key:        keys.SM4KeyBase64(),
 		ExpiresAtUnix: h.expiresAt.Load(),
 	}
 	okPayload, err := core.FastMarshal(authOK)
@@ -526,7 +527,7 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	}
 
 	// Open envelope
-	batchPayload, err := core.Open(&env)
+	batchPayload, err := h.openEnvelope(&env)
 	if err != nil {
 		h.sendNack(env.Seq, env.ChunkID, "envelope_open_error", err.Error(), true)
 		return
@@ -607,6 +608,16 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	// Process events
 	h.replay.Update(dedupKey, core.ReplayAccepted)
 	h.routeAndACK(ctx, dedupKey, &batchMsg, signalBatchPtr, batchEvents, batchBytes, rawSink)
+}
+
+// openEnvelope 解密+解压 envelope payload。SM4 key 从 h.keys 取（已认证连接非 nil；
+// nil 时传 nil key，encryption=none 下 Open 忽略）。
+func (h *ConnectionHandler) openEnvelope(env *core.SecureEnvelope) ([]byte, error) {
+	var sm4Key []byte
+	if h.keys != nil {
+		sm4Key = h.keys.SM4Key
+	}
+	return core.Open(env, sm4Key)
 }
 
 // decodeSignalBatch 解码并校验 SignalBatch，失败时已发 NACK。

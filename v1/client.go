@@ -417,6 +417,7 @@ func (c *Client) buildAndSend(seq uint64, chunkID, tag, source string, batchPayl
 	if c.keys != nil {
 		params.KeyID = c.keys.KeyID
 		params.HMACKey = c.keys.HMACKey
+		params.SM4Key = c.keys.SM4Key
 	}
 
 	env, err := core.Build(params, batchPayload)

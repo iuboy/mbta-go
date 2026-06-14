@@ -166,7 +166,7 @@ func TestProcessBatchEnvelope(t *testing.T) {
 	}
 
 	// Open envelope
-	got, err := core.Open(env)
+	got, err := core.Open(env, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

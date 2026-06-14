@@ -150,6 +150,18 @@ func (c *Client) recvAuthResult() error {
 			}
 		}
 
+		// Decode SM4 key（SM4-GCM 加密密钥，服务端总下发；encryption=none 时不使用）
+		if okMsg.SM4Key != "" {
+			sm4Key, err := decodeBase64Key(okMsg.SM4Key, 16)
+			if err != nil {
+				return core.WrapError(core.NumAuth, core.CodeAuth, "decode sm4 key", err)
+			}
+			if c.keys == nil {
+				c.keys = &core.SessionKeys{}
+			}
+			c.keys.SM4Key = sm4Key
+		}
+
 		// 存储会话过期时间
 		if okMsg.ExpiresAtUnix > 0 {
 			c.expiresAt = time.Unix(okMsg.ExpiresAtUnix, 0)

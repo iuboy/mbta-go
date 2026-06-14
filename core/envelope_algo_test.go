@@ -15,7 +15,7 @@ func TestOpen_UnsupportedCompressionRejected(t *testing.T) {
 			Encryption:  EncryptionNone,
 			Payload:     base64.StdEncoding.EncodeToString([]byte("x")),
 		}
-		if _, err := Open(env); err == nil {
+		if _, err := Open(env, nil); err == nil {
 			t.Errorf("compression %q: expected error, got nil", comp)
 		}
 	}
@@ -29,7 +29,7 @@ func TestOpen_UnsupportedEncryptionRejected(t *testing.T) {
 		Encryption:  EncryptionSM4,
 		Payload:     base64.StdEncoding.EncodeToString([]byte("x")),
 	}
-	if _, err := Open(env); err == nil {
+	if _, err := Open(env, nil); err == nil {
 		t.Fatal("expected error for unsupported encryption, got nil")
 	}
 }
@@ -43,7 +43,7 @@ func TestOpen_NoneCompressionReturnsRaw(t *testing.T) {
 		Encryption:  EncryptionNone,
 		Payload:     base64.StdEncoding.EncodeToString(raw),
 	}
-	got, err := Open(env)
+	got, err := Open(env, nil)
 	if err != nil {
 		t.Fatalf("open none: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestBuild_NormalizesEmptyAlgorithms(t *testing.T) {
 		t.Errorf("Encryption = %q, want none (normalized)", env.Encryption)
 	}
 	// 归一化后必须能被 Open 接受。
-	if _, err := Open(env); err != nil {
+	if _, err := Open(env, nil); err != nil {
 		t.Fatalf("open normalized envelope: %v", err)
 	}
 }
@@ -82,7 +82,7 @@ func TestOpen_ErrorDoesNotLeakPayload(t *testing.T) {
 		Compression: "bogus",
 		Payload:     base64.StdEncoding.EncodeToString([]byte(secret)),
 	}
-	_, err := Open(env)
+	_, err := Open(env, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
