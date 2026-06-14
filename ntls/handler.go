@@ -48,6 +48,7 @@ func NewConnectionHandler(cfg ConnectionHandlerConfig) *ConnectionHandler {
 		window:         core.NewWindow(windowMaxBatches, windowMaxEvents, windowMaxBytes),
 		serverInflight: &core.Inflight{},
 		lastPressure:   func() atomic.Value { v := atomic.Value{}; v.Store(core.PressureNormal); return v }(),
+		batchSem:       make(chan struct{}, defaultBatchWorkers),
 	}
 }
 
@@ -73,7 +74,18 @@ type ConnectionHandler struct {
 
 	writeMu        sync.Mutex     // protects concurrent writes to conn
 	serverInflight *core.Inflight // server-side flow-control accounting (M-4)
+
+	// BATCH worker 池：readLoop 把 BATCH 帧派发给有界并发 worker（解除大 batch 队头阻塞，
+	// ACK 可乱序）。batchSem 容量=并发上限，满时 readLoop 阻塞派发=保留背压（client window 填满）。
+	// batchWG 跟踪 in-flight worker，readLoop 退出前 Wait，避免 worker 与 HandleConnection
+	// defer 的密钥清零/conn 关闭竞争。control 帧（HELLO/AUTH/PING/CLOSE）仍内联保序。
+	batchSem chan struct{}
+	batchWG  sync.WaitGroup
 }
+
+// defaultBatchWorkers 是单连接 BATCH 并发处理上限。readLoop 派发 BATCH 时占一个槽位，
+// worker 完成释放。池满时 readLoop 停止读新帧，形成自然背压（客户端发送窗口随之填满）。
+const defaultBatchWorkers = 8
 
 // loadLastPressure returns the current pressure state, defaulting to PressureNormal
 // if never set (handles zero-value atomic.Value safely).
@@ -120,6 +132,10 @@ func (h *ConnectionHandler) HandleConnection(ctx context.Context) error {
 // v1 的 handleControlStream 仅处理控制帧，BATCH 由 acceptDataStreams/handleDataStream
 // 在单独的 quic.Stream 上处理；ntls 中所有帧类型共用同一条 TCP 连接，故合并为一处。
 func (h *ConnectionHandler) readLoop(ctx context.Context) error {
+	// 退出前等所有 in-flight BATCH worker 完成，避免 worker 与 HandleConnection defer 的
+	// conn 关闭/密钥清零竞争。worker 写 ACK 走 writeMu，conn 关闭时写返回错误（log+继续）。
+	defer h.batchWG.Wait()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -153,7 +169,21 @@ func (h *ConnectionHandler) readLoop(ctx context.Context) error {
 				h.sendError(core.CodeUnsupportedMessage, "BATCH not allowed before auth", true)
 				continue
 			}
-			h.processBatch(ctx, f.Payload)
+			// 派发到有界 worker 池并发处理：单大 batch 不再阻塞后续帧的读取。
+			// batchSem 满时阻塞派发=保留背压（client window 填满）；ctx 取消时及时退出。
+			// ACK 按完成顺序返回（client 按 chunkID 关联，功能正确）。
+			// ReplayCache/Window/Inflight 均 mutex/atomic 保护，processBatch 可安全并发。
+			select {
+			case h.batchSem <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			h.batchWG.Add(1)
+			go func(payload []byte) {
+				defer h.batchWG.Done()
+				defer func() { <-h.batchSem }()
+				h.processBatch(ctx, payload)
+			}(f.Payload)
 		case core.TypePing:
 			if h.sm.State() != core.ServerStateReady {
 				h.sendError(core.CodeUnsupportedMessage, "PING not allowed before auth", true)
