@@ -1,4 +1,4 @@
-package v1
+package spool
 
 import (
 	"encoding/json"
@@ -308,6 +308,38 @@ func (s *Spool) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.records)
+}
+
+// GetRecords 按 ID 精确取多条 record，用于重连重发时从 spool 重建 SignalBatch。
+// 跳过不存在的 ID（可能已被并发删除）。顺序与输入 ids 一致。
+func (s *Spool) GetRecords(ids []string) []*Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]*Record, 0, len(ids))
+	for _, id := range ids {
+		if r, ok := s.records[id]; ok {
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+// UpdateBatchAttempt 将一个 batch 的 AttemptCount +1（重连重发后调用）。
+// 批次不存在则无操作。触发 dirty 以便持久化。
+func (s *Spool) UpdateBatchAttempt(chunkID string) error {
+	s.mu.Lock()
+	b, ok := s.batches[chunkID]
+	if !ok {
+		s.mu.Unlock()
+		return nil
+	}
+	b.AttemptCount++
+	if s.flushInterval == 0 {
+		return s.syncAndUnlock(nil, s.flushBatchesLocked, false, true)
+	}
+	s.markDirty(false, true)
+	s.mu.Unlock()
+	return nil
 }
 
 // Sync flushes any dirty data to disk immediately.

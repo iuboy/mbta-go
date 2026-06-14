@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iuboy/mbta-go/core"
+	"github.com/iuboy/mbta-go/spool"
 	"github.com/quic-go/quic-go"
 )
 
@@ -33,7 +34,7 @@ type Client struct {
 	sm             *core.StateMachine
 	negotiated     *core.NegotiateResult
 	keys           *core.SessionKeys
-	spool          *Spool
+	spool          *spool.Spool
 	seq            *core.SeqGenerator
 	inflight       *core.Inflight
 	window         *core.Window
@@ -131,7 +132,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 
 	if cfg.SpoolDir != "" {
-		s, err := New(cfg.SpoolDir)
+		s, err := spool.New(cfg.SpoolDir)
 		if err != nil {
 			return nil, core.WrapError(core.NumSpool, core.CodeSpool, "open spool", err)
 		}
