@@ -181,14 +181,14 @@ func TestInflight(t *testing.T) {
 
 		inf.Add(10, 1024)
 
-		if inf.batches != 1 {
-			t.Errorf("batches = %d, want 1", inf.batches)
+		if inf.batches.Load() != 1 {
+			t.Errorf("batches = %d, want 1", inf.batches.Load())
 		}
-		if inf.events != 10 {
-			t.Errorf("events = %d, want 10", inf.events)
+		if inf.events.Load() != 10 {
+			t.Errorf("events = %d, want 10", inf.events.Load())
 		}
-		if inf.bytes != 1024 {
-			t.Errorf("bytes = %d, want 1024", inf.bytes)
+		if inf.bytes.Load() != 1024 {
+			t.Errorf("bytes = %d, want 1024", inf.bytes.Load())
 		}
 	})
 
@@ -199,14 +199,14 @@ func TestInflight(t *testing.T) {
 		inf.Add(20, 2048)
 		inf.Add(30, 4096)
 
-		if inf.batches != 3 {
-			t.Errorf("batches = %d, want 3", inf.batches)
+		if inf.batches.Load() != 3 {
+			t.Errorf("batches = %d, want 3", inf.batches.Load())
 		}
-		if inf.events != 60 {
-			t.Errorf("events = %d, want 60", inf.events)
+		if inf.events.Load() != 60 {
+			t.Errorf("events = %d, want 60", inf.events.Load())
 		}
-		if inf.bytes != 7168 {
-			t.Errorf("bytes = %d, want 7168", inf.bytes)
+		if inf.bytes.Load() != 7168 {
+			t.Errorf("bytes = %d, want 7168", inf.bytes.Load())
 		}
 	})
 
@@ -227,11 +227,11 @@ func TestInflight(t *testing.T) {
 			<-done
 		}
 
-		if inf.batches != concurrency {
-			t.Errorf("batches = %d, want %d", inf.batches, concurrency)
+		if inf.batches.Load() != int64(concurrency) {
+			t.Errorf("batches = %d, want %d", inf.batches.Load(), concurrency)
 		}
-		if inf.events != concurrency*10 {
-			t.Errorf("events = %d, want %d", inf.events, concurrency*10)
+		if inf.events.Load() != int64(concurrency)*10 {
+			t.Errorf("events = %d, want %d", inf.events.Load(), concurrency*10)
 		}
 	})
 }
@@ -247,14 +247,14 @@ func TestInflightRemove(t *testing.T) {
 	// Mark one batch as done (remove)
 	inf.Remove(50, 5120)
 
-	if inf.batches != 1 {
-		t.Errorf("batches = %d, want 1", inf.batches)
+	if inf.batches.Load() != 1 {
+		t.Errorf("batches = %d, want 1", inf.batches.Load())
 	}
-	if inf.events != 100 {
-		t.Errorf("events = %d, want 100", inf.events)
+	if inf.events.Load() != 100 {
+		t.Errorf("events = %d, want 100", inf.events.Load())
 	}
-	if inf.bytes != 10240 {
-		t.Errorf("bytes = %d, want 10240", inf.bytes)
+	if inf.bytes.Load() != 10240 {
+		t.Errorf("bytes = %d, want 10240", inf.bytes.Load())
 	}
 }
 

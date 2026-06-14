@@ -131,6 +131,9 @@ type Spool struct {
 
 	// Disk protection
 	maxSize int64 // maximum estimated spool size (default 512 MiB)
+	// curSize 增量维护的估算占用（字节），避免 Put/PutBatch 每次 O(n) 全表遍历。
+	// 所有 records/batches 写入路径在持锁状态下增减该值。
+	curSize int64
 
 	closeOnce sync.Once // (M-2) 保证 Close 幂等，防止二次调用 close(stopCh) panic
 }
@@ -180,17 +183,26 @@ func New(dir string, opts ...SpoolOption) (*Spool, error) {
 	return s, nil
 }
 
+// recordSize / batchSize 与 estimatedSize 的逐条估算保持一致，供增量计数复用。
+func recordSize(r *Record) int64 { return int64(len(r.RecordID) + len(r.AgentID) + 256) }
+func batchSize(b *Batch) int64   { return int64(len(b.ChunkID) + len(b.RecordIDs)*36 + 128) }
+
 // Put stores a new event record.
 func (s *Spool) Put(rec Record) error {
 	s.mu.Lock()
 
 	// Disk protection: check size before write.
-	if s.maxSize > 0 && s.estimatedSize() >= s.maxSize {
+	if s.maxSize > 0 && s.curSize >= s.maxSize {
 		s.mu.Unlock()
 		return core.NewError(core.NumSpool, core.CodeSpool, "spool size limit exceeded")
 	}
 
+	// 覆盖同名记录时先扣减旧估算，再累加新估算。
+	if old, ok := s.records[rec.RecordID]; ok {
+		s.curSize -= recordSize(old)
+	}
 	s.records[rec.RecordID] = &rec
+	s.curSize += recordSize(&rec)
 
 	if s.flushInterval == 0 {
 		return s.syncAndUnlock(s.flushRecordsLocked, s.flushBatchesLocked, true, false)
@@ -205,15 +217,23 @@ func (s *Spool) PutBatch(records []Record, batch Batch) error {
 	s.mu.Lock()
 
 	// Disk protection: check size before write.
-	if s.maxSize > 0 && s.estimatedSize() >= s.maxSize {
+	if s.maxSize > 0 && s.curSize >= s.maxSize {
 		s.mu.Unlock()
 		return core.NewError(core.NumSpool, core.CodeSpool, "spool size limit exceeded")
 	}
 
 	for i := range records {
+		if old, ok := s.records[records[i].RecordID]; ok {
+			s.curSize -= recordSize(old)
+		}
 		s.records[records[i].RecordID] = &records[i]
+		s.curSize += recordSize(&records[i])
+	}
+	if old, ok := s.batches[batch.ChunkID]; ok {
+		s.curSize -= batchSize(old)
 	}
 	s.batches[batch.ChunkID] = &batch
+	s.curSize += batchSize(&batch)
 
 	if s.flushInterval == 0 {
 		return s.syncAndUnlock(s.flushRecordsLocked, s.flushBatchesLocked, true, true)
@@ -228,7 +248,10 @@ func (s *Spool) DeleteRecords(ids []string) error {
 	s.mu.Lock()
 
 	for _, id := range ids {
-		delete(s.records, id)
+		if old, ok := s.records[id]; ok {
+			s.curSize -= recordSize(old)
+			delete(s.records, id)
+		}
 	}
 
 	if s.flushInterval == 0 {
@@ -243,7 +266,10 @@ func (s *Spool) DeleteRecords(ids []string) error {
 func (s *Spool) DeleteBatch(chunkID string) error {
 	s.mu.Lock()
 
-	delete(s.batches, chunkID)
+	if old, ok := s.batches[chunkID]; ok {
+		s.curSize -= batchSize(old)
+		delete(s.batches, chunkID)
+	}
 
 	if s.flushInterval == 0 {
 		return s.syncAndUnlock(nil, s.flushBatchesLocked, false, true)
@@ -530,6 +556,14 @@ func (s *Spool) load() error {
 		return core.WrapError(core.NumSpool, core.CodeSpool, "read batches", err)
 	}
 
+	// 初始化增量计数：加载只发生在 NewSpool（单线程），O(n) 遍历可接受。
+	for _, r := range s.records {
+		s.curSize += recordSize(r)
+	}
+	for _, b := range s.batches {
+		s.curSize += batchSize(b)
+	}
+
 	return nil
 }
 
@@ -551,17 +585,5 @@ func (s *Spool) flushAllLocked() error {
 	return writeFileAtomic(filepath.Join(s.dir, "batches.json"), batData, 0600)
 }
 
-// estimatedSize returns a rough estimate of the spool's memory footprint in bytes.
-// Must be called with s.mu held.
-func (s *Spool) estimatedSize() int64 {
-	var size int64
-	for _, r := range s.records {
-		// Approximate: RecordID + AgentID + overhead per record.
-		size += int64(len(r.RecordID) + len(r.AgentID) + 256)
-	}
-	for _, b := range s.batches {
-		// Approximate: ChunkID + RecordIDs + overhead per batch.
-		size += int64(len(b.ChunkID) + len(b.RecordIDs)*36 + 128)
-	}
-	return size
-}
+// （原 estimatedSize 已被 curSize 增量计数取代：每次 Put/PutBatch/DeleteRecords/
+// DeleteBatch 在持锁状态下增减 curSize，避免每写入 O(n) 全表遍历。）

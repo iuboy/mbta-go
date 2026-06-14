@@ -3,7 +3,7 @@ package core
 import (
 	"context"
 	"log/slog"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -64,104 +64,98 @@ type AgentQueue struct {
 }
 
 // Inflight tracks bytes, events, and batches that are in-flight (sent but not yet ACKed).
+// 三个标量用 atomic 计数，避免高频数据流（服务端 64 stream × N 连接）下的互斥锁竞争。
 type Inflight struct {
-	mu      sync.Mutex
-	batches int
-	events  int
-	bytes   int64
+	batches atomic.Int64
+	events  atomic.Int64
+	bytes   atomic.Int64
 }
 
 // Add increases inflight counters for a batch being sent.
 func (inf *Inflight) Add(events int, bytes int64) {
-	inf.mu.Lock()
-	defer inf.mu.Unlock()
-	inf.batches++
-	inf.events += events
-	inf.bytes += bytes
+	inf.batches.Add(1)
+	inf.events.Add(int64(events))
+	inf.bytes.Add(bytes)
 }
 
 // Remove decreases inflight counters after receiving a response.
 func (inf *Inflight) Remove(events int, bytes int64) {
-	inf.mu.Lock()
-	defer inf.mu.Unlock()
-	inf.batches--
-	inf.events -= events
-	inf.bytes -= bytes
-	if inf.batches < 0 || inf.events < 0 || inf.bytes < 0 {
+	nb := inf.batches.Add(-1)
+	ne := inf.events.Add(int64(-events))
+	nby := inf.bytes.Add(-bytes)
+	if nb < 0 || ne < 0 || nby < 0 {
 		slog.Warn("inflight counter underflow",
-			"batches", inf.batches, "events", inf.events, "bytes", inf.bytes,
+			"batches", nb, "events", ne, "bytes", nby,
 			"removed_events", events, "removed_bytes", bytes)
+		clampNonNeg(&inf.batches)
+		clampNonNeg(&inf.events)
+		clampNonNeg(&inf.bytes)
 	}
-	if inf.batches < 0 {
-		inf.batches = 0
-	}
-	if inf.events < 0 {
-		inf.events = 0
-	}
-	if inf.bytes < 0 {
-		inf.bytes = 0
+}
+
+// clampNonNeg 在计数器因并发 Remove 出现负值时将其 CAS 回零，避免持续负值阻塞窗口。
+func clampNonNeg(a *atomic.Int64) {
+	for {
+		v := a.Load()
+		if v >= 0 {
+			return
+		}
+		if a.CompareAndSwap(v, 0) {
+			return
+		}
 	}
 }
 
 // Snapshot returns current inflight counters.
 func (inf *Inflight) Snapshot() (batches int, events int, bytes int64) {
-	inf.mu.Lock()
-	defer inf.mu.Unlock()
-	return inf.batches, inf.events, inf.bytes
+	return int(inf.batches.Load()), int(inf.events.Load()), inf.bytes.Load()
 }
 
 // Reset clears all inflight counters. Called on disconnect or reconnect
 // to prevent stale counters from permanently blocking the window.
 func (inf *Inflight) Reset() {
-	inf.mu.Lock()
-	defer inf.mu.Unlock()
-	inf.batches = 0
-	inf.events = 0
-	inf.bytes = 0
+	inf.batches.Store(0)
+	inf.events.Store(0)
+	inf.bytes.Store(0)
 }
 
 // Window represents the server's current flow-control window.
+// 三个上限用 atomic 存储，CanSend/Snapshot 无锁读，消除 Window↔Inflight 双锁的 TOCTOU 窗口。
 type Window struct {
-	mu                 sync.Mutex
-	maxInflightBatches int
-	maxInflightEvents  int
-	maxInflightBytes   int64
+	maxBatches atomic.Int64
+	maxEvents  atomic.Int64
+	maxBytes   atomic.Int64
 }
 
 // NewWindow creates a window with initial limits.
 func NewWindow(maxBatches int, maxEvents int, maxBytes int64) *Window {
-	return &Window{
-		maxInflightBatches: maxBatches,
-		maxInflightEvents:  maxEvents,
-		maxInflightBytes:   maxBytes,
-	}
+	w := &Window{}
+	w.maxBatches.Store(int64(maxBatches))
+	w.maxEvents.Store(int64(maxEvents))
+	w.maxBytes.Store(maxBytes)
+	return w
 }
 
 // Update sets new window limits from a WINDOW message.
 func (w *Window) Update(maxBatches int, maxEvents int, maxBytes int64) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.maxInflightBatches = maxBatches
-	w.maxInflightEvents = maxEvents
-	w.maxInflightBytes = maxBytes
+	w.maxBatches.Store(int64(maxBatches))
+	w.maxEvents.Store(int64(maxEvents))
+	w.maxBytes.Store(maxBytes)
 }
 
 // CanSend checks whether a batch of the given size fits in the window.
 // A max of 0 means that dimension is paused (no sending allowed).
 //
-// 注意：此方法分别获取 Window 和 Inflight 的锁，在高并发场景下可能存在竞态。
-// 调用方必须提供外部同步保证（例如 v1.Client.sendMu），确保 CanSend 检查
-// 与实际写入操作的原子性。
+// 全程原子读，无锁。check 与随后 inflight.Add 之间仍非原子——服务端多流并发下可能
+// 轻微 over-commit，由 routeAndACK 的 window_exceeded 回退兜底；客户端由 sendMu 保证原子性。
 func (w *Window) CanSend(inf *Inflight, events int, bytes int64) bool {
 	if w == nil || inf == nil {
 		return false
 	}
 
-	w.mu.Lock()
-	winBatches := w.maxInflightBatches
-	winEvents := w.maxInflightEvents
-	winBytes := w.maxInflightBytes
-	w.mu.Unlock()
+	winBatches := w.maxBatches.Load()
+	winEvents := w.maxEvents.Load()
+	winBytes := w.maxBytes.Load()
 
 	// max=0 means paused
 	if winBatches == 0 || winEvents == 0 || winBytes == 0 {
@@ -169,16 +163,14 @@ func (w *Window) CanSend(inf *Inflight, events int, bytes int64) bool {
 	}
 
 	ib, ie, iby := inf.Snapshot()
-	return (ib+1 <= winBatches) &&
-		(ie+events <= winEvents) &&
+	return (ib+1 <= int(winBatches)) &&
+		(ie+events <= int(winEvents)) &&
 		(iby+bytes <= winBytes)
 }
 
 // Snapshot returns current window limits.
 func (w *Window) Snapshot() (maxBatches int, maxEvents int, maxBytes int64) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.maxInflightBatches, w.maxInflightEvents, w.maxInflightBytes
+	return int(w.maxBatches.Load()), int(w.maxEvents.Load()), w.maxBytes.Load()
 }
 
 // MaxThrottleDelay 是客户端接受的最大限流延迟（5分钟）。
@@ -186,32 +178,33 @@ func (w *Window) Snapshot() (maxBatches int, maxEvents int, maxBytes int64) {
 const MaxThrottleDelay = 5 * time.Minute
 
 // ThrottleState tracks the current throttle status.
+// until 存 UnixNano；0 表示未限流。无锁原子读写。
 type ThrottleState struct {
-	mu         sync.Mutex
-	until      time.Time // when throttle expires
-	retryAfter time.Duration
+	until atomic.Int64
 }
 
 // Apply sets the throttle from a THROTTLE message.
 func (ts *ThrottleState) Apply(retryDelayMs int) {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	ts.retryAfter = max(0, min(time.Duration(retryDelayMs)*time.Millisecond, MaxThrottleDelay))
-	ts.until = time.Now().Add(ts.retryAfter)
+	d := max(0, min(time.Duration(retryDelayMs)*time.Millisecond, MaxThrottleDelay))
+	ts.until.Store(time.Now().Add(d).UnixNano())
 }
 
 // Active returns true if currently throttled.
 func (ts *ThrottleState) Active() bool {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	return time.Now().Before(ts.until)
+	u := ts.until.Load()
+	if u == 0 {
+		return false
+	}
+	return time.Now().UnixNano() < u
 }
 
 // WaitDuration returns how long until the throttle expires.
 func (ts *ThrottleState) WaitDuration() time.Duration {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	remaining := time.Until(ts.until)
+	u := ts.until.Load()
+	if u == 0 {
+		return 0
+	}
+	remaining := time.Until(time.Unix(0, u))
 	if remaining < 0 {
 		return 0
 	}

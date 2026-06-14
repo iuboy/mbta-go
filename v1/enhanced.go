@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
@@ -13,21 +14,28 @@ import (
 // 超过此时间未收到该 agent 的 batch，条目将被惰性清理。
 const agentQueueTTL = 30 * time.Minute
 
+// evictInterval 控制过期清理的节流频率：每这么多次统计更新才全表扫描一次，
+// 避免每次 batch 投递都遍历整个 agentQueues。
+const evictInterval = 128
+
 // EnhancedRouter 路由事件到上层 EventSink，提供背压反馈。
 // 实现 core.DurableEventSink 接口。
 //
-// agentQueues 使用惰性过期策略防止无界增长：每次 updateAgentStats 时
-// 顺便清理超过 agentQueueTTL 未活跃的条目。
+// agentQueues 使用惰性过期策略防止无界增长：updateAgentStats 每 evictInterval 次
+// 顺便清理超过 agentQueueTTL 未活跃的条目。高频的 EventsIn 累加走 atomic，避免写锁。
 type EnhancedRouter struct {
-	sink        core.EventSink
-	mu          sync.RWMutex
-	agentQueues map[string]*agentQueueEntry
+	sink         core.EventSink
+	mu           sync.RWMutex
+	agentQueues  map[string]*agentQueueEntry
+	evictCounter atomic.Int64
 }
 
 // agentQueueEntry wraps AgentQueue with last-access time for lazy eviction.
+// eventsIn / lastAccess 用 atomic 维护，使已存在条目的统计更新无需写锁。
 type agentQueueEntry struct {
 	*core.AgentQueue
-	lastAccess time.Time
+	eventsIn   atomic.Int64
+	lastAccess atomic.Int64 // unix nano
 }
 
 // NewEnhancedRouter 创建增强路由器。
@@ -106,6 +114,8 @@ func (r *EnhancedRouter) GetAgentQueue(agentID string) (*core.AgentQueue, bool) 
 	if !ok {
 		return nil, false
 	}
+	// 将 atomic 计数快照到公开字段，保持 AgentQueue.EventsIn 语义兼容。
+	entry.EventsIn = entry.eventsIn.Load()
 	return entry.AgentQueue, true
 }
 
@@ -138,41 +148,55 @@ func (r *EnhancedRouter) RemoveAgent(agentID string) {
 }
 
 func (r *EnhancedRouter) updateAgentStats(agentID string, count int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	nowNano := time.Now().UnixNano()
 
-	now := time.Now()
-
+	// 快路径：entry 已存在，用 RLock 取指针后走 atomic 更新，避免写锁竞争。
+	r.mu.RLock()
 	entry, exists := r.agentQueues[agentID]
+	r.mu.RUnlock()
+	if exists {
+		entry.eventsIn.Add(int64(count))
+		entry.lastAccess.Store(nowNano)
+		r.maybeEvict()
+		return
+	}
+
+	// 慢路径：首次创建 entry，需写锁。double-check 防并发重复创建。
+	r.mu.Lock()
+	entry, exists = r.agentQueues[agentID]
 	if !exists {
 		entry = &agentQueueEntry{
 			AgentQueue: &core.AgentQueue{
 				AgentID:   agentID,
 				QueueType: "durable",
-				CreatedAt: now,
+				CreatedAt: time.Now(),
 			},
-			lastAccess: now,
 		}
+		entry.lastAccess.Store(nowNano)
 		r.agentQueues[agentID] = entry
 	}
-	entry.EventsIn += int64(count)
-	entry.lastAccess = now
-
-	// 惰性清理：每次更新时顺带清除过期条目
-	r.evictExpiredLocked(now)
+	r.mu.Unlock()
+	entry.eventsIn.Add(int64(count))
+	entry.lastAccess.Store(nowNano)
+	r.maybeEvict()
 }
 
-// evictExpiredLocked 清理超过 agentQueueTTL 未活跃的条目。
-// 必须在 r.mu 持锁状态下调用。
-func (r *EnhancedRouter) evictExpiredLocked(now time.Time) {
-	// 性能优化：仅在条目数较多时才执行清理，避免每次更新都遍历
-	if len(r.agentQueues) < 64 {
+// maybeEvict 节流触发过期清理，避免每次统计更新都全表扫描。
+func (r *EnhancedRouter) maybeEvict() {
+	if r.evictCounter.Add(1)%evictInterval != 0 {
 		return
 	}
+	r.evictExpired()
+}
 
-	deadline := now.Add(-agentQueueTTL)
+// evictExpired 清理超过 agentQueueTTL 未活跃的条目。
+// 持写锁删除 map 条目，lastAccess 通过 atomic 读取（无需额外同步）。
+func (r *EnhancedRouter) evictExpired() {
+	deadline := time.Now().Add(-agentQueueTTL).UnixNano()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for id, entry := range r.agentQueues {
-		if entry.lastAccess.Before(deadline) {
+		if entry.lastAccess.Load() < deadline {
 			delete(r.agentQueues, id)
 		}
 	}
