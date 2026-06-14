@@ -75,6 +75,12 @@ type ConnectionHandler struct {
 	writeMu        sync.Mutex     // protects concurrent writes to conn
 	serverInflight *core.Inflight // server-side flow-control accounting (M-4)
 
+	// windowMu 保护「压力变更决策」：并发 worker 检测到 sink 压力变化时，串行化
+	// lastPressure 的读-改，避免多 worker 对同一新压力值各发一次 WINDOW（同值重复）。
+	// 锁序 windowMu → writeMu（sendWindowUpdate 取 writeMu）；sendAck/sendNack 只取 writeMu，
+	// 不存在反向获取，无死锁。
+	windowMu sync.Mutex
+
 	// BATCH worker 池：readLoop 把 BATCH 帧派发给有界并发 worker（解除大 batch 队头阻塞，
 	// ACK 可乱序）。batchSem 容量=并发上限，满时 readLoop 阻塞派发=保留背压（client window 填满）。
 	// batchWG 跟踪 in-flight worker，readLoop 退出前 Wait，避免 worker 与 HandleConnection
@@ -642,10 +648,7 @@ func (h *ConnectionHandler) routeAndACK(ctx context.Context, dedupKey string, ba
 				slog.Warn("event routing failed", "session", h.sessionID, "error", err)
 			}
 			pressure := h.config.Sink.OnPressure(h.agentID)
-			if pressure != "" && pressure != h.loadLastPressure() {
-				h.lastPressure.Store(pressure)
-				b, e, by := pressureToWindow(pressure)
-				h.window.Update(b, e, by)
+			if b, e, by, ok := h.applyPressureChange(pressure); ok {
 				h.sendWindowUpdate(b, e, by, string(pressure))
 			}
 		}
@@ -676,13 +679,30 @@ func (h *ConnectionHandler) applyRouteResult(result *core.RouteResult, dedupKey 
 	default:
 		*ackMode = core.AckModeAccepted
 	}
-	if result.Pressure != "" && result.Pressure != h.loadLastPressure() {
-		h.lastPressure.Store(result.Pressure)
-		b, e, by := pressureToWindow(result.Pressure)
-		h.window.Update(b, e, by)
+	if b, e, by, ok := h.applyPressureChange(result.Pressure); ok {
 		h.sendWindowUpdate(b, e, by, string(result.Pressure))
 	}
 	return false
+}
+
+// applyPressureChange 在 windowMu 保护下原子完成压力状态变更决策：若 pressure 与上次不同，
+// 更新 lastPressure + window 维度，返回 (batches, events, maxBytes, true)；否则返回 (..., false)。
+// 串行化避免并发 worker 对同一新压力值各发一次 WINDOW（同值重复，client 幂等但多一次网络写）。
+// 网络发帧由调用方在锁外执行，避免持 windowMu 做 I/O。
+func (h *ConnectionHandler) applyPressureChange(pressure core.PressureState) (batches, events int, maxBytes int64, send bool) {
+	if pressure == "" {
+		return 0, 0, 0, false
+	}
+	h.windowMu.Lock()
+	defer h.windowMu.Unlock()
+	// 持锁后复查：等锁期间可能已被其他 worker 更新到相同值，此时无需再发。
+	if pressure == h.loadLastPressure() {
+		return 0, 0, 0, false
+	}
+	h.lastPressure.Store(pressure)
+	batches, events, maxBytes = pressureToWindow(pressure)
+	h.window.Update(batches, events, maxBytes)
+	return batches, events, maxBytes, true
 }
 
 // writeFrame writes a frame to the underlying TCP connection with mutex protection.
