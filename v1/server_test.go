@@ -150,7 +150,6 @@ func TestServerConfigWithAllFields(t *testing.T) {
 		},
 		Auth:     auth,
 		Policy:   policy,
-		SpoolDir: "/tmp/spool",
 		ServerID: "test-server",
 		Metrics:  metrics,
 		Sink:     sink,
@@ -164,9 +163,6 @@ func TestServerConfigWithAllFields(t *testing.T) {
 
 	if server.config.Transport.Address != "0.0.0.0:8080" {
 		t.Errorf("Transport.Address = %s, want '0.0.0.0:8080'", server.config.Transport.Address)
-	}
-	if server.config.SpoolDir != "/tmp/spool" {
-		t.Errorf("SpoolDir = %s, want '/tmp/spool'", server.config.SpoolDir)
 	}
 	if server.config.Auth == nil {
 		t.Error("Auth should not be nil")

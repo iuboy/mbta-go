@@ -20,7 +20,6 @@ type ConnectionHandlerConfig struct {
 	Conn     *Conn
 	Auth     core.TokenValidator
 	Policy   core.Policy
-	SpoolDir string
 	Sink     core.EventSink
 	Metrics  *core.MBTAMetrics
 	ServerID string

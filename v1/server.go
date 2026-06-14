@@ -14,7 +14,6 @@ type ServerConfig struct {
 	Transport          QUICServerConfig
 	Auth               core.TokenValidator
 	Policy             core.Policy
-	SpoolDir           string
 	ServerID           string
 	Metrics            *core.MBTAMetrics
 	Sink               core.EventSink // 上层注入的事件投递接口
@@ -113,7 +112,6 @@ func (s *Server) Accept(ctx context.Context) (*ConnectionHandler, error) {
 		Conn:     conn,
 		Auth:     s.config.Auth,
 		Policy:   s.config.Policy,
-		SpoolDir: s.config.SpoolDir,
 		Sink:     s.config.Sink,
 		Metrics:  s.config.Metrics,
 		ServerID: s.config.ServerID,
