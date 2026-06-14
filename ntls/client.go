@@ -206,8 +206,40 @@ func (c *Client) writeFrame(typ uint16, flags byte, payload []byte) error {
 	return core.Write(c.conn, typ, flags, payload)
 }
 
+// writeFrameCtx 写一帧，并受调用方 ctx 约束。仅 BATCH 写路径（buildAndSend）使用。
+//
+// 实现：在 writeMu 临界区内按 ctx 的 Deadline 设置 SetWriteDeadline，写完恢复（time.Time{}）。
+// writeMu 保证同一时刻只有一个写者，故 deadline 不会被并发写者互相覆盖——这是 ntls 单连接
+// 能安全做 ctx→deadline 绑定的前提（v1 的 single 策略下多发送者写同一 quic.Stream，无此保证）。
+//
+// 语义：
+//   - ctx 已取消（cancel-only 或 deadline 已过）：进入即返回 ctx.Err()，不触碰连接。
+//   - ctx 带 Deadline：写超时按该 deadline 计；超时 Write 返回 deadline 错误。
+//   - ctx 仅可取消但无 Deadline（如 WithCancel(Background)）：无法在不拆连接前提下中断
+//     阻塞写，按连接级生命周期处理（与历史行为一致）。
+//
+// 注意：deadline 触发导致的写失败可能留下半帧（帧头声明的 Length 与实际写入不符，破坏对端
+// 帧同步）。此类失败应视为连接已损坏——调用方收到错误后应 Close() 并重连，不应复用本连接。
+func (c *Client) writeFrameCtx(ctx context.Context, typ uint16, flags byte, payload []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = c.conn.SetWriteDeadline(dl)
+		defer c.conn.SetWriteDeadline(time.Time{}) // 恢复，避免影响后续无 ctx 的写
+	}
+	return core.Write(c.conn, typ, flags, payload)
+}
+
 // SendBatch 通过 MBTA-NTLS 协议发送一个 SignalBatch。
 // 返回分配给该 batch 的 chunkID（用于 ACK 关联），或错误。
+//
+// ctx 约束网络写：BATCH 写在 writeMu 临界区内按 ctx.Deadline() 设置 SetWriteDeadline，
+// 对端卡死时调用方超时能及时收到写错误（而非阻塞到 TCP 自身放弃）。ctx 已取消则进入即返回。
+// 注意：超时导致的写失败可能留下半帧、破坏对端帧同步，调用方收到错误后应 Close() 并重连，
+// 不应复用本连接。仅 WithCancel（无 deadline）的 ctx 不会中断阻塞写（连接级生命周期处理）。
 //
 // 锁粒度：sendMu 仅保护「window 检查 + 取 seq/chunkID + inflight/pending 登记」，
 // 重的 CPU 工作（marshal、gzip+HMAC Build、网络写）全部在锁外，使多调用方可并行利用多核。
@@ -238,7 +270,7 @@ func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, t
 	batchBytes := int64(len(batchPayload))
 
 	// --- 锁外：Build envelope（gzip+HMAC）+ marshal env + 网络写 ---
-	if writeErr := c.buildAndSend(seq, chunkID, tag, source, batchPayload); writeErr != nil {
+	if writeErr := c.buildAndSend(ctx, seq, chunkID, tag, source, batchPayload); writeErr != nil {
 		// 写失败：回滚已登记的 inflight/pending，避免窗口被永久占用。
 		c.inflight.Remove(batchEvents, batchBytes)
 		if _, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
@@ -313,9 +345,9 @@ func buildBatchPayload(seq uint64, chunkID, tag, source string, eventsCount int,
 // buildAndSend 在锁外完成 envelope 构建（gzip+HMAC）、envelope marshal 与网络写。
 // batchPayload 由 reserveInflight 已构造（手写），此处直接 Build，不再重复 marshal。
 //
-// ntls 与 v1 区别：写 BATCH 帧走 c.writeFrame（单连接 + writeMu），
+// ntls 与 v1 区别：写 BATCH 帧走 c.writeFrameCtx（受 ctx 约束的单连接 + writeMu），
 // 替代 v1 的 c.picker.Pick(batch) + core.Write(ds, ...)（多流分发）。
-func (c *Client) buildAndSend(seq uint64, chunkID, tag, source string, batchPayload []byte) error {
+func (c *Client) buildAndSend(ctx context.Context, seq uint64, chunkID, tag, source string, batchPayload []byte) error {
 	params := core.Params{
 		SessionID:   c.sessionID,
 		Seq:         seq,
@@ -347,7 +379,9 @@ func (c *Client) buildAndSend(seq uint64, chunkID, tag, source string, batchPayl
 	}
 
 	// ntls：单 TCP 连接，直接写 BATCH 帧（envelope + data 标志），无流分发。
-	if err := c.writeFrame(core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
+	// 用 writeFrameCtx 将调用方 ctx 绑定到本次网络写（deadline），使对端卡死时
+	// 调用方超时能及时收到错误，而非阻塞到 TCP 自身放弃。
+	if err := c.writeFrameCtx(ctx, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
 		return core.WrapError(core.NumBatch, core.CodeBatch, "write batch", err)
 	}
 	return nil

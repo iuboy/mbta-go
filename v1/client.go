@@ -286,6 +286,13 @@ func (c *Client) openDataStreams(ctx context.Context) (StreamPicker, error) {
 // SendBatch sends a SignalBatch through the MBTA protocol.
 // Returns the chunkID assigned to this batch for ACK correlation, or an error.
 //
+// ctx 当前为保留参数（尚未约束网络写）。QUIC 的网络写在 quic.Stream 上阻塞，
+// 若要按调用方 ctx 中断需用 SetWriteDeadline，但该 deadline 是 per-stream 的——
+// PickStrategy="single" 下多个发送者写同一 stream 会互相覆盖 deadline，存在并发问题；
+// "hash"/多流策略下写者分流到不同 stream，理论上可安全绑定（待实现）。
+// 因此 v1 暂不绑定 ctx，调用方若需超时应自行管理连接级生命周期。
+// （对比：ntls 单连接写由 writeMu 串行，已实现 ctx→deadline 绑定，见 ntls.writeFrameCtx。）
+//
 // 锁粒度（P2）：sendMu 仅保护「window 检查 + 取 seq/chunkID + inflight/pending 登记」
 // 这一小段，保证并发调用不会同时通过窗口后超限。重的 CPU 工作（marshal signalBatch、
 // gzip+HMAC 的 Build、网络写）全部在锁外，使多调用方可跨 batch 并行利用多核。
