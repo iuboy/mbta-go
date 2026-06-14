@@ -252,11 +252,20 @@ func (c *Client) initV2Client() (versionedClient, error) {
 		"v2 protocol not yet implemented (requires GM TLS library)")
 }
 
-// initNTLSClient 尚未实现：ntls（TCP + NTLS/TLCP）依赖未集成的 NTLS 库。
-// 早失败：在 NewClient 阶段直接返回 error，而非构造一个运行期才报错的 wrapper。
+// initNTLSClient 初始化 NTLS（TCP + TLCP）客户端。
 func (c *Client) initNTLSClient() (versionedClient, error) {
-	return nil, core.NewError(core.NumVersion, core.CodeVersion,
-		"ntls protocol not yet implemented (requires NTLS/TLCP library)")
+	cfg := ntls.ClientConfig{
+		Server:      c.cfg.Server,
+		Credentials: c.cfg.NTLSCreds,
+		AgentID:     c.cfg.AgentID,
+		Hostname:    c.cfg.Hostname,
+		Token:       c.cfg.Token,
+	}
+	client, err := ntls.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &ntlsClientWrapper{client: client}, nil
 }
 
 // Client wrappers for versionedClient interface
@@ -273,9 +282,19 @@ func (w *v1ClientWrapper) Close() error                     { return w.client.Cl
 func (w *v1ClientWrapper) State() string                    { return w.client.State().String() }
 func (w *v1ClientWrapper) SetACKHandler(handler ACKHandler) { w.client.SetACKHandler(handler) }
 
-// 注：v2ClientWrapper / ntlsClientWrapper 已移除。v2/ntls 协议尚未实现，
-// initV2Client/initNTLSClient 在 NewClient 阶段直接返回 error（早失败），
-// 不再构造运行期才报错的 wrapper。待 v2/ntls 落地时按 v1ClientWrapper 模式重建。
+type ntlsClientWrapper struct {
+	client *ntls.Client
+}
+
+func (w *ntlsClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
+func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
+	return w.client.SendBatch(ctx, batch, tag, source)
+}
+func (w *ntlsClientWrapper) Close() error                     { return w.client.Close() }
+func (w *ntlsClientWrapper) State() string                    { return w.client.State().String() }
+func (w *ntlsClientWrapper) SetACKHandler(handler ACKHandler) { w.client.SetACKHandler(handler) }
+
+// 注：v2ClientWrapper 仍待 v2（QUIC + RFC 8998 国密）落地后按 v1ClientWrapper 模式重建。
 
 // Client Options (functional options pattern)
 
