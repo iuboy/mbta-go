@@ -1,6 +1,6 @@
 # 性能优化与压测记录
 
-本文档记录 mbta-go 的性能优化工作、微基准与规模压测数据，以及端到端 QUIC 吞吐压测中发现的 ACK 传输 blocker 的诊断过程。
+本文档记录 mbta-go 的性能优化、序列化加速、国密传输层实现、架构审查与清理，以及端到端压测数据。
 
 ---
 
@@ -217,4 +217,171 @@ c.lifecycleCtx, c.lifecycleCancel = context.WithCancel(context.Background())
 这样 caller 可安全使用 `context.WithTimeout + defer cancel` 调 `Connect` 限定握手时长，不会误停后台。若需要「ctx 取消即停止 client」，调用方应自行监听 ctx 并调 `Close()`（显式优于隐式）。
 
 **验证**：修复后 e2e 用 `WithTimeout + defer cancel`（原陷阱场景）调 `Connect`，`pending=0`、`sink=full`——ACK 全部正常到达。现有 `go test -race ./core/ ./v1/` 全绿。
+
+---
+
+## 六、RawEventSink 快速路径（server 跳过 signalBatch 解码）
+
+### 设计
+
+转发型 sink（不需读取 signal 字段详情）可实现 `RawEventSink` 接口，服务端跳过 `json.Unmarshal(signalBatch)` 与 `Validate`，省去逐事件反射/map 分配（~13 allocs/event）。`BatchMessage` 新增 `events_count` 字段（client 填）供快速路径取事件数。
+
+### e2e 收益（events=1000，gzip+HMAC 全开）
+
+| 场景 | 优化前 | RawEventSink 后 | 提升 |
+|------|:---:|:---:|:---:|
+| 解码 sink（原路径）| 608k events/s | — | — |
+| **RawEventSink（转发）** | — | **150万 events/s（2.5x）** | allocs -82% |
+
+`BenchmarkE2E_RawSink` 覆盖此场景。提取 `applyRouteResult` / `decodeSignalBatch` helper 消除重复。
+
+---
+
+## 七、sonic 序列化引入
+
+### 决策过程
+
+e2e 数据显示序列化（marshal signalBatch + unmarshal signalBatch）占端到端绝大部分开销。系统评估了三个方案：
+
+| 方案 | marshal 耗时 | marshal allocs | 结论 |
+|------|:---:|:---:|------|
+| 标准库 `encoding/json` | 360µs | 5001 | 基线 |
+| **sonic**（asm）| ~378µs（持平）| **1002（-80%）** | ✅ 选中：allocs 大降、unmarshal 耗时 -67% |
+| jsoniter | 615µs（更慢）| 12012 | ❌ marshal 退化 |
+| easyjson | ~持平 | 无 map 提升 | ❌ map 仍反射 + 需 build 步骤 |
+| 手写 MarshalJSON | 经 json.Marshal 调用有 per-record compact 开销 | — | ❌ 实测耗时 +33% |
+
+核心洞察：**e2e 瓶颈是 unmarshal 耗时**（server 端解码），sonic unmarshal -67% 耗时是最大收益。
+
+### 实现
+
+`core/json.go`：`FastMarshal`/`FastUnmarshal` 封装 sonic（`ConfigCompatibleWithStandardLibrary` 兼容模式），替换热路径所有 `json.Marshal`/`Unmarshal`。
+
+### e2e 收益
+
+| 场景 | sonic 前 | sonic 后 | 提升 |
+|------|:---:|:---:|:---:|
+| **解码 sink** | 62万 events/s | **125万（+102%）** | server unmarshal -67% |
+| **RawEventSink** | 118万 | **133万（+12%）** | allocs 降致 GC 压力减 |
+
+兼容性：sonic 输出可被 `encoding/json` 正常 Unmarshal；HMAC 作用于 base64 后的 payload，不受影响。平台：amd64/arm64。
+
+### 手写 batch wrapper（减少 compact 扫描）
+
+`buildBatchPayload` 手写 BatchMessage JSON，避免 `json.Marshal` 对 RawMessage 的 O(n) compact 扫描 + 消除 reserveInflight/buildAndSend 重复 marshal。wrapper 构造 280µs→7µs（40x），大 batch（10k events）batch/s +41%。
+
+---
+
+## 八、SM4-GCM envelope 加密
+
+### 实现（pollux-go/sm4）
+
+使用 pollux-go/sm4 `NewGCM`（标准 `cipher.AEAD` 接口），不造轮子。
+
+**加密链路**（Build）：compress → SM4-GCM Seal（密文格式 nonce(12)+ct+tag(16)）→ base64 → HMAC 签名。
+
+**解密链路**（Open）：base64 decode → SM4-GCM Open → decompress。
+
+`Open` 签名加 `sm4Key []byte` 参数；`envelope.go` allow-list 允许 `sm4_gcm`。
+
+**密钥分发**：`SessionKeys` 新增 `SM4Key`（16B），`GenerateSessionKeys` 总生成，`AUTH_OK` 下发，client `recvAuthResult` 解析。
+
+### Negotiate 恢复响应
+
+SM4GCM 从"不响应未实现能力"恢复为真正协商选中。SM2CertAuth（mTLS）属传输层 TLS，依赖国密 TLS 栈（v2/RFC 8998），v1 无法实现，暂不响应。
+
+---
+
+## 九、ntls（TCP + TLCP 国密）传输层实现
+
+### 从 stub 到完整实现
+
+使用 pollux-go/tlcp（高层 `Listen`/`Dial`）+ pollux-go/cert（SM2 双证书加载，标准 `tls.LoadX509KeyPair` 不识别 SM2 曲线）。
+
+### 核心设计：单连接帧多路复用
+
+| 方面 | v1 (QUIC) | ntls (TCP+TLCP) |
+|------|-----------|-----------------|
+| 传输 | QUIC UDP 多流 | TCP + TLCP 单连接 |
+| 证书 | 单 X.509 | **双 SM2**（签名+加密） |
+| control/data | 分离 QUIC 流 | **同连接帧多路复用** |
+| 写并发 | controlMu（仅控制流） | writeMu（所有写） |
+| 流选择 | StreamPicker | 无（直接写连接） |
+| BATCH 处理 | 独立 goroutine（64 并发流） | 读循环内联（自然背压） |
+
+### 实现文件（~1800 行）
+
+| 文件 | 内容 | 行数 |
+|------|------|------|
+| `ntls/transport.go` | TLCP Config 双证书 + Listen/Dial + Server | ~240 |
+| `ntls/handler.go` | ConnectionHandler + 21 协议方法（从 v1 克隆适配） | 815 |
+| `ntls/client.go` | Client + Connect/SendBatch/Close | ~280 |
+| `ntls/handshake.go` | sendHello/recvHelloAck/sendAuth/recvAuthResult | ~150 |
+| `ntls/control.go` | readControlLoop + ACK/NACK/WINDOW 处理 | ~120 |
+
+### E2E 验证
+
+`TestE2E_NTLS_SendBatch`：TLCP 握手 + HELLO/AUTH + SendBatch + ACK 全链路通过。SM2 双证书来自 `testdata/ntls/`（pollux-go/test/cert）。
+
+### v2 状态
+
+v2（QUIC + RFC 8998 国密）因 pollux-go 缺少高层 quicgm.Listen/Dial API 而推迟。
+
+---
+
+## 十、架构审查与清理
+
+### 死代码清理
+
+| 清理项 | 位置 | 处理 |
+|--------|------|------|
+| `Policy.RequireToken` 死字段 | `core/session.go` | 删除（Negotiate 从不消费）|
+| `PipelineEventRouter` | `v1/router.go` | 删除（无生产调用，与 EnhancedRouter 重叠）|
+| v2/ntls stub wrapper | `client.go` | init 改为 NewClient 阶段直接返回 error（早失败），ntls 落地后恢复 |
+| `ServerConfig.NTLSAddr` 死字段 | `server.go` | 删除（只写不读），`WithNTLS(cfg)` 与 V1/V2 一致 |
+
+### 设计欠账修复
+
+| 欠账 | 修复 |
+|------|------|
+| Negotiate 响应未实现能力 | SM4GCM 实现后恢复响应；SM2CertAuth 注释推迟到 v2 |
+| `HelloMessage.Validate` 硬编码 version==1 | 移除版本校验（版本语义归上层 version.go 管理），使 core 消息结构可跨版本复用 |
+| `EnableV1` 默认 true 无关闭选项 | 新增 `WithoutV1()` 选项 |
+| 传输层无统一接口 | YAGNI——v2/ntls stub，待落地时按实际需求抽象 |
+
+### Code Review 发现（已修复）
+
+| 发现 | 严重度 | 修复 |
+|------|:---:|------|
+| SM4Key 在连接关闭时未清零（HMACKey 已清零，SM4Key 遗漏）| P1 | v1/handler.go + ntls/handler.go 加 SM4Key zeroization |
+| processBatch 中 `h.negotiated.HMACAlgo` 未做 nil 检查 | P2 | v1 + ntls 加防御性 nil 检查 |
+
+---
+
+## 十一、最终端到端吞吐数据汇总
+
+### v1 QUIC（localhost，gzip+HMAC+sonic 全开）
+
+| 场景 | events/s | allocs/op | 说明 |
+|------|:---:|:---:|------|
+| 解码 sink（1000 events/batch）| **125万** | 7,235 | sonic unmarshal 加速 |
+| RawEventSink 转发（1000 events/batch）| **133万** | 1,219 | 跳过 signalBatch 解码 |
+| 16 并发达 | **70万+** | — | sendMu 缩小后多核并行 |
+
+### ntls TLCP（localhost，HMAC 全开）
+
+E2E smoke 测试通过（TLCP 握手 + SendBatch + ACK）。性能 bench 待补（TLCP 加密开销不同于 QUIC TLS，预期吞吐低于 QUIC 但延迟更稳定）。
+
+### 微基准关键数据
+
+| 基准 | 值 | 说明 |
+|------|:---:|------|
+| `BuildGzip` 4KB | 25µs / 2KB / 7 allocs | gzip pool 复用 |
+| `OpenGzip` 4KB | 2.8µs / 11KB / 7 allocs | reader pool + 预分配 |
+| `BuildGzip` 1MiB | 1.3ms / 833 MB/s / 21 allocs | pool 生效，allocs 不随 payload 增长 |
+| `MarshalSignalBatch` 1k | 1002 allocs（sonic）/ 5001（标准）| sonic -80% |
+| `ReplayCache` 淘汰 | 720 ns/op（1万→百万恒定）| 链表 O(1) |
+| `Spool Put` | 188-236 ns/op（10k→500k 恒定）| 增量计数 O(1) |
+| `Inflight` 8→256 并发 | 312 ns/op / 0 allocs | atomic 化 |
+
 
