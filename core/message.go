@@ -2,7 +2,6 @@ package core
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 // HelloMessage is sent by the agent on connect (C→S).
@@ -18,12 +17,11 @@ type HelloMessage struct {
 }
 
 // Validate 检查HelloMessage的有效性。
+// 注意：不校验 Version 字段的具体取值——版本语义由上层（version.go ParseVersion/
+// handler 按协议版本）管理，使 core 的消息结构可被 v1/v2/ntls 复用而不冲突。
 func (m *HelloMessage) Validate() error {
 	if m.AgentID == "" {
 		return NewError(NumValidation, CodeValidation, "agent_id is required")
-	}
-	if m.Version != 1 {
-		return NewError(NumValidation, CodeValidation, fmt.Sprintf("version must be 1, got %d", m.Version))
 	}
 	return nil
 }
@@ -48,12 +46,10 @@ type HelloAckMessage struct {
 }
 
 // Validate 检查HelloAckMessage的有效性。
+// 注意：不校验 ServerVersion 的具体取值——版本语义由上层管理，使结构可跨版本复用。
 func (m *HelloAckMessage) Validate() error {
 	if m.SessionID == "" {
 		return NewError(NumValidation, CodeValidation, "session_id is required")
-	}
-	if m.ServerVersion != 1 {
-		return NewError(NumValidation, CodeValidation, "server_version must be 1")
 	}
 	return nil
 }

@@ -287,16 +287,18 @@ func Negotiate(clientCaps []string, policy Policy) NegotiateResult {
 		res.SelectedCapabilities = append(res.SelectedCapabilities, CapHMACSHA256)
 	}
 
-	// Encryption
-	if policy.EnableSM4GCM && offered[CapSM4GCM] {
-		res.Encryption = EncryptionSM4
-		res.SelectedCapabilities = append(res.SelectedCapabilities, CapSM4GCM)
-	}
-
-	// SM2 cert auth
-	if policy.EnableSM2CertAuth && offered[CapSM2CertAuth] {
-		res.SelectedCapabilities = append(res.SelectedCapabilities, CapSM2CertAuth)
-	}
+	// Encryption (SM4GCM) 与 SM2 证书认证尚未实现：envelope.Open 会拒绝非 none 加密，
+	// 协商选中这些能力会导致客户端按 SM4 加密发送、服务端却无法解密（NACK）。
+	// 因此即使 Policy.EnableSM4GCM / EnableSM2CertAuth 为 true 也不响应，避免协商到
+	// 无法兑现的能力。待 sm4_gcm / sm2_cert_auth 落地后恢复以下响应块：
+	//
+	// if policy.EnableSM4GCM && offered[CapSM4GCM] {
+	// 	res.Encryption = EncryptionSM4
+	// 	res.SelectedCapabilities = append(res.SelectedCapabilities, CapSM4GCM)
+	// }
+	// if policy.EnableSM2CertAuth && offered[CapSM2CertAuth] {
+	// 	res.SelectedCapabilities = append(res.SelectedCapabilities, CapSM2CertAuth)
+	// }
 
 	// Other capabilities
 	for _, cap := range []struct {

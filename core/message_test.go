@@ -35,17 +35,17 @@ func TestHelloMessageValidate(t *testing.T) {
 			wantErr: true,
 			errSub:  "agent_id is required",
 		},
+		// 版本校验已移至上层（version.go），Validate 不再校验 Version 取值，
+		// 使消息结构可跨 v1/v2/ntls 复用。以下用例验证非 1 版本不再报错：
 		{
-			name:    "invalid version",
+			name:    "non-v1 version accepted (version checked at upper layer)",
 			msg:     HelloMessage{AgentID: "test", Version: 2},
-			wantErr: true,
-			errSub:  "version must be 1",
+			wantErr: false,
 		},
 		{
-			name:    "zero version",
+			name:    "zero version accepted",
 			msg:     HelloMessage{AgentID: "test", Version: 0},
-			wantErr: true,
-			errSub:  "version must be 1",
+			wantErr: false,
 		},
 	}
 
@@ -96,11 +96,11 @@ func TestHelloAckMessageValidate(t *testing.T) {
 			wantErr: true,
 			errSub:  "session_id is required",
 		},
+		// 版本校验移至上层，非 1 的 ServerVersion 不再报错：
 		{
-			name:    "invalid server version",
+			name:    "non-v1 server version accepted",
 			msg:     HelloAckMessage{ServerVersion: 2, SessionID: "sess"},
-			wantErr: true,
-			errSub:  "server_version must be 1",
+			wantErr: false,
 		},
 	}
 

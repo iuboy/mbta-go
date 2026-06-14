@@ -188,15 +188,17 @@ func TestNegotiate(t *testing.T) {
 			},
 		},
 		{
-			name:       "client offers SM4 encryption",
+			// SM4GCM 尚未实现（Open 拒绝非 none 加密），Negotiate 即使 EnableSM4GCM=true
+			// 也不响应，避免协商到无法兑现的能力。
+			name:       "client offers SM4 encryption (not yet implemented, not selected)",
 			clientCaps: []string{CapCodecJSON, CapSM4GCM},
 			policy:     Policy{EnableSM4GCM: true},
 			wantResult: NegotiateResult{
-				SelectedCapabilities: []string{CapCodecJSON, CapSM4GCM},
+				SelectedCapabilities: []string{CapCodecJSON},
 				Codec:                CodecJSON,
 				Compression:          CompressionNone,
 				HMACAlgo:             HMACAlgoNone,
-				Encryption:           EncryptionSM4,
+				Encryption:           EncryptionNone,
 			},
 		},
 		{
@@ -235,11 +237,12 @@ func TestNegotiate(t *testing.T) {
 			},
 		},
 		{
-			name:       "client offers SM2 cert auth",
+			// SM2CertAuth 尚未实现，Negotiate 即使 EnableSM2CertAuth=true 也不响应。
+			name:       "client offers SM2 cert auth (not yet implemented, not selected)",
 			clientCaps: []string{CapCodecJSON, CapSM2CertAuth},
 			policy:     Policy{EnableSM2CertAuth: true},
 			wantResult: NegotiateResult{
-				SelectedCapabilities: []string{CapCodecJSON, CapSM2CertAuth},
+				SelectedCapabilities: []string{CapCodecJSON},
 				Codec:                CodecJSON,
 				Compression:          CompressionNone,
 				HMACAlgo:             HMACAlgoNone,

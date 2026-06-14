@@ -228,6 +228,15 @@ func (s *Server) initNTLSServer() error {
 
 // Server Options (functional options pattern)
 
+// WithoutV1 disables V1 (QUIC + TLS 1.3). V1 is enabled by default for backward
+// compatibility; use this option when only V2/NTLS is needed, to avoid意外拉起 v1 listener。
+func WithoutV1() ServerOption {
+	return func(sc *ServerConfig) error {
+		sc.EnableV1 = false
+		return nil
+	}
+}
+
 // WithV1 enables V1 support with custom QUIC configuration.
 func WithV1(cfg v1.QUICServerConfig) ServerOption {
 	return func(sc *ServerConfig) error {
