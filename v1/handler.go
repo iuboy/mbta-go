@@ -555,7 +555,6 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	// RawEventSink fast path：sink 实现该接口且客户端填了 events_count 时，
 	// 跳过 signalBatch 逐事件解码（省反射/map 分配，约 13 allocs/event）。
 	rawSink, _ := h.config.Sink.(core.RawEventSink)
-	var signalBatch core.SignalBatch
 	var signalBatchPtr *core.SignalBatch
 	var batchEvents int
 	if rawSink != nil && batchMsg.EventsCount > 0 {
@@ -566,22 +565,12 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 			return
 		}
 	} else {
-		// Decode SignalBatch from the batch payload
-		if err := json.Unmarshal(batchMsg.Batch, &signalBatch); err != nil {
-			h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "invalid_signal_batch", err.Error(), false)
+		sb, ok := h.decodeSignalBatch(&batchMsg)
+		if !ok {
 			return
 		}
-		if err := signalBatch.Validate(); err != nil {
-			h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "signal_validation", err.Error(), false)
-			return
-		}
-		if len(signalBatch.Signals) > maxBatchEvents {
-			h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "too_many_events",
-				fmt.Sprintf("event count %d exceeds limit %d", len(signalBatch.Signals), maxBatchEvents), false)
-			return
-		}
-		batchEvents = len(signalBatch.Signals)
-		signalBatchPtr = &signalBatch
+		signalBatchPtr = sb
+		batchEvents = len(sb.Signals)
 	}
 	batchBytes := int64(len(batchPayload))
 
@@ -619,6 +608,26 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, _ *quic.Stream, pa
 	// Process events
 	h.replay.Update(dedupKey, core.ReplayAccepted)
 	h.routeAndACK(ctx, dedupKey, &batchMsg, signalBatchPtr, batchEvents, batchBytes, rawSink)
+}
+
+// decodeSignalBatch 解码并校验 SignalBatch，失败时已发 NACK。
+// 返回 (signalBatch, true) 成功；失败返回 (nil, false)，调用方应直接 return。
+func (h *ConnectionHandler) decodeSignalBatch(batchMsg *core.BatchMessage) (*core.SignalBatch, bool) {
+	var sb core.SignalBatch
+	if err := json.Unmarshal(batchMsg.Batch, &sb); err != nil {
+		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "invalid_signal_batch", err.Error(), false)
+		return nil, false
+	}
+	if err := sb.Validate(); err != nil {
+		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "signal_validation", err.Error(), false)
+		return nil, false
+	}
+	if len(sb.Signals) > maxBatchEvents {
+		h.sendNack(batchMsg.Seq, batchMsg.ChunkID, "too_many_events",
+			fmt.Sprintf("event count %d exceeds limit %d", len(sb.Signals), maxBatchEvents), false)
+		return nil, false
+	}
+	return &sb, true
 }
 
 // verifyEnvelopeAlgo 强制 envelope 只能使用协商期内选定的压缩/加密算法。

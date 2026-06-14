@@ -114,7 +114,7 @@ type BatchMessage struct {
 	Tag         string          `json:"tag,omitempty"`
 	Source      string          `json:"source,omitempty"`
 	EventsCount int             `json:"events_count,omitempty"` // 事件数，供服务端 RawEventSink 快速路径省去 signalBatch 解码
-	Batch       json.RawMessage `json:"batch"`                   // 原始 SignalBatch JSON（延迟解码）
+	Batch       json.RawMessage `json:"batch"`                  // 原始 SignalBatch JSON（延迟解码）
 }
 
 // Validate 检查BatchMessage的有效性。
