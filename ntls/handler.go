@@ -96,10 +96,13 @@ func (h *ConnectionHandler) HandleConnection(ctx context.Context) error {
 			slog.Debug("connection close error", "session", h.sessionID, "error", err)
 		}
 
-		// 2. 此时已无并发 goroutine 读 keys，安全清除会话密钥。
+		// 2. 此时已无并发 goroutine 读 keys，安全清除会话密钥（含 HMAC + SM4）。
 		if h.keys != nil {
 			for i := range h.keys.HMACKey {
 				h.keys.HMACKey[i] = 0
+			}
+			for i := range h.keys.SM4Key {
+				h.keys.SM4Key[i] = 0
 			}
 			h.keys = nil
 		}
@@ -421,7 +424,7 @@ func (h *ConnectionHandler) processBatch(ctx context.Context, payload []byte) {
 	}
 
 	// Verify HMAC if enabled
-	if h.negotiated.HMACAlgo != core.HMACAlgoNone && h.keys != nil {
+	if h.negotiated != nil && h.negotiated.HMACAlgo != core.HMACAlgoNone && h.keys != nil {
 		if !core.VerifyHMAC(h.keys.HMACKey, &env) {
 			h.sendNack(env.Seq, env.ChunkID, "hmac_mismatch", "HMAC verification failed", false)
 			if h.config.Metrics != nil {
