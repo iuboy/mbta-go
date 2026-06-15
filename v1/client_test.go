@@ -1,11 +1,30 @@
 package v1
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"testing"
 
 	"github.com/iuboy/mbta-go/core"
 )
+
+// TestWriteFrameCtx_AlreadyCancelled 验证 writeFrameCtx 在 ctx 已取消时立即返回、
+// 不触碰 stream（stream 故意 nil，误访问会 panic）。deadline-触发路径与 ntls.writeFrameCtx
+// 同构（后者已在 ntls/client_test.go 用 net.Pipe 验证）。
+func TestWriteFrameCtx_AlreadyCancelled(t *testing.T) {
+	w := &quicStreamWrapper{} // stream 故意 nil：实现误访问会 panic
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := w.writeFrameCtx(ctx, core.TypeBatch, core.FlagData, []byte("x"))
+	if err == nil {
+		t.Fatal("expected error on already-cancelled ctx")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
 
 func TestNewClient(t *testing.T) {
 	cfg := ClientConfig{

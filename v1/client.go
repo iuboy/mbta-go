@@ -113,13 +113,38 @@ const ackQueueSize = 1024
 const defaultStreamCount = 4
 
 // quicStreamWrapper adapts *quic.Stream to the DataStream interface.
+//
+// mu 串行化 SetWriteDeadline/Write/恢复 三步，使调用方 ctx 能安全绑定到写。
+// SetWriteDeadline 是 per-quic.Stream 的，若无 mu，同一 stream 上多个并发发送者
+// 会互相覆盖对方的 deadline。quic.Stream.Write 内部已按流串行（单流一发送缓冲 + 流控），
+// 故本 mu 不引入 QUIC 之外的串行点，几乎零损耗。
 type quicStreamWrapper struct {
 	stream *quic.Stream
 	idx    int
+	mu     sync.Mutex
 }
 
 func (w *quicStreamWrapper) Index() int                  { return w.idx }
 func (w *quicStreamWrapper) Write(p []byte) (int, error) { return w.stream.Write(p) }
+
+// writeFrameCtx 写一帧并受调用方 ctx 约束（与 ntls.writeFrameCtx 同构）。
+// 锁内按 ctx.Deadline 设 SetWriteDeadline，写完恢复（time.Time{}）。
+// 语义：ctx 已取消进入即返回；带 Deadline 超时让 Write 失败；仅 WithCancel 无 deadline 不中断阻塞写。
+// 超时写失败可能留下半帧，调用方收到错误后应视为连接损坏（Close 重连）。
+func (w *quicStreamWrapper) writeFrameCtx(ctx context.Context, typ uint16, flags byte, payload []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if dl, ok := ctx.Deadline(); ok {
+		if err := w.stream.SetWriteDeadline(dl); err != nil {
+			return core.WrapError(core.NumStream, core.CodeStream, "set write deadline", err)
+		}
+		defer w.stream.SetWriteDeadline(time.Time{}) // 恢复，避免影响后续无 ctx 的写
+	}
+	return core.Write(w, typ, flags, payload)
+}
 
 // NewClient creates a new MBTA client.
 func NewClient(cfg ClientConfig) (*Client, error) {
@@ -294,12 +319,10 @@ func (c *Client) openDataStreams(ctx context.Context) (StreamPicker, error) {
 // SendBatch sends a SignalBatch through the MBTA protocol.
 // Returns the chunkID assigned to this batch for ACK correlation, or an error.
 //
-// ctx 当前为保留参数（尚未约束网络写）。QUIC 的网络写在 quic.Stream 上阻塞，
-// 若要按调用方 ctx 中断需用 SetWriteDeadline，但该 deadline 是 per-stream 的——
-// PickStrategy="single" 下多个发送者写同一 stream 会互相覆盖 deadline，存在并发问题；
-// "hash"/多流策略下写者分流到不同 stream，理论上可安全绑定（待实现）。
-// 因此 v1 暂不绑定 ctx，调用方若需超时应自行管理连接级生命周期。
-// （对比：ntls 单连接写由 writeMu 串行，已实现 ctx→deadline 绑定，见 ntls.writeFrameCtx。）
+// ctx 约束网络写：BATCH 写经 quicStreamWrapper 的 per-stream mu 安全绑定 SetWriteDeadline，
+// 对端卡死时调用方超时能及时收到写错误。ctx 已取消则进入即返回。
+// 注意：超时导致的写失败可能留下半帧、破坏对端帧同步，调用方收到错误后应 Close() 并重连。
+// 仅 WithCancel（无 deadline）的 ctx 不会中断阻塞写。
 //
 // 锁粒度（P2）：sendMu 仅保护「window 检查 + 取 seq/chunkID + inflight/pending 登记」
 // 这一小段，保证并发调用不会同时通过窗口后超限。重的 CPU 工作（marshal signalBatch、
@@ -357,7 +380,7 @@ func (c *Client) sendTracked(ctx context.Context, signalBatch *core.SignalBatch,
 	batchBytes := int64(len(batchPayload))
 
 	// --- 锁外：Build envelope（gzip+HMAC）+ marshal env + 选流 + 网络写 ---
-	if writeErr := c.buildAndSend(seq, chunkID, tag, source, batchPayload); writeErr != nil {
+	if writeErr := c.buildAndSend(ctx, seq, chunkID, tag, source, batchPayload); writeErr != nil {
 		// 写失败：回滚 inflight/pending，但保留 spool 条目（at-least-once，重连重发）。
 		c.inflight.Remove(batchEvents, batchBytes)
 		if _, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
@@ -530,7 +553,7 @@ func buildBatchPayload(seq uint64, chunkID, tag, source string, eventsCount int,
 
 // buildAndSend 在锁外完成 envelope 构建（gzip+HMAC）、envelope marshal、流选择与网络写。
 // batchPayload 由 reserveInflight 已构造（手写），此处直接 Build，不再重复 marshal。
-func (c *Client) buildAndSend(seq uint64, chunkID, tag, source string, batchPayload []byte) error {
+func (c *Client) buildAndSend(ctx context.Context, seq uint64, chunkID, tag, source string, batchPayload []byte) error {
 	// batch 仅用于 picker.Pick 的 tag+source 哈希，不含 Batch RawMessage，不 marshal。
 	batch := core.BatchMessage{
 		Seq:     seq,
@@ -574,6 +597,14 @@ func (c *Client) buildAndSend(seq uint64, chunkID, tag, source string, batchPayl
 		return core.WrapError(core.NumBatch, core.CodeBatch, "pick stream", err)
 	}
 
+	// ctx 约束网络写：quicStreamWrapper 经 per-stream mu 安全绑定 SetWriteDeadline
+	// （对端卡死时调用方超时及时返回）。非 *quicStreamWrapper（test mock）回退普通 Write。
+	if w, ok := ds.(*quicStreamWrapper); ok {
+		if err := w.writeFrameCtx(ctx, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
+			return core.WrapError(core.NumBatch, core.CodeBatch, "write batch", err)
+		}
+		return nil
+	}
 	if err := core.Write(ds, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
 		return core.WrapError(core.NumBatch, core.CodeBatch, "write batch", err)
 	}
