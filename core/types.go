@@ -36,7 +36,7 @@ const (
 	FlagControl     byte = 0x02 // 控制面消息
 	FlagData        byte = 0x04 // 数据面消息
 	FlagMoreFollows byte = 0x08 // 逻辑多片消息的一片（§3）
-	FlagNoCRC       byte = 0x10 // 置位=省略 CRC16（AEAD 下默认置位）
+	FlagReserved4   byte = 0x10 // reserved（MUST NOT set，v2 预留）
 	FlagCoalesced   byte = 0x20 // 多条同类型小消息合并打包（§3.2）
 
 	FlagControlDataMask byte = 0x06 // Control 与 Data 互斥校验

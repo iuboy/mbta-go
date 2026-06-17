@@ -2,7 +2,6 @@ package core
 
 import (
 	"bytes"
-	"encoding/binary"
 	"io"
 	"strings"
 	"testing"
@@ -10,7 +9,6 @@ import (
 	mbtatest "github.com/iuboy/mbta-go/testing"
 )
 
-// TestWriteFrame tests the Write function with various configurations (r2 wire).
 func TestWriteFrame(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -25,7 +23,6 @@ func TestWriteFrame(t *testing.T) {
 		{name: "valid BATCH frame with envelope flag", typ: TypeBatch, flags: FlagData | FlagEnvelope, channelID: ChannelData, payload: []byte("batch data")},
 		{name: "valid DATAGRAM frame", typ: TypeDatagram, flags: FlagData | FlagEnvelope, channelID: ChannelData, payload: []byte("dg")},
 		{name: "empty payload", typ: TypeHello, flags: FlagControl, channelID: ChannelControl, payload: []byte{}},
-		{name: "NoCRC frame omits crc16", typ: TypeHello, flags: FlagControl | FlagNoCRC, channelID: ChannelControl, payload: []byte("x")},
 		{name: "reserved FlowClass=3", typ: TypeHello, flags: FlagControl | (3 << FlagFlowClassShift), channelID: ChannelControl, payload: []byte("t"), wantErr: true, errSubstr: "FlowClass"},
 		{name: "Control and Data both set", typ: TypeHello, flags: FlagControl | FlagData, channelID: ChannelControl, payload: []byte("t"), wantErr: true, errSubstr: "exclusive"},
 		{name: "MoreFollows and Coalesced both set", typ: TypeBatch, flags: FlagData | FlagMoreFollows | FlagCoalesced, channelID: ChannelData, payload: []byte("t"), wantErr: true, errSubstr: "exclusive"},
@@ -48,7 +45,6 @@ func TestWriteFrame(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Write() unexpected error: %v", err)
 			}
-
 			written := buf.Bytes()
 			if len(written) < FixedHeaderSz {
 				t.Fatalf("wrote %d bytes, want >= %d", len(written), FixedHeaderSz)
@@ -72,7 +68,6 @@ func TestWriteFrame(t *testing.T) {
 	}
 }
 
-// TestReadFrame tests Read with valid and malformed frames.
 func TestReadFrame(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -92,20 +87,8 @@ func TestReadFrame(t *testing.T) {
 				mbtatest.AssertEqual(t, f.Header.Type, TypeHello, "type")
 				mbtatest.AssertEqual(t, f.Header.ChannelID, ChannelControl, "channelID")
 				mbtatest.AssertEqual(t, f.Header.Length, uint32(5), "length")
-				mbtatest.AssertEqual(t, f.Header.CRCPresent, true, "crcPresent")
 				if !bytes.Equal(f.Payload, []byte("hello")) {
 					t.Errorf("payload = %q, want %q", f.Payload, "hello")
-				}
-			},
-		},
-		{
-			name:   "valid NoCRC frame omits crc16",
-			frame:  buildTestFrame(TypeHello, FlagControl|FlagNoCRC, ChannelControl, []byte("hello")),
-			limits: DefaultLimits(),
-			check: func(t *testing.T, f Frame) {
-				mbtatest.AssertEqual(t, f.Header.CRCPresent, false, "crcPresent")
-				if !bytes.Equal(f.Payload, []byte("hello")) {
-					t.Errorf("payload mismatch")
 				}
 			},
 		},
@@ -121,7 +104,6 @@ func TestReadFrame(t *testing.T) {
 		{name: "unsupported version", frame: buildTestFrameWithVersion(0xFF, TypeHello, FlagControl, ChannelControl, []byte("t")), limits: DefaultLimits(), wantErr: true, errSubstr: "unsupported version"},
 		{name: "reserved FlowClass", frame: buildTestFrame(TypeHello, FlagControl|(3<<FlagFlowClassShift), ChannelControl, []byte("t")), limits: DefaultLimits(), wantErr: true, errSubstr: "FlowClass"},
 		{name: "payload too large", frame: buildTestFrameWithLength(TypeHello, FlagControl, ChannelControl, MaxPayloadSize+1), limits: DefaultLimits(), wantErr: true, errSubstr: "payload too large"},
-		{name: "crc16 mismatch", frame: buildTestFrameWithCRC(TypeHello, FlagControl, ChannelControl, []byte("t"), 0xBEEF), limits: DefaultLimits(), wantErr: true, errSubstr: "crc16 mismatch"},
 		{name: "large payload within limit", frame: buildTestFrame(TypeBatch, FlagData, ChannelData, make([]byte, 1<<20)), limits: DefaultLimits()},
 		{name: "custom limit smaller than payload", frame: buildTestFrame(TypeBatch, FlagData, ChannelData, make([]byte, 1024)), limits: Limits{MaxPayloadSize: 512}, wantErr: true, errSubstr: "payload too large"},
 		{name: "incomplete header", frame: []byte{'M', 'B', 'T', 'A'}, limits: DefaultLimits(), wantErr: true, errSubstr: "read header"},
@@ -148,7 +130,6 @@ func TestReadFrame(t *testing.T) {
 	}
 }
 
-// TestValidateFlags tests ValidateFlags (r2 rules: Control/Data exclusive, FlowClass!=3, MoreFollows/Coalesced exclusive).
 func TestValidateFlags(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -157,7 +138,7 @@ func TestValidateFlags(t *testing.T) {
 	}{
 		{name: "FlagControl only", flags: FlagControl, wantErr: false},
 		{name: "FlagData only", flags: FlagData, wantErr: false},
-		{name: "FlagControl | Envelope | NoCRC", flags: FlagControl | FlagEnvelope | FlagNoCRC, wantErr: false},
+		{name: "FlagControl | Envelope", flags: FlagControl | FlagEnvelope, wantErr: false},
 		{name: "FlagData | MoreFollows", flags: FlagData | FlagMoreFollows, wantErr: false},
 		{name: "FlagControl | Coalesced", flags: FlagControl | FlagCoalesced, wantErr: false},
 		{name: "FlowClass critical", flags: FlagControl | FlowClassCritical, wantErr: false},
@@ -180,7 +161,6 @@ func TestValidateFlags(t *testing.T) {
 	}
 }
 
-// TestWriteReadRoundTrip tests that Write and Read are inverses.
 func TestWriteReadRoundTrip(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -192,7 +172,6 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		{name: "HELLO", typ: TypeHello, flags: FlagControl, channelID: ChannelControl, payload: []byte("agent-id-123")},
 		{name: "BATCH envelope", typ: TypeBatch, flags: FlagData | FlagEnvelope, channelID: ChannelData, payload: []byte(`{"signals":[]}`)},
 		{name: "ACK", typ: TypeAck, flags: FlagControl, channelID: ChannelControl, payload: []byte("chunk-123:durable")},
-		{name: "NoCRC frame", typ: TypeBatch, flags: FlagData | FlagNoCRC, channelID: ChannelData, payload: []byte("no-crc")},
 		{name: "empty payload", typ: TypeWindow, flags: FlagControl, channelID: ChannelControl, payload: []byte{}},
 		{name: "large payload", typ: TypeBatch, flags: FlagData, channelID: ChannelData, payload: make([]byte, 100*1024)},
 	}
@@ -247,7 +226,7 @@ func TestHeaderConstants(t *testing.T) {
 func TestFlagConstants(t *testing.T) {
 	want := map[byte]byte{
 		FlagEnvelope: 0x01, FlagControl: 0x02, FlagData: 0x04,
-		FlagMoreFollows: 0x08, FlagNoCRC: 0x10, FlagCoalesced: 0x20,
+		FlagMoreFollows: 0x08, FlagCoalesced: 0x20,
 	}
 	for flag, wantVal := range want {
 		if flag != wantVal {
@@ -259,9 +238,8 @@ func TestFlagConstants(t *testing.T) {
 	}
 }
 
-// ===== Test Helpers (r2 wire: 8B fixed prefix + varint len + optional CRC16) =====
+// ===== Test Helpers =====
 
-// buildTestFrame constructs a valid r2 frame. CRC16 included unless FlagNoCRC set.
 func buildTestFrame(typ uint8, flags byte, channelID uint8, payload []byte) []byte {
 	buf := &bytes.Buffer{}
 	buf.WriteString(Magic)
@@ -270,11 +248,6 @@ func buildTestFrame(typ uint8, flags byte, channelID uint8, payload []byte) []by
 	buf.WriteByte(typ)
 	buf.WriteByte(channelID)
 	writeVarintBuf(buf, uint64(len(payload)))
-	if flags&FlagNoCRC == 0 {
-		var crc [2]byte
-		binary.BigEndian.PutUint16(crc[:], crc16MBTA(payload))
-		buf.Write(crc[:])
-	}
 	buf.Write(payload)
 	return buf.Bytes()
 }
@@ -291,7 +264,6 @@ func buildTestFrameWithVersion(version byte, typ uint8, flags byte, channelID ui
 	return b
 }
 
-// buildTestFrameWithLength writes a frame declaring an arbitrary length (no payload).
 func buildTestFrameWithLength(typ uint8, flags byte, channelID uint8, length uint32) []byte {
 	buf := &bytes.Buffer{}
 	buf.WriteString(Magic)
@@ -300,22 +272,6 @@ func buildTestFrameWithLength(typ uint8, flags byte, channelID uint8, length uin
 	buf.WriteByte(typ)
 	buf.WriteByte(channelID)
 	writeVarintBuf(buf, uint64(length))
-	// 故意不写 payload，触发 read payload 失败（length 超限会在读 payload 前已被 limits 拦截）。
-	return buf.Bytes()
-}
-
-func buildTestFrameWithCRC(typ uint8, flags byte, channelID uint8, payload []byte, crc uint16) []byte {
-	buf := &bytes.Buffer{}
-	buf.WriteString(Magic)
-	buf.WriteByte(Version)
-	buf.WriteByte(flags)
-	buf.WriteByte(typ)
-	buf.WriteByte(channelID)
-	writeVarintBuf(buf, uint64(len(payload)))
-	var crcB [2]byte
-	binary.BigEndian.PutUint16(crcB[:], crc)
-	buf.Write(crcB[:])
-	buf.Write(payload)
 	return buf.Bytes()
 }
 
@@ -325,7 +281,6 @@ func writeVarintBuf(buf *bytes.Buffer, v uint64) {
 	buf.Write(tmp[:n])
 }
 
-// TestReadFromPartialStream tests reading from a chunked stream.
 func TestReadFromPartialStream(t *testing.T) {
 	payload := []byte("test payload data")
 	frameData := buildTestFrame(TypeBatch, FlagData, ChannelData, payload)
@@ -359,7 +314,6 @@ func (cr *chunkReader) Read(p []byte) (int, error) {
 	return copied, nil
 }
 
-// TestVarintRoundTrip ensures putVarint/readVarint are inverses and reject non-canonical encodings.
 func TestVarintRoundTrip(t *testing.T) {
 	values := []uint64{0, 1, 127, 128, 16383, 16384, 1 << 20, uint64(MaxPayloadSize)}
 	for _, v := range values {
@@ -378,9 +332,7 @@ func TestVarintRoundTrip(t *testing.T) {
 	}
 }
 
-// TestVarintRejectsNonCanonical ensures non-shortest varint encodings are rejected.
 func TestVarintRejectsNonCanonical(t *testing.T) {
-	// 值 1 用 2 字节编码（0x81 0x00）是非最短。
 	_, _, err := readVarint(bytes.NewReader([]byte{0x81, 0x00}))
 	if err == nil {
 		t.Error("readVarint should reject non-canonical encoding")

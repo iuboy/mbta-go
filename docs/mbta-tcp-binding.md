@@ -51,7 +51,7 @@ MBTA framed stream（HELLO/HELLO_ACK/AUTH/...）
 
 ### 3.1 帧格式
 
-完全遵循 core §2（8B `"MBTA"` 定长前缀 + varint Length + 可选 CRC16 + Payload）。本 binding 无增改。
+完全遵循 core §2（8B `"MBTA"` 定长前缀 + varint Length + Payload）。本 binding 无增改。无帧层 CRC（完整性由 AEAD 保证）。
 
 ### 3.2 Channel 语义（TCP 无 QUIC stream）
 
@@ -70,7 +70,7 @@ TCP 是连续字节流，接收端 MUST：
 2. 拒绝超限 Length（> `max_frame_payload_bytes`）；
 3. 处理短读（payload 未读完时 drain 剩余声明字节，维持帧边界，core §2.3）；
 4. 处理半开连接（对端 RST/FIN 异常）；
-5. 校验 CRC16（当 `NoCRC=0`；AEAD 传输下默认 `NoCRC=1`）。
+
 
 ---
 
@@ -127,7 +127,7 @@ TCP 是连续字节流，接收端 MUST：
 
 - TLS 1.3 / TLCP 握手测试（含双证书验证）；
 - TCP 拆包/粘包/短读/半开连接测试；
-- 超大 Length、CRC16 错误防护测试；
+- 超大 Length 防护测试；
 - channel 多路复用（control + data 帧交替，不交错）；
 - 写侧串行化（并发发送者帧不交错）；
 - HELLO/AUTH/BATCH/ACK/NACK/PARTIAL_ACK/WINDOW/THROTTLE 端到端；

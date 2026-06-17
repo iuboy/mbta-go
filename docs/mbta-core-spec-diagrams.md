@@ -18,7 +18,6 @@
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                    Length (varint, 1–5B)             | ...   |  Offset 8
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|              CRC16 (optional, Flags.NoCRC=0)          |       |  仅当 NoCRC=0
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                                               |
 ~                          Payload                              ~
@@ -34,10 +33,9 @@
 | Type | 6 | 1B | uint8，消息类型（§3） |
 | ChannelID | 7 | 1B | 0=control, ≥1=data |
 | Length | 8 | varint | payload 字节数（LEB128，1–5B） |
-| CRC16 | 8+v | 0/2B | IEEE CRC-16/CCITT-FALSE，大端（仅 NoCRC=0 时存在） |
-| Payload | 8+v(+2) | Length | 消息内容 |
+| Payload | 8+v | Length | 消息内容 |
 
-**最小帧**：9B（8B 定长前缀 + 1B varint Length=0 + 无 CRC + 空 payload）。
+**最小帧：9B（8B 定长前缀 + 1B varint Length=0 + 空 payload）。**
 
 ### 1.2 Flags 位定义（§3）
 
@@ -48,7 +46,7 @@
      └──┴──┴──┴──┴──┴──┴──┴──┘
       FlowClass   │    │   │   │   │
       (2 bit)     │    │   │   │   │
-                 Coal  NoCRC MF  Dat Ctl Env
+                 Coal  Rsv4  MF  Dat Ctl Env
 ```
 
 | Bit | 掩码 | 名称 | 说明 |
@@ -57,7 +55,7 @@
 | 1 | 0x02 | Control | 控制面消息 |
 | 2 | 0x04 | Data | 数据面消息（与 Control 互斥） |
 | 3 | 0x08 | MoreFollows | 逻辑多片消息（§3） |
-| 4 | 0x10 | NoCRC | 置位=省略 CRC16（AEAD 下默认置位） |
+| 4 | 0x10 | Reserved | MUST NOT set（v2 预留） |
 | 5 | 0x20 | Coalesced | 多条同类型小消息合并打包 |
 | 6–7 | 0xC0 | FlowClass | 00=normal, 01=best-effort, 10=critical, 11=reserved(MUST 拒绝) |
 
