@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/hmac"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -153,13 +154,13 @@ func Open(env *SecureEnvelope, aeadKey []byte) ([]byte, error) {
 }
 
 // VerifyMAC 用给定 HMAC key 校验 envelope 的 MAC。
-// 通过 constant-time 比较防止时序侧信道。MUST 在 Open 前调用。
+// 使用 hmac.Equal（constant-time）比较 MAC，防止时序侧信道。MUST 在 Open 前调用。
 func VerifyMAC(hmacKey []byte, env *SecureEnvelope) (bool, error) {
 	want, err := canonicalMAC(env.CipherSuite, hmacKey, env)
 	if err != nil {
 		return false, err
 	}
-	return bytes.Equal(env.Mac, want), nil // bytes.Equal 是 constant-time for []byte
+	return hmac.Equal(env.Mac, want), nil
 }
 
 // canonicalMAC 计算 HMAC over env 的 canonical（deterministic）wire bytes。
