@@ -87,13 +87,9 @@ func TestE2E_NTLS_SendBatch(t *testing.T) {
 	}
 	defer client.Close()
 
-	batchJSON := []byte(`{"signals":[{"signal_type":"log","body":"hello ntls e2e"}]}`)
-	var batch core.SignalBatch
-	if err := core.FastUnmarshal(batchJSON, &batch); err != nil {
-		t.Fatalf("unmarshal batch: %v", err)
-	}
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "hello ntls e2e"}}}
 
-	chunkID, err := client.SendBatch(ctx, &batch, "tag", "source")
+	chunkID, err := client.SendBatch(ctx, sb, "tag", "source")
 	if err != nil {
 		t.Fatalf("SendBatch: %v", err)
 	}
@@ -156,13 +152,9 @@ func TestE2E_MBTATLS_SendBatch(t *testing.T) {
 	}
 	defer client.Close()
 
-	batchJSON := []byte(`{"signals":[{"signal_type":"log","body":"hello mbta-tls e2e"}]}`)
-	var batch core.SignalBatch
-	if err := core.FastUnmarshal(batchJSON, &batch); err != nil {
-		t.Fatalf("unmarshal batch: %v", err)
-	}
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "hello mbta-tls e2e"}}}
 
-	chunkID, err := client.SendBatch(ctx, &batch, "tag", "source")
+	chunkID, err := client.SendBatch(ctx, sb, "tag", "source")
 	if err != nil {
 		t.Fatalf("SendBatch: %v", err)
 	}

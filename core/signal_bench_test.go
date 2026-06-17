@@ -28,7 +28,7 @@ func BenchmarkMarshalSignalBatch(b *testing.B) {
 		b.Run(scaleName(n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := FastMarshal(batch); err != nil {
+				if _, err := MarshalSignalBatch(batch); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -39,7 +39,7 @@ func BenchmarkMarshalSignalBatch(b *testing.B) {
 func BenchmarkUnmarshalSignalBatch(b *testing.B) {
 	for _, n := range []int{100, 1000, 10000} {
 		batch := makeBenchBatch(n)
-		data, _ := FastMarshal(batch)
+		data, _ := MarshalSignalBatch(batch)
 		b.Run(scaleName(n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {

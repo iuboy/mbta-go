@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -568,8 +567,8 @@ func (h *CoreHandler) resolveBatchEvents(batchMsg *corepb.BatchMessage) (int, *c
 }
 
 func (h *CoreHandler) decodeSignalBatch(batchMsg *corepb.BatchMessage) (*core.SignalBatch, bool) {
-	var sb core.SignalBatch
-	if err := core.FastUnmarshal(batchMsg.GetBatch(), &sb); err != nil {
+	sb, err := core.UnmarshalSignalBatch(batchMsg.GetBatch())
+	if err != nil {
 		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "invalid_signal_batch", err.Error(), false)
 		return nil, false
 	}
@@ -582,7 +581,7 @@ func (h *CoreHandler) decodeSignalBatch(batchMsg *corepb.BatchMessage) (*core.Si
 			fmt.Sprintf("event count %d exceeds limit %d", len(sb.Signals), maxBatchEvents), false)
 		return nil, false
 	}
-	return &sb, true
+	return sb, true
 }
 
 // verifyEnvelopeAlgo 强制 envelope 使用协商算法。返回 true 表示已发 NACK，调用方中止。
@@ -606,7 +605,7 @@ func (h *CoreHandler) routeAndACK(ctx context.Context, dedupKey string, batchMsg
 
 	if h.config.Sink != nil {
 		if rawSink, ok := h.config.Sink.(core.RawEventSink); ok && signalBatch == nil {
-			result, err := rawSink.OnRawBatch(ctx, h.agentID, batchEvents, json.RawMessage(batchMsg.GetBatch()))
+			result, err := rawSink.OnRawBatch(ctx, h.agentID, batchEvents, batchMsg.GetBatch())
 			if err != nil {
 				slog.Warn("raw routing failed", "error", err)
 			} else if h.applyRouteResult(ctx, result, dedupKey, &ackMode) {

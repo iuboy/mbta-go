@@ -3,7 +3,6 @@ package conformance
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -117,7 +116,7 @@ func TestCoreHandler_Delivery(t *testing.T) {
 
 	// 构造 BATCH：SignalBatch(JSON) → BatchMessage(proto) → SecureEnvelope → 帧
 	chunkID := core.NewChunkID()
-	batchJSON := []byte(`{"signals":[{"signal_type":"log","body":"hi"}]}`)
+	batchJSON := makeSignalBatch("hi")
 	batchMsg := &corepb.BatchMessage{
 		Seq:         1,
 		ChunkId:     chunkID.Bytes(),
@@ -177,7 +176,7 @@ func TestCoreHandler_Delivery(t *testing.T) {
 func TestCoreHandler_ReplayDedup(t *testing.T) {
 	tr, keys, cs := doHandshake(t, nil)
 
-	batchJSON := []byte(`{"signals":[{"signal_type":"log","body":"hi"}]}`)
+	batchJSON := makeSignalBatch("hi")
 	chunkID := core.NewChunkID()
 	buildEnv := func() []byte {
 		batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), Batch: batchJSON}
@@ -219,7 +218,7 @@ func (s *mockRawSink) OnSignalBatchWithResult(_ context.Context, _ string, _ *co
 	return &core.RouteResult{Status: core.ACKStatusAccepted}, nil
 }
 func (s *mockRawSink) OnPressure(_ string) core.PressureState { return core.PressureNormal }
-func (s *mockRawSink) OnRawBatch(_ context.Context, _ string, eventsCount int, _ json.RawMessage) (*core.RouteResult, error) {
+func (s *mockRawSink) OnRawBatch(_ context.Context, _ string, eventsCount int, _ []byte) (*core.RouteResult, error) {
 	s.events.Add(int64(eventsCount))
 	return &core.RouteResult{Status: core.ACKStatusAccepted}, nil
 }
@@ -234,7 +233,7 @@ func TestCoreHandler_Datagram(t *testing.T) {
 		Seq:         1,
 		ChunkId:     chunkID.Bytes(),
 		EventsCount: 1,
-		Batch:       []byte(`{"signals":[{"signal_type":"log","body":"dg"}]}`),
+		Batch:       makeSignalBatch("dg"),
 	}
 	dgPayload, err := core.Encode(dgMsg)
 	if err != nil {
@@ -322,7 +321,7 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 		Seq:         1,
 		ChunkId:     chunkID.Bytes(),
 		EventsCount: 1,
-		Batch:       []byte(`{"signals":[{"signal_type":"log","body":"0rtt"}]}`),
+		Batch:       makeSignalBatch("0rtt"),
 	}
 	batchPayload, _ := core.Encode(batchMsg)
 	params := core.BuildParams{
@@ -398,7 +397,7 @@ func TestCoreHandler_UnknownCapabilityRejected(t *testing.T) {
 func TestCoreHandler_HmacTampered(t *testing.T) {
 	tr, keys, cs := doHandshake(t, nil)
 	chunkID := core.NewChunkID()
-	batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 1, Batch: []byte(`{"signals":[{"signal_type":"log","body":"x"}]}`)}
+	batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 1, Batch: makeSignalBatch("x")}
 	bp, _ := core.Encode(batchMsg)
 	params := core.BuildParams{
 		SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
@@ -431,7 +430,7 @@ func TestCoreHandler_BatchTooManyEvents(t *testing.T) {
 	sink := &mockRawSink{}
 	tr, keys, cs := doHandshake(t, sink)
 	chunkID := core.NewChunkID()
-	batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 10001, Batch: []byte(`{"signals":[]}`)}
+	batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 10001, Batch: makeSignalBatch("x")}
 	bp, _ := core.Encode(batchMsg)
 	params := core.BuildParams{
 		SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
@@ -489,4 +488,13 @@ func TestCoreHandler_PartialAckCapability(t *testing.T) {
 	if !found {
 		t.Error("partial_ack should be in selected capabilities when both sides support it")
 	}
+}
+
+// makeSignalBatch creates a proto-encoded SignalBatch with one log signal.
+func makeSignalBatch(body string) []byte {
+	sb := &core.SignalBatch{
+		Signals: []*core.SignalRecord{{SignalType: "log", Body: body}},
+	}
+	data, _ := core.MarshalSignalBatch(sb)
+	return data
 }

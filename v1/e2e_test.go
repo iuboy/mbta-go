@@ -88,13 +88,9 @@ func TestE2E_Quic_SendBatch(t *testing.T) {
 	}
 	defer client.Close()
 
-	batchJSON := []byte(`{"signals":[{"signal_type":"log","body":"hello e2e"}]}`)
-	var batch core.SignalBatch
-	if err := core.FastUnmarshal(batchJSON, &batch); err != nil {
-		t.Fatalf("unmarshal batch: %v", err)
-	}
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "hello e2e"}}}
 
-	chunkID, err := client.SendBatch(ctx, &batch, "tag", "source")
+	chunkID, err := client.SendBatch(ctx, sb, "tag", "source")
 	if err != nil {
 		t.Fatalf("SendBatch: %v", err)
 	}

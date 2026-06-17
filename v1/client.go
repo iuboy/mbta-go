@@ -352,7 +352,7 @@ func (c *Client) sendTracked(ctx context.Context, signalBatch *core.SignalBatch,
 		return "", fmt.Errorf("%w, retry after %v", ErrThrottled, c.throttle.WaitDuration())
 	}
 
-	batchJSON, err := core.FastMarshal(signalBatch)
+	batchJSON, err := core.MarshalSignalBatch(signalBatch)
 	if err != nil {
 		return "", core.WrapError(core.NumBatch, core.CodeBatch, "marshal signal batch", err)
 	}
@@ -479,7 +479,7 @@ func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEven
 	if batchEvents > 0 {
 		batchMsg.EventsCount = int32(batchEvents)
 	}
-	batchMsg.Batch = batchJSON // SignalBatch 编码字节（JSON，与 server decodeSignalBatch 一致）
+	batchMsg.Batch = batchJSON // SignalBatch proto 编码字节
 	batchPayload, err := core.Encode(batchMsg)
 	if err != nil {
 		return 0, core.ChunkID{}, nil, core.WrapError(core.NumBatch, core.CodeBatch, "encode batch message", err)
