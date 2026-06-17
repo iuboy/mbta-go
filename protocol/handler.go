@@ -220,7 +220,8 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "decode hello", err)
 	}
 	if err := core.ValidateHello(&msg); err != nil {
-		h.sendError(ctx, core.CodeDecodeFailed, err.Error(), true)
+		slog.Debug("HELLO validation failed", "error", err)
+		h.sendError(ctx, core.CodeDecodeFailed, "invalid hello message", true)
 		return err
 	}
 
@@ -245,7 +246,8 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 
 	result, err := core.Negotiate(msg.GetCapabilities(), h.config.Policy)
 	if err != nil {
-		h.sendError(ctx, core.CodeUnsupportedMessage, err.Error(), true)
+		slog.Debug("negotiation failed", "error", err)
+		h.sendError(ctx, core.CodeUnsupportedMessage, "capability negotiation failed", true)
 		return err
 	}
 	h.negotiated = &result
@@ -458,7 +460,8 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	}
 	batchPayload, err := core.Open(env, aeadKey)
 	if err != nil {
-		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "envelope_open_error", err.Error(), true)
+		slog.Debug("envelope open failed", "error", err)
+		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "envelope_open_error", "envelope could not be opened", true)
 		return
 	}
 	if len(batchPayload) > maxBatchBytes {
@@ -469,11 +472,13 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 
 	var batchMsg corepb.BatchMessage
 	if err := core.Decode(batchPayload, &batchMsg); err != nil {
-		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "invalid_batch", err.Error(), false)
+		slog.Debug("batch decode failed", "error", err)
+		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "invalid_batch", "batch message could not be decoded", false)
 		return
 	}
 	if err := core.ValidateBatch(&batchMsg); err != nil {
-		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "batch_validation", err.Error(), false)
+		slog.Debug("batch validation failed", "error", err)
+		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "batch_validation", "batch failed validation", false)
 		return
 	}
 
@@ -569,11 +574,13 @@ func (h *CoreHandler) resolveBatchEvents(batchMsg *corepb.BatchMessage) (int, *c
 func (h *CoreHandler) decodeSignalBatch(batchMsg *corepb.BatchMessage) (*core.SignalBatch, bool) {
 	sb, err := core.UnmarshalSignalBatch(batchMsg.GetBatch())
 	if err != nil {
-		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "invalid_signal_batch", err.Error(), false)
+		slog.Debug("signal batch decode failed", "error", err)
+		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "invalid_signal_batch", "signal batch could not be decoded", false)
 		return nil, false
 	}
 	if err := sb.Validate(); err != nil {
-		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "signal_validation", err.Error(), false)
+		slog.Debug("signal validation failed", "error", err)
+		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "signal_validation", "signal batch failed validation", false)
 		return nil, false
 	}
 	if len(sb.Signals) > maxBatchEvents {
