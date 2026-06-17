@@ -44,8 +44,8 @@ func TestSanitizeForLog(t *testing.T) {
 	if got := SanitizeForLog("plain"); got != "plain" {
 		t.Errorf("plain changed: %q", got)
 	}
-	// 控制字符替换为空格，保留 \t\n\r。
-	if got := SanitizeForLog("a\x00b\x1bc\nd"); got != "a b c\nd" {
+	// 所有控制字符（含 \n \r \t \0 ESC）替换为空格——防御换行注入。
+	if got := SanitizeForLog("a\x00b\x1bc\nd"); got != "a b c d" {
 		t.Errorf("control chars not replaced: %q", got)
 	}
 	// 超长截断到 MaxSignalFieldLen。

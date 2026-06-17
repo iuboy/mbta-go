@@ -235,7 +235,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 			h.keys = state.Keys
 			h.agentID = state.AgentID
 			h.earlyData = true
-			slog.Info("0-RTT resumption: keys restored from ticket", "agent", h.agentID)
+			slog.Info("0-RTT resumption: keys restored from ticket", "agent", core.SanitizeForLog(h.agentID))
 		}
 	}
 
@@ -280,7 +280,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	if err := h.sm.Transition(core.ServerStateAuthWait); err != nil {
 		return core.WrapError(core.NumSession, core.CodeSession, "transition AUTH_WAIT", err)
 	}
-	slog.Info("hello processed", "agent", h.agentID, "session", string(h.sessionID))
+	slog.Info("hello processed", "agent", core.SanitizeForLog(h.agentID), "session", string(h.sessionID))
 	return nil
 }
 
@@ -384,7 +384,7 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	if h.config.Metrics != nil {
 		h.config.Metrics.AuthSuccessTotal.Inc()
 	}
-	slog.Info("auth succeeded", "agent", h.agentID, "session", string(h.sessionID), "key_id", keys.KeyID)
+	slog.Info("auth succeeded", "agent", core.SanitizeForLog(h.agentID), "session", string(h.sessionID), "key_id", keys.KeyID)
 	return nil
 }
 

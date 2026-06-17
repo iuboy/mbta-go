@@ -35,15 +35,19 @@ func validateTextField(name, val string) error {
 	return nil
 }
 
-// SanitizeForLog 清洗用于日志输出的网络来源字符串：截断超长值，把非法控制字符
-// （除 \t \n \r）替换为空格。用于 slog 打印 reason/agentID 等不可信字段，缓解
-// 日志注入（换行/ANSI 转义伪造日志行）。
+// SanitizeForLog 清洗用于日志输出的网络来源字符串：截断超长值，把所有 C0 控制字符
+// （0x00-0x1F）和 DEL（0x7F）替换为空格。用于 slog 打印 reason 等不可信字段，
+// 防御日志注入（换行伪造日志行、ANSI 转义终端注入、null 截断等）。
+//
+// 注意：\n \r 也被替换——防御换行注入。slog 自身已对结构化值做转义，
+// 但当日志被转发到 syslog/journald/ELK 等外部系统时，中间层可能丢失转义。
+// SanitizeForLog 提供 defense-in-depth。
 func SanitizeForLog(s string) string {
 	if len(s) > MaxSignalFieldLen {
 		s = s[:MaxSignalFieldLen]
 	}
 	return strings.Map(func(r rune) rune {
-		if (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f {
+		if r < 0x20 || r == 0x7f {
 			return ' '
 		}
 		return r
