@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
-
 	corepb "github.com/iuboy/mbta-go/corepb"
 
 	"github.com/iuboy/mbta-go/core"
@@ -228,7 +226,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	}
 
 	h.agentID = msg.GetAgentId()
-	h.sessionID = []byte(uuid.Must(uuid.NewV7()).String())
+	h.sessionID = core.NewChunkID().Bytes()
 	h.challengeNonce = randBytes(challengeNonceLen)
 
 	// 0-RTT resumption：从 session ticket 恢复 keys（core spec §11.6）。

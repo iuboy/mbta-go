@@ -14,7 +14,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/google/uuid"
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/protocol"
 	"github.com/iuboy/pollux-go/cert"
@@ -287,7 +286,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		}
 	}
 	if cfg.ServerID == "" {
-		cfg.ServerID = uuid.Must(uuid.NewV7()).String()
+		cfg.ServerID = core.NewChunkID().String()
 	}
 	maxConns := cfg.MaxConcurrentConns
 	if maxConns <= 0 {

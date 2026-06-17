@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
 	corepb "github.com/iuboy/mbta-go/corepb"
 
 	"github.com/iuboy/mbta-go/core"
@@ -19,7 +18,7 @@ func (c *Client) sendHello() error {
 		FrameVersion:  1,
 		AgentVersion:  "0.1.0",
 		Capabilities:  c.config.Capabilities,
-		InstanceId:    uuid.Must(uuid.NewV7()).String(),
+		InstanceId:    core.NewChunkID().String(),
 		StartedAtUnix: time.Now().Unix(),
 	}
 	payload, err := core.Encode(hello)

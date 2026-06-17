@@ -7,7 +7,6 @@ import (
 	"hash"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/iuboy/pollux-go/sm3"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
@@ -112,7 +111,7 @@ func GenerateSessionKeys(cs corepb.CipherSuite) (*SessionKeys, error) {
 		return nil, WrapError(NumEnvelope, CodeEnvelope, "generate AEAD key", err)
 	}
 	return &SessionKeys{
-		KeyID:       uuid.Must(uuid.NewV7()).String(),
+		KeyID:       NewChunkID().String(),
 		CipherSuite: cs,
 		HMACKey:     hmacKey,
 		AEADKey:     aeadKey,

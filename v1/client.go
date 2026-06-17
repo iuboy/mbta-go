@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/iuboy/mbta-go/core"
 	corepb "github.com/iuboy/mbta-go/corepb"
 	"github.com/iuboy/mbta-go/spool"
@@ -398,7 +397,7 @@ func buildRecords(agentID, tag, source string, signals []*core.SignalRecord) ([]
 	ids := make([]string, len(signals))
 	now := time.Now().UnixMilli()
 	for i, sig := range signals {
-		id := uuid.Must(uuid.NewV7()).String()
+		id := core.NewChunkID().String()
 		ids[i] = id
 		records[i] = spool.Record{
 			RecordID:        id,
@@ -847,7 +846,7 @@ func (c *Client) heartbeatLoop(ctx context.Context) {
 		case <-ticker.C:
 			ping := &corepb.PingMessage{
 				TimeUnixMs: time.Now().UnixMilli(),
-				Nonce:      uuid.Must(uuid.NewV7()).String(),
+				Nonce:      core.NewChunkID().String(),
 			}
 			payload, err := core.Encode(ping)
 			if err != nil {

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 const (
@@ -154,39 +156,46 @@ func Read(r io.Reader, lim Limits) (Frame, error) {
 	}, nil
 }
 
+// putVarint 编码 varint 到调用方提供的 buffer（零分配）。
+// 底层使用 protowire.AppendVarint（protobuf 标准库实现）。
 func putVarint(buf []byte, v uint64) int {
-	n := 0
-	for v >= 0x80 {
-		buf[n] = byte(v) | 0x80
-		v >>= 7
-		n++
-	}
-	buf[n] = byte(v)
-	return n + 1
+	return len(protowire.AppendVarint(buf[:0], v))
 }
 
+// readVarint 从 io.Reader 流式读取 varint，拒绝非最短编码。
+// 不能直接用 protowire.ConsumeVarint（它消费 []byte 切片，不读 io.Reader，
+// 且不检测非最短编码）。此实现专为 io.Reader + 安全校验设计。
 func readVarint(r io.Reader) (uint64, int, error) {
-	var v uint64
-	var s uint
-	var b [1]byte
-	for i := 0; i < maxVarintLen+1; i++ {
-		if _, err := io.ReadFull(r, b[:]); err != nil {
+	var buf [1]byte
+	var encoded []byte
+	for i := 0; i < maxVarintLen; i++ {
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
 			return 0, 0, errors.New("varint: short read")
 		}
-		if i == maxVarintLen && b[0]&0x80 != 0 {
-			return 0, 0, errors.New("varint: too long")
-		}
-		if s >= 64 && b[0]&0x7f != 0 {
-			return 0, 0, errors.New("varint: overflow")
-		}
-		v |= uint64(b[0]&0x7f) << s
-		if b[0]&0x80 == 0 {
+		encoded = append(encoded, buf[0])
+		if buf[0]&0x80 == 0 {
+			v, n := protowire.ConsumeVarint(encoded)
+			if n <= 0 {
+				return 0, 0, errors.New("varint: decode failed")
+			}
+			// 非最短编码检测（protobuf 规则）。
 			if i > 0 && v < (uint64(1)<<uint(7*i)) {
 				return 0, 0, errors.New("varint: non-canonical encoding")
 			}
-			return v, i + 1, nil
+			return v, n, nil
 		}
-		s += 7
 	}
-	return 0, 0, errors.New("varint: too long")
+	// 读了 maxVarintLen 字节仍有 continuation bit → 过长。
+	if _, err := io.ReadFull(r, buf[:]); err != nil {
+		return 0, 0, errors.New("varint: short read")
+	}
+	if buf[0]&0x80 != 0 || buf[0]&0x0f != 0 {
+		return 0, 0, errors.New("varint: too long")
+	}
+	encoded = append(encoded, buf[0])
+	v, n := protowire.ConsumeVarint(encoded)
+	if n <= 0 {
+		return 0, 0, errors.New("varint: decode failed")
+	}
+	return v, n, nil
 }
