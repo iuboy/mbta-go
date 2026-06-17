@@ -28,7 +28,7 @@ func BenchmarkMarshalSignalBatch(b *testing.B) {
 		b.Run(scaleName(n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := json.Marshal(batch); err != nil {
+				if _, err := FastMarshal(batch); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -39,7 +39,7 @@ func BenchmarkMarshalSignalBatch(b *testing.B) {
 func BenchmarkUnmarshalSignalBatch(b *testing.B) {
 	for _, n := range []int{100, 1000, 10000} {
 		batch := makeBenchBatch(n)
-		data, _ := json.Marshal(batch)
+		data, _ := FastMarshal(batch)
 		b.Run(scaleName(n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
@@ -58,14 +58,14 @@ func BenchmarkMarshalBatchWrapper(b *testing.B) {
 	batchJSON, _ := json.Marshal(makeBenchBatch(1000))
 	batch := BatchMessage{
 		Seq:     1,
-		ChunkID: "chunk-1",
+		ChunkId: []byte("chunk-1"),
 		Tag:     "tag",
 		Source:  "src",
 		Batch:   json.RawMessage(batchJSON),
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := json.Marshal(batch); err != nil {
+		if _, err := Encode(&batch); err != nil {
 			b.Fatal(err)
 		}
 	}

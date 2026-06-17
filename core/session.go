@@ -3,8 +3,11 @@ package core
 import (
 	"fmt"
 	"slices"
+	"sort"
 	"sync"
 	"time"
+
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
 // State represents the session state machine state.
@@ -230,92 +233,100 @@ invalid:
 	return NewError(NumSession, CodeSession, fmt.Sprintf("invalid server transition %s -> %s", sm.state, next))
 }
 
-// Policy controls which capabilities the server accepts and which algorithms it prefers.
+// Policy 控制 server 接受的 capability 与默认算法（r2 capability-driven）。
+// 默认 CipherSuite 跟随传输 binding 合规语境（core spec §8.3）。
 type Policy struct {
-	EnableGzip          bool
-	EnableHMACSHA256    bool
-	EnableHMACSM3       bool
-	EnableSM4GCM        bool
-	EnableSM2CertAuth   bool
-	EnablePartialAck    bool
-	EnableWindow        bool
-	EnableThrottle      bool
-	EnableDurableAck    bool
-	EnableMultiStream   bool
-	EnableAuthTokenless bool // 允许客户端省略明文 Token（需 Auth 实现 TokenResolver）
+	// SupportedCapabilities 是服务端支持的 stable capability 集合。
+	// Negotiate 与客户端宣告取交集（自动降级，core spec §12.1）。
+	SupportedCapabilities []string
+	// 默认算法（客户端未 offer 对应 capability 时使用）。
+	DefaultCodec       corepb.Codec       // 通常 CODEC_PROTO
+	DefaultCompression corepb.Compression // 通常 COMPRESSION_ZSTD
+	CipherSuite        corepb.CipherSuite // intl / gm，跟随 binding
 }
 
-// NegotiateResult contains the selected capabilities and algorithms.
+// NegotiateResult 包含选定 capability 与算法（r2：corepb enum）。
 type NegotiateResult struct {
 	SelectedCapabilities []string
-	Codec                string
-	Compression          string
-	HMACAlgo             string
-	Encryption           string
+	Codec                corepb.Codec
+	Compression          corepb.Compression
+	CipherSuite          corepb.CipherSuite
 }
 
-// 设计说明：HELLO 和 AUTH 分为两步，原因：
-//  1. 未来支持 token 轮换（无需重新 HELLO）
-//  2. 未来版本的加密协商完成后，AUTH payload 可受加密保护
-//  3. 允许服务器在 HELLO_ACK 中下发 challenge nonce 用于挑战-响应
+// Negotiate 计算 server 选定的 capability（r2 capability-driven）。
 //
-// Negotiate computes the server-selected capabilities based on client offers and server policy.
-func Negotiate(clientCaps []string, policy Policy) NegotiateResult {
-	offered := toSet(clientCaps)
-	res := NegotiateResult{
-		Codec:       CodecJSON,
-		Compression: CompressionNone,
-		HMACAlgo:    HMACAlgoNone,
-		Encryption:  EncryptionNone,
+// 协商失败语义（core spec §1.3）：
+//   - 客户端宣告的未识别 stable capability → 返回协议错误（不允许静默吞掉）；
+//   - experimental（x-）→ 静默忽略。
+//
+// 算法选择：从客户端与服务端的公共 stable capability 集合推导 codec/compression/cipher，
+// 否则用 Policy 默认。selected 排序以保证 HELLO_ACK 确定性。
+//
+// 设计说明：HELLO 和 AUTH 分为两步，便于 token 轮换、AUTH payload 加密保护、
+// 以及 HELLO_ACK 下发 challenge nonce 用于挑战-响应。
+func Negotiate(clientCaps []string, policy Policy) (NegotiateResult, error) {
+	if unknown := FilterUnknownStable(clientCaps); len(unknown) > 0 {
+		return NegotiateResult{}, NewError(NumProtocol, CodeProtocol,
+			fmt.Sprintf("unknown stable capabilities from client: %v", unknown))
 	}
 
-	// Codec: json is required
-	res.SelectedCapabilities = append(res.SelectedCapabilities, CapCodecJSON)
+	serverSupported := toSet(policy.SupportedCapabilities)
+	clientSet := toSet(clientCaps)
 
-	// Compression
-	if policy.EnableGzip && offered[CapCompressGzip] {
-		res.Compression = CompressionGzip
-		res.SelectedCapabilities = append(res.SelectedCapabilities, CapCompressGzip)
-	}
-
-	// HMAC: prefer sm3 over sha256 when both available
-	if policy.EnableHMACSM3 && offered[CapHMACSM3] {
-		res.HMACAlgo = HMACAlgoSM3
-		res.SelectedCapabilities = append(res.SelectedCapabilities, CapHMACSM3)
-	} else if policy.EnableHMACSHA256 && offered[CapHMACSHA256] {
-		res.HMACAlgo = HMACAlgoSHA256
-		res.SelectedCapabilities = append(res.SelectedCapabilities, CapHMACSHA256)
-	}
-
-	// Encryption: SM4-GCM（pollux-go/sm4 实现）。双方 EnableSM4GCM 且客户端 offer 时选中。
-	if policy.EnableSM4GCM && offered[CapSM4GCM] {
-		res.Encryption = EncryptionSM4
-		res.SelectedCapabilities = append(res.SelectedCapabilities, CapSM4GCM)
-	}
-	// SM2 证书认证（mTLS）属传输层（TLS），依赖国密 TLS 栈（v2/RFC 8998），
-	// v1 标准 TLS 1.3 无法实现，暂不响应。待 v2 落地后恢复：
-	// if policy.EnableSM2CertAuth && offered[CapSM2CertAuth] {
-	// 	res.SelectedCapabilities = append(res.SelectedCapabilities, CapSM2CertAuth)
-	// }
-
-	// Other capabilities
-	for _, cap := range []struct {
-		enable  bool
-		offered string
-	}{
-		{policy.EnablePartialAck, CapPartialAck},
-		{policy.EnableWindow, CapWindowFlowCtrl},
-		{policy.EnableThrottle, CapThrottle},
-		{policy.EnableDurableAck, CapDurableAck},
-		{policy.EnableMultiStream, CapMultiStream},
-		{policy.EnableAuthTokenless, CapAuthTokenless},
-	} {
-		if cap.enable && offered[cap.offered] {
-			res.SelectedCapabilities = append(res.SelectedCapabilities, cap.offered)
+	var selected []string
+	for capName := range stableCapabilities {
+		if clientSet[capName] && serverSupported[capName] {
+			selected = append(selected, capName)
 		}
 	}
+	sort.Strings(selected)
 
-	return res
+	return NegotiateResult{
+		SelectedCapabilities: selected,
+		Codec:                pickCodec(selected, policy.DefaultCodec),
+		Compression:          pickCompression(selected, policy.DefaultCompression),
+		CipherSuite:          pickCipherSuite(selected, policy.CipherSuite),
+	}, nil
+}
+
+// pickCodec 从选定 capability 推导 codec（优先 proto > cbor > json），否则默认。
+func pickCodec(selected []string, def corepb.Codec) corepb.Codec {
+	set := toSet(selected)
+	switch {
+	case set["codec_proto"]:
+		return corepb.Codec_CODEC_PROTO
+	case set["codec_cbor"]:
+		return corepb.Codec_CODEC_CBOR
+	case set["codec_json"]:
+		return corepb.Codec_CODEC_JSON
+	}
+	return def
+}
+
+func pickCompression(selected []string, def corepb.Compression) corepb.Compression {
+	set := toSet(selected)
+	switch {
+	case set["comp_zstd"]:
+		return corepb.Compression_COMPRESSION_ZSTD
+	case set["comp_lz4"]:
+		return corepb.Compression_COMPRESSION_LZ4
+	case set["comp_gzip"]:
+		return corepb.Compression_COMPRESSION_GZIP
+	case set["comp_none"]:
+		return corepb.Compression_COMPRESSION_NONE
+	}
+	return def
+}
+
+func pickCipherSuite(selected []string, def corepb.CipherSuite) corepb.CipherSuite {
+	set := toSet(selected)
+	if set["cs_gm"] {
+		return corepb.CipherSuite_CIPHER_SUITE_GM
+	}
+	if set["cs_intl"] {
+		return corepb.CipherSuite_CIPHER_SUITE_INTL
+	}
+	return def
 }
 
 // IsCapabilitySelected reports whether capability was among the server-selected
@@ -326,17 +337,6 @@ func (r *NegotiateResult) IsCapabilitySelected(capability string) bool {
 		return false
 	}
 	return slices.Contains(r.SelectedCapabilities, capability)
-}
-
-// ValidateHello checks the HELLO message is valid for v1.
-func ValidateHello(agentID string, version int) error {
-	if agentID == "" {
-		return NewError(NumValidation, CodeValidation, "agent_id is required")
-	}
-	if version != 1 {
-		return NewError(NumVersion, CodeVersion, fmt.Sprintf("unsupported version %d", version))
-	}
-	return nil
 }
 
 func toSet(caps []string) map[string]bool {

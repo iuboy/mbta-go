@@ -1,5 +1,9 @@
 # MBTA-NTLS/1 Protocol Specification / MBTA-NTLS/1 协议规范
 
+> ⚠️ **SUPERSEDED（部分）：** 本文件为 `mbta-ntls/1` 早期草案（16B 帧 + JSON envelope）。
+> 权威基准见 [mbta-core-spec.md](./mbta-core-spec.md) r2，TCP 传输规范见 [mbta-tcp-binding.md](./mbta-tcp-binding.md)。
+> 冲突处（帧格式、envelope、消息类型编号）**以 core / 新 binding 为准**。保留作历史参考。
+
 Category: Internet-Draft / 互联网草案  
 Version: 1.0  
 Protocol Name: `mbta-ntls/1`  

@@ -1,66 +1,60 @@
 package core
 
-// Message types (wire values).
+// Message types (wire values, uint8, core spec §4).
+// 值一旦发布不可改（§1.4 只追加纪律）。1–16 已分配，17–255 保留。
 const (
-	TypeHello    uint16 = 0x0001 // C→S handshake
-	TypeHelloAck uint16 = 0x0002 // S→C handshake response
-	TypeAuth     uint16 = 0x0003 // C→S authentication
-	TypeAuthOK   uint16 = 0x0004 // S→C authentication success
-	TypeAuthFail uint16 = 0x0005 // S→C authentication failure
+	TypeHello    uint8 = 1 // C→S handshake
+	TypeHelloAck uint8 = 2 // S→C handshake response
+	TypeAuth     uint8 = 3 // C→S authentication
+	TypeAuthOK   uint8 = 4 // S→C authentication success
+	TypeAuthFail uint8 = 5 // S→C authentication failure
 
-	TypeBatch      uint16 = 0x0010 // C→S event batch
-	TypeAck        uint16 = 0x0011 // S→C batch acknowledged
-	TypeNack       uint16 = 0x0012 // S→C batch rejected
-	TypePartialAck uint16 = 0x0013 // S→C partial success
+	TypeBatch      uint8 = 6  // C→S reliable batch
+	TypeDatagram   uint8 = 7  // C→S unreliable datagram (capability unreliable_datagram, §11.4)
+	TypeAck        uint8 = 8  // S→C batch acknowledged
+	TypeNack       uint8 = 9  // S→C batch rejected
+	TypePartialAck uint8 = 10 // S→C partial success
 
-	TypeWindow   uint16 = 0x0020 // S→C flow-control window
-	TypeThrottle uint16 = 0x0021 // S→C explicit backoff
+	TypeWindow   uint8 = 11 // S→C flow-control window
+	TypeThrottle uint8 = 12 // S→C explicit backoff
 
-	TypePing  uint16 = 0x0030 // bidirectional health check
-	TypePong  uint16 = 0x0031 // bidirectional health check response
-	TypeClose uint16 = 0x0040 // bidirectional graceful close
-	TypeError uint16 = 0x0050 // bidirectional protocol error
+	TypePing  uint8 = 13 // bidirectional health check
+	TypePong  uint8 = 14 // bidirectional health check response
+	TypeClose uint8 = 15 // bidirectional graceful close
+	TypeError uint8 = 16 // bidirectional protocol error
 )
 
-// Capability identifiers.
+// 帧头 ChannelID 约定（core spec §10.1 / §3）。
 const (
-	CapCodecJSON      = "codec_json"
-	CapCodecMsgpack   = "codec_msgpack" // 保留，v1 未实现，计划未来版本支持
-	CapCompressGzip   = "compress_gzip"
-	CapCompressZstd   = "compress_zstd" // 保留，v1 未实现，计划未来版本支持
-	CapHMACSHA256     = "hmac_sha256"
-	CapHMACSM3        = "hmac_sm3"
-	CapSM4GCM         = "sm4_gcm"       // 保留，v1 未实现，计划未来版本支持
-	CapSM2CertAuth    = "sm2_cert_auth" // 保留，v1 未实现，计划未来版本支持
-	CapPartialAck     = "partial_ack"
-	CapWindowFlowCtrl = "window_flow_control"
-	CapThrottle       = "throttle"
-	CapMultiStream    = "multi_data_stream" // 保留，v1 未实现，计划未来版本支持
-	CapDurableAck     = "durable_ack"
-	CapAuthTokenless  = "auth_tokenless" //nolint:gosec // G101: 协议能力标识名，非凭据；客户端省略明文 Token 由服务端反查
+	ChannelControl uint8 = 0 // control channel：HELLO/AUTH/WINDOW/THROTTLE/PING/PONG/CLOSE/ERROR
+	ChannelData    uint8 = 1 // data channel：BATCH/DATAGRAM/ACK/NACK/PARTIAL_ACK
 )
 
-// Algorithm identifiers (envelope fields).
+// Frame flags (core spec §3)。bit6–7 = FlowClass。
 const (
-	CodecJSON    = "json"
-	CodecMsgpack = "msgpack"
+	FlagEnvelope    byte = 0x01 // payload 是 SecureEnvelope
+	FlagControl     byte = 0x02 // 控制面消息
+	FlagData        byte = 0x04 // 数据面消息
+	FlagMoreFollows byte = 0x08 // 逻辑多片消息的一片（§3）
+	FlagNoCRC       byte = 0x10 // 置位=省略 CRC16（AEAD 下默认置位）
+	FlagCoalesced   byte = 0x20 // 多条同类型小消息合并打包（§3.2）
 
-	CompressionNone = "none"
-	CompressionGzip = "gzip"
-	CompressionZstd = "zstd"
+	FlagControlDataMask byte = 0x06 // Control 与 Data 互斥校验
+	FlagFlowClassMask   byte = 0xC0
+	FlagFlowClassShift       = 6
 
-	EncryptionNone = "none"
-	EncryptionSM4  = "sm4_gcm"
-
-	HMACAlgoNone   = "none"
-	HMACAlgoSHA256 = "sha256"
-	HMACAlgoSM3    = "sm3"
-
-	AckModeAccepted = "accepted"
-	AckModeDurable  = "durable"
+	// FlowClass 取值（占 bit6–7）。值 3（reserved）MUST 拒绝。
+	FlowClassNormal     byte = 0x00 << FlagFlowClassShift
+	FlowClassBestEffort byte = 0x01 << FlagFlowClassShift
+	FlowClassCritical   byte = 0x02 << FlagFlowClassShift
 )
+
+// FlowClassOf 从 flags 提取 FlowClass（返回 0/1/2；3 为 reserved，由 ValidateFlags 拒绝）。
+func FlowClassOf(flags byte) byte { return (flags & FlagFlowClassMask) >> FlagFlowClassShift }
 
 // Stream roles.
+// r2 capability 标识与算法枚举由 corepb（proto enum）与 core/capability.go（registry）承载，
+// 旧字符串常量已移除（避免与 corepb enum 混淆）。
 const (
 	StreamRoleControl = "control"
 	StreamRoleData    = "data"

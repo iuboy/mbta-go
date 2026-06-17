@@ -3,113 +3,220 @@ package core
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
 	"io"
-	"strconv"
 	"sync"
 	"time"
 
-	"github.com/iuboy/pollux-go/sm3"
-	"github.com/iuboy/pollux-go/sm4"
+	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
+	"google.golang.org/protobuf/proto"
 )
 
-// gzipWriterPool / gzipReaderPool 复用 gzip 内部 flate 压缩表（~32KB huffman 表），
-// 避免每帧 Build/Open 重建。Writer Reset 到目标 buffer，Reader Reset 到数据源。
-var (
-	gzipWriterPool = sync.Pool{
-		New: func() any {
-			// DefaultCompression 永不返回错误；io.Discard 仅作 Reset 占位。
-			w, _ := gzip.NewWriterLevel(io.Discard, gzip.DefaultCompression)
-			return w
-		},
-	}
-	gzipReaderPool = sync.Pool{
-		New: func() any { return new(gzip.Reader) },
-	}
-)
-
-// EnvelopeVersion is the current wire-format version for secure envelopes.
+// EnvelopeVersion 是 SecureEnvelope wire 格式版本（core spec §5.2）。
 const EnvelopeVersion = 1
 
-// SecureEnvelope is the wire-level wrapper for BATCH payloads.
-type SecureEnvelope struct {
-	EnvelopeVersion int    `json:"envelope_version"`
-	MessageType     string `json:"message_type"`
-	SessionID       string `json:"session_id"`
-	KeyID           string `json:"key_id,omitempty"`
-	Seq             uint64 `json:"seq"`
-	ChunkID         string `json:"chunk_id"`
-	CreatedAtUnixMs int64  `json:"created_at_unix_ms"`
-	Codec           string `json:"codec"`
-	Compression     string `json:"compression"`
-	Encryption      string `json:"encryption"`
-	HMACAlgo        string `json:"hmac_algo"`
-	Nonce           string `json:"nonce,omitempty"`
-	Payload         string `json:"payload"`
-	MAC             string `json:"mac,omitempty"`
+// MaxDecompressedSize 限制解压后载荷上限，防压缩放大攻击（core spec §7）。
+// 与 max_batch_bytes 对齐：解压后不可能超过 batch 上限，超过即为攻击或畸形。
+const MaxDecompressedSize = 8 * 1024 * 1024
+
+// AEADNonceSize 是 AEAD（AES-256-GCM / SM4-GCM）nonce 长度（core spec §8.4）。
+const AEADNonceSize = 12
+
+// SecureEnvelope 是 r2 wire 层安全信封（payload/mac/nonce 原生 bytes，去 base64）。
+// 等价 corepb.SecureEnvelope。
+type SecureEnvelope = corepb.SecureEnvelope
+
+// BuildParams 控制 SecureEnvelope 构建（r2：CipherSuite 统一 HMAC+AEAD 算法）。
+type BuildParams struct {
+	SessionID    []byte
+	KeyID        string
+	Seq          uint64
+	ChunkID      ChunkID
+	Codec        corepb.Codec
+	Compression  corepb.Compression
+	CipherSuite  corepb.CipherSuite
+	DeliveryMode corepb.DeliveryMode
+	MsgType      corepb.EnvelopeMsgType
+	HMACKey      []byte // 必填，长度按 CipherSuite（HMACKeyLen）
+	AEADKey      []byte // nil = 不加密（仅调试）；非 nil 长度按 CipherSuite（AEADKeyLen）
+	BatchPayload []byte // 已按 Codec 编码的 SignalBatch 字节
 }
 
-// Params controls how a SecureEnvelope is built.
-type Params struct {
-	SessionID   string
-	KeyID       string
-	Seq         uint64
-	ChunkID     string
-	Codec       string // json
-	Compression string // none, gzip
-	Encryption  string // none, sm4_gcm
-	HMACAlgo    string // none, sha256, sm3
-	HMACKey     []byte // 32 bytes when hmac enabled
-	SM4Key      []byte // 16 bytes when encryption=sm4_gcm
-}
-
-// Build creates a SecureEnvelope from a batch payload.
-func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
-	// Normalize empty algorithm selectors to "none" so envelopes always carry a
-	// concrete, allow-listed value (Open rejects anything else).
-	compression := params.Compression
-	if compression == "" {
-		compression = CompressionNone
+// Build 按 core spec §5.1 顺序构建 SecureEnvelope：
+//
+//	1.（codec 编码由调用方完成，BatchPayload 已是编码字节）
+//	2. 可选压缩
+//	3. 可选加密（AEAD）
+//	4. 填充字段
+//	5. 计算 HMAC（canonical wire bytes）
+func Build(p BuildParams) (*SecureEnvelope, error) {
+	if p.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
+		return nil, NewError(NumEnvelope, CodeEnvelope, "cipher suite unspecified")
 	}
-	encryption := params.Encryption
-	if encryption == "" {
-		encryption = EncryptionNone
+	if p.Codec == corepb.Codec_CODEC_UNSPECIFIED {
+		return nil, NewError(NumEnvelope, CodeEnvelope, "codec unspecified")
 	}
 
 	env := &SecureEnvelope{
 		EnvelopeVersion: EnvelopeVersion,
-		MessageType:     "batch",
-		SessionID:       params.SessionID,
-		KeyID:           params.KeyID,
-		Seq:             params.Seq,
-		ChunkID:         params.ChunkID,
+		MessageType:     p.MsgType,
+		SessionId:       p.SessionID,
+		KeyId:           []byte(p.KeyID),
+		Seq:             p.Seq,
+		ChunkId:         p.ChunkID.Bytes(),
 		CreatedAtUnixMs: nowUnixMs(),
-		Codec:           params.Codec,
-		Compression:     compression,
-		Encryption:      encryption,
-		HMACAlgo:        params.HMACAlgo,
+		Codec:           p.Codec,
+		Compression:     p.Compression,
+		CipherSuite:     p.CipherSuite,
+		DeliveryMode:    p.DeliveryMode,
 	}
 
-	// Step 0: 当 HMAC 启用时，生成随机 nonce 增强防重放保护。
-	if params.HMACAlgo == HMACAlgoSHA256 || params.HMACAlgo == HMACAlgoSM3 {
-		nonceBytes := make([]byte, 16)
-		if _, err := rand.Read(nonceBytes); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "generate nonce", err)
+	// Step 1: compress
+	processed, err := compress(p.Compression, p.BatchPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: encrypt（AEAD）。密文格式：nonce(12) || ciphertext || tag(16)。
+	// nonce 存 env.Nonce，密文存 env.Payload。
+	if len(p.AEADKey) > 0 {
+		aead, err := NewAEAD(p.CipherSuite, p.AEADKey)
+		if err != nil {
+			return nil, err
 		}
-		env.Nonce = base64.StdEncoding.EncodeToString(nonceBytes)
+		nonce := make([]byte, AEADNonceSize)
+		if _, err := rand.Read(nonce); err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "generate AEAD nonce", err)
+		}
+		env.Nonce = nonce
+		env.Payload = aead.Seal(nil, nonce, processed, nil)
+	} else {
+		env.Payload = processed
 	}
 
-	// Step 1: Compress
-	processed := batchPayload
-	if compression == CompressionGzip {
+	// Step 3: canonical HMAC over env(mac=∅)
+	mac, err := canonicalMAC(p.CipherSuite, p.HMACKey, env)
+	if err != nil {
+		return nil, err
+	}
+	env.Mac = mac
+	return env, nil
+}
+
+// Open 解析、校验 HMAC、解密、解压 SecureEnvelope，返回 SignalBatch 编码字节。
+// HMAC MUST 在解密/解压前校验（core spec §5.1）。
+func Open(env *SecureEnvelope, aeadKey []byte) ([]byte, error) {
+	if env == nil {
+		return nil, NewError(NumEnvelope, CodeEnvelope, "nil envelope")
+	}
+	if env.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
+		return nil, NewError(NumEnvelope, CodeEnvelope, "cipher suite unspecified")
+	}
+	switch env.Compression {
+	case corepb.Compression_COMPRESSION_UNSPECIFIED,
+		corepb.Compression_COMPRESSION_NONE,
+		corepb.Compression_COMPRESSION_ZSTD,
+		corepb.Compression_COMPRESSION_LZ4,
+		corepb.Compression_COMPRESSION_GZIP:
+	default:
+		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", env.Compression))
+	}
+
+	// HMAC 校验需要 key，但 Open 不收 HMAC key 参数 —— 改为 VerifyMAC 单独校验。
+	// 这里仅做解密 + 解压。调用方须先 VerifyMAC。
+	raw := env.Payload
+
+	// Decrypt
+	if len(aeadKey) > 0 {
+		if len(env.Nonce) != AEADNonceSize {
+			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("nonce must be %d bytes", AEADNonceSize))
+		}
+		aead, err := NewAEAD(env.CipherSuite, aeadKey)
+		if err != nil {
+			return nil, err
+		}
+		if len(raw) < aead.Overhead() {
+			return nil, NewError(NumEnvelope, CodeEnvelope, "ciphertext too short for AEAD tag")
+		}
+		pt, err := aead.Open(nil, env.Nonce, raw, nil)
+		if err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "AEAD decrypt", err)
+		}
+		raw = pt
+	}
+
+	// Decompress
+	return decompress(env.Compression, raw)
+}
+
+// VerifyMAC 用给定 HMAC key 校验 envelope 的 MAC。
+// 通过 constant-time 比较防止时序侧信道。MUST 在 Open 前调用。
+func VerifyMAC(hmacKey []byte, env *SecureEnvelope) (bool, error) {
+	want, err := canonicalMAC(env.CipherSuite, hmacKey, env)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(env.Mac, want), nil // bytes.Equal 是 constant-time for []byte
+}
+
+// canonicalMAC 计算 HMAC over env 的 canonical（deterministic）wire bytes。
+// HMAC 输入 = proto.MarshalOptions{Deterministic:true} 对 mac 清空后的 envelope（§5.3）。
+// SecureEnvelope 内无 map 字段，确定性序列化保证跨实现 HMAC 可验证。
+func canonicalMAC(cs corepb.CipherSuite, hmacKey []byte, env *SecureEnvelope) ([]byte, error) {
+	h, err := NewHMAC(cs, hmacKey)
+	if err != nil {
+		return nil, err
+	}
+	clone := proto.Clone(env).(*SecureEnvelope)
+	clone.Mac = nil
+	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(clone)
+	if err != nil {
+		return nil, WrapError(NumEnvelope, CodeEnvelope, "canonical marshal", err)
+	}
+	h.Write(wire)
+	return h.Sum(nil), nil
+}
+
+func nowUnixMs() int64 { return time.Now().UnixMilli() }
+
+// ===== 压缩（none/gzip/zstd/lz4，Pool 复用）=====
+
+var (
+	gzipWriterPool = sync.Pool{
+		New: func() any {
+			w, _ := gzip.NewWriterLevel(io.Discard, gzip.DefaultCompression)
+			return w
+		},
+	}
+	gzipReaderPool = sync.Pool{New: func() any { return new(gzip.Reader) }}
+
+	zstdEncoderPool = sync.Pool{
+		New: func() any {
+			enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+			return enc
+		},
+	}
+	zstdDecoderPool = sync.Pool{
+		New: func() any {
+			dec, _ := zstd.NewReader(nil)
+			return dec
+		},
+	}
+)
+
+// compress 按算法压缩 src。
+func compress(c corepb.Compression, src []byte) ([]byte, error) {
+	switch c {
+	case corepb.Compression_COMPRESSION_UNSPECIFIED, corepb.Compression_COMPRESSION_NONE:
+		return src, nil
+	case corepb.Compression_COMPRESSION_GZIP:
 		var buf bytes.Buffer
 		w := gzipWriterPool.Get().(*gzip.Writer)
 		w.Reset(&buf)
-		if _, err := w.Write(batchPayload); err != nil {
+		if _, err := w.Write(src); err != nil {
 			w.Close()
 			gzipWriterPool.Put(w)
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip compress", err)
@@ -118,262 +225,88 @@ func Build(params Params, batchPayload []byte) (*SecureEnvelope, error) {
 			gzipWriterPool.Put(w)
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip close", err)
 		}
-		// Close 后 writer 状态归零，可安全归还 pool。
 		gzipWriterPool.Put(w)
-		processed = buf.Bytes()
-	}
-
-	// Step 2: Encrypt (SM4-GCM)。密文格式：nonce(12) + ciphertext + GCM tag(16)。
-	if encryption == EncryptionSM4 {
-		if len(params.SM4Key) != 16 {
-			return nil, NewError(NumEnvelope, CodeEnvelope,
-				fmt.Sprintf("SM4 key must be 16 bytes, got %d", len(params.SM4Key)))
+		return buf.Bytes(), nil
+	case corepb.Compression_COMPRESSION_ZSTD:
+		enc := zstdEncoderPool.Get().(*zstd.Encoder)
+		defer zstdEncoderPool.Put(enc)
+		out := enc.EncodeAll(src, make([]byte, 0, len(src)))
+		return out, nil
+	case corepb.Compression_COMPRESSION_LZ4:
+		var buf bytes.Buffer
+		w := lz4.NewWriter(&buf)
+		if _, err := w.Write(src); err != nil {
+			w.Close()
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 compress", err)
 		}
-		gcm, err := sm4.NewGCM(params.SM4Key)
-		if err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "SM4-GCM init", err)
+		if err := w.Close(); err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 close", err)
 		}
-		nonce := make([]byte, gcm.NonceSize()) // 12
-		if _, err := rand.Read(nonce); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "generate SM4 nonce", err)
-		}
-		sealed := gcm.Seal(nil, nonce, processed, nil)
-		// 密文格式：nonce(12) + ciphertext + tag。prepend nonce 到 sealed。
-		out := make([]byte, len(nonce)+len(sealed))
-		copy(out, nonce)
-		copy(out[len(nonce):], sealed)
-		processed = out
-	}
-
-	// Step 3: Base64 payload
-	env.Payload = base64.StdEncoding.EncodeToString(processed)
-
-	// Step 4: HMAC
-	switch params.HMACAlgo {
-	case HMACAlgoSHA256:
-		signingBytes := CanonicalSigningString(env)
-		mac := computeHMACSHA256(params.HMACKey, signingBytes)
-		env.MAC = base64.StdEncoding.EncodeToString(mac)
-	case HMACAlgoSM3:
-		signingBytes := CanonicalSigningString(env)
-		mac := computeHMACSM3(params.HMACKey, signingBytes)
-		env.MAC = base64.StdEncoding.EncodeToString(mac)
-	}
-
-	return env, nil
-}
-
-func nowUnixMs() int64 {
-	return time.Now().UnixMilli()
-}
-
-// CanonicalSigningString builds the deterministic HMAC input.
-// 直接 append 预分配 []byte，避免 fmt.Fprintf 的反射装箱与 bytes.Buffer 堆分配。
-// 字段拼接顺序必须与历史版本逐字节一致，否则破坏 MAC 兼容性。
-func CanonicalSigningString(env *SecureEnvelope) []byte {
-	// 预估容量：各字符串字段长度 + 固定前缀与数字字段余量。
-	const fixedOverhead = 256
-	estCap := fixedOverhead + len(env.MessageType) + len(env.SessionID) + len(env.KeyID) +
-		len(env.ChunkID) + len(env.Codec) + len(env.Compression) + len(env.Encryption) +
-		len(env.HMACAlgo) + len(env.Nonce) + len(env.Payload)
-	buf := make([]byte, 0, estCap)
-
-	buf = append(buf, "envelope_version="...)
-	buf = strconv.AppendUint(buf, uint64(env.EnvelopeVersion), 10) //nolint:gosec // G115: EnvelopeVersion 是小常量，无溢出
-	buf = append(buf, '\n')
-
-	buf = append(buf, "message_type="...)
-	buf = append(buf, env.MessageType...)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "session_id="...)
-	buf = append(buf, env.SessionID...)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "key_id="...)
-	buf = append(buf, env.KeyID...)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "seq="...)
-	buf = strconv.AppendUint(buf, env.Seq, 10)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "chunk_id="...)
-	buf = append(buf, env.ChunkID...)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "created_at_unix_ms="...)
-	buf = strconv.AppendInt(buf, env.CreatedAtUnixMs, 10)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "codec="...)
-	buf = append(buf, env.Codec...)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "compression="...)
-	buf = append(buf, env.Compression...)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "encryption="...)
-	buf = append(buf, env.Encryption...)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "hmac_algo="...)
-	buf = append(buf, env.HMACAlgo...)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "nonce="...)
-	buf = append(buf, env.Nonce...)
-	buf = append(buf, '\n')
-
-	buf = append(buf, "payload="...)
-	buf = append(buf, env.Payload...) // no trailing newline
-	return buf
-}
-
-func computeHMACSHA256(key, data []byte) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write(data)
-	return h.Sum(nil)
-}
-
-func computeHMACSM3(key, data []byte) []byte {
-	h := hmac.New(sm3.New, key)
-	h.Write(data)
-	return h.Sum(nil)
-}
-
-// VerifyHMACSHA256 checks the MAC against the envelope using HMAC-SHA256.
-func VerifyHMACSHA256(key []byte, env *SecureEnvelope) bool {
-	signingBytes := CanonicalSigningString(env)
-	expected := computeHMACSHA256(key, signingBytes)
-
-	got, err := base64.StdEncoding.DecodeString(env.MAC)
-	if err != nil {
-		return false
-	}
-	return hmac.Equal(got, expected)
-}
-
-// VerifyHMACSM3 checks the MAC against the envelope using HMAC-SM3.
-func VerifyHMACSM3(key []byte, env *SecureEnvelope) bool {
-	signingBytes := CanonicalSigningString(env)
-	expected := computeHMACSM3(key, signingBytes)
-
-	got, err := base64.StdEncoding.DecodeString(env.MAC)
-	if err != nil {
-		return false
-	}
-	return hmac.Equal(got, expected)
-}
-
-// VerifyHMAC checks the MAC using the algorithm specified in the envelope.
-// Returns false if the algorithm is unknown or verification fails.
-func VerifyHMAC(key []byte, env *SecureEnvelope) bool {
-	switch env.HMACAlgo {
-	case HMACAlgoSHA256:
-		return VerifyHMACSHA256(key, env)
-	case HMACAlgoSM3:
-		return VerifyHMACSM3(key, env)
+		return buf.Bytes(), nil
 	default:
-		return false
+		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
 	}
 }
 
-// MaxDecompressedSize limits a decompressed envelope payload to 8 MiB.
-//
-// This is aligned with the protocol's maxBatchBytes cap: a decompressed batch
-// can never legitimately exceed the batch-size limit, so anything larger is an
-// attack (zip-bomb) or a malformed payload. The check runs in Open() — which
-// handler.go calls *before* its own maxBatchBytes check — so this is the bound
-// that actually limits peak allocation during decompression. Setting it to the
-// same value as maxBatchBytes removes the previous 100 MiB window in which a
-// high-ratio gzip payload could force the server to allocate far beyond the
-// batch limit before being rejected.
-const MaxDecompressedSize = 8 * 1024 * 1024
-
-// Open decodes, decrypts (SM4-GCM), and decompresses an envelope's payload.
-// sm4Key 在 encryption=sm4_gcm 时必须为 16 字节；encryption=none 时忽略（可 nil）。
-func Open(env *SecureEnvelope, sm4Key []byte) ([]byte, error) {
-	// Algorithm allow-list (defense in depth): v1 only supports none/gzip
-	// compression and none/sm4_gcm encryption. Other values are rejected rather
-	// than silently treated as raw bytes. The caller additionally enforces that
-	// these equal the negotiated selection.
-	switch env.Compression {
-	case CompressionNone, CompressionGzip:
-	default:
-		return nil, NewError(NumEnvelope, CodeEnvelope,
-			fmt.Sprintf("unsupported compression: %q", env.Compression))
-	}
-	switch env.Encryption {
-	case EncryptionNone, EncryptionSM4:
-	default:
-		return nil, NewError(NumEnvelope, CodeEnvelope,
-			fmt.Sprintf("unsupported encryption: %q", env.Encryption))
-	}
-
-	// Base64 decode
-	raw, err := base64.StdEncoding.DecodeString(env.Payload)
-	if err != nil {
-		return nil, WrapError(NumEnvelope, CodeEnvelope, "base64 decode payload", err)
-	}
-
-	// Decrypt (SM4-GCM)。密文格式：nonce(12) + ciphertext + tag。
-	if env.Encryption == EncryptionSM4 {
-		if len(sm4Key) != 16 {
-			return nil, NewError(NumEnvelope, CodeEnvelope,
-				fmt.Sprintf("SM4 key must be 16 bytes, got %d", len(sm4Key)))
-		}
-		gcm, err := sm4.NewGCM(sm4Key)
-		if err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "SM4-GCM init", err)
-		}
-		nonceSize := gcm.NonceSize()
-		if len(raw) < nonceSize+gcm.Overhead() {
-			return nil, NewError(NumEnvelope, CodeEnvelope, "ciphertext too short for SM4-GCM")
-		}
-		nonce, ct := raw[:nonceSize], raw[nonceSize:]
-		raw, err = gcm.Open(nil, nonce, ct, nil)
-		if err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "SM4-GCM decrypt", err)
-		}
-	}
-
-	// Decompress
-	if env.Compression == CompressionGzip {
+// decompress 按算法解压 src，强制 MaxDecompressedSize 上限防放大攻击。
+func decompress(c corepb.Compression, src []byte) ([]byte, error) {
+	switch c {
+	case corepb.Compression_COMPRESSION_UNSPECIFIED, corepb.Compression_COMPRESSION_NONE:
+		return src, nil
+	case corepb.Compression_COMPRESSION_GZIP:
 		r := gzipReaderPool.Get().(*gzip.Reader)
-		if err := r.Reset(bytes.NewReader(raw)); err != nil {
+		if err := r.Reset(bytes.NewReader(src)); err != nil {
 			gzipReaderPool.Put(r)
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip reader", err)
 		}
-		defer gzipReaderPool.Put(r) // Reset 会重置状态，无需 Close 即可复用
-
-		// Limit decompressed size to prevent zip-bomb OOM
-		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
-		// 预分配解压缓冲（gzip 典型压缩比 3-4x），避免 io.ReadAll 的多次 grow+copy。
+		defer gzipReaderPool.Put(r)
 		var buf bytes.Buffer
-		buf.Grow(len(raw) * 4)
+		buf.Grow(len(src) * 4)
+		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
 		if _, err := io.Copy(&buf, lr); err != nil {
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip decompress", err)
 		}
 		if lr.N == 0 {
-			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed payload exceeds %d bytes limit", MaxDecompressedSize))
+			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
 		}
 		return buf.Bytes(), nil
+	case corepb.Compression_COMPRESSION_ZSTD:
+		dec := zstdDecoderPool.Get().(*zstd.Decoder)
+		defer zstdDecoderPool.Put(dec)
+		out, err := dec.DecodeAll(src, make([]byte, 0, len(src)*4))
+		if err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "zstd decompress", err)
+		}
+		if len(out) > MaxDecompressedSize {
+			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
+		}
+		return out, nil
+	case corepb.Compression_COMPRESSION_LZ4:
+		r := lz4.NewReader(bytes.NewReader(src))
+		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
+		var buf bytes.Buffer
+		buf.Grow(len(src) * 4)
+		if _, err := io.Copy(&buf, lr); err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 decompress", err)
+		}
+		if lr.N == 0 {
+			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
+		}
+		return buf.Bytes(), nil
+	default:
+		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
 	}
-
-	return raw, nil
 }
 
-// EncodeEnvelope JSON-encodes the envelope.
+// EncodeEnvelope 序列化 envelope 为 wire bytes（proto）。
 func EncodeEnvelope(env *SecureEnvelope) ([]byte, error) {
-	return FastMarshal(env)
+	return proto.Marshal(env)
 }
 
-// DecodeEnvelope JSON-decodes into a SecureEnvelope.
+// DecodeEnvelope 从 wire bytes 解析 envelope。
 func DecodeEnvelope(data []byte) (*SecureEnvelope, error) {
 	var env SecureEnvelope
-	if err := FastUnmarshal(data, &env); err != nil {
+	if err := proto.Unmarshal(data, &env); err != nil {
 		return nil, WrapError(NumEnvelope, CodeEnvelope, "decode envelope", err)
 	}
 	return &env, nil

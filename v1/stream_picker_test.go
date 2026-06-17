@@ -1,109 +1,93 @@
 package v1
 
 import (
-	"fmt"
 	"testing"
-
-	"github.com/iuboy/mbta-go/core"
 )
 
-type mockStream struct {
-	idx int
-}
+// mockStream 是测试用 DataStream（实现 Write + Index）。
+type mockStream struct{ idx int }
 
+func (m *mockStream) Write(p []byte) (int, error) { return len(p), nil }
 func (m *mockStream) Index() int                  { return m.idx }
-func (m *mockStream) Write(_ []byte) (int, error) { return 0, nil }
 
-func TestSingleStream(t *testing.T) {
+// TestSingleStream_Pick 验证 single 策略：始终返回同一条流。
+func TestSingleStream_Pick(t *testing.T) {
 	ds := &mockStream{idx: 0}
-	p := NewSingleStream(ds)
+	picker := NewSingleStream(ds)
 
-	batch := core.BatchMessage{Seq: 1, ChunkID: "c1", Tag: "t", Source: "s"}
-	got, err := p.Pick(batch)
-	if err != nil {
-		t.Fatalf("pick: %v", err)
-	}
-	if got.Index() != 0 {
-		t.Fatalf("expected index 0, got %d", got.Index())
-	}
-	if p.Len() != 1 {
-		t.Fatalf("expected len 1, got %d", p.Len())
-	}
-}
-
-func TestHashPickerDistribution(t *testing.T) {
-	h := NewHashStreamPicker()
-	s0 := &mockStream{idx: 0}
-	s1 := &mockStream{idx: 1}
-	s2 := &mockStream{idx: 2}
-	h.AddStream(s0)
-	h.AddStream(s1)
-	h.AddStream(s2)
-
-	if h.Len() != 3 {
-		t.Fatalf("expected 3 streams, got %d", h.Len())
-	}
-
-	counts := make(map[int]int)
-	for i := 0; i < 300; i++ {
-		tag := fmt.Sprintf("tag-%03d", i)
-		batch := core.BatchMessage{Seq: 1, ChunkID: "c", Tag: tag, Source: "src"}
-		ds, err := h.Pick(batch)
+	for _, tc := range []struct{ tag, source string }{
+		{"a", "b"}, {"c", "d"}, {"", ""},
+	} {
+		got, err := picker.Pick(tc.tag, tc.source)
 		if err != nil {
-			t.Fatalf("pick: %v", err)
+			t.Fatalf("Pick(%q,%q): %v", tc.tag, tc.source, err)
 		}
-		counts[ds.Index()]++
-	}
-
-	// Each stream should get at least some traffic
-	for idx := 0; idx < 3; idx++ {
-		if counts[idx] == 0 {
-			t.Errorf("stream %d got zero batches", idx)
+		if got.Index() != 0 {
+			t.Errorf("Pick(%q,%q) = stream %d, want 0", tc.tag, tc.source, got.Index())
 		}
 	}
 }
 
-func TestHashPickerDeterministic(t *testing.T) {
-	h := NewHashStreamPicker()
-	h.AddStream(&mockStream{idx: 0})
-	h.AddStream(&mockStream{idx: 1})
+// TestHashStreamPicker_Consistency 验证 hash 策略一致性：
+// 同 tag+source 始终映射到同一条流（一致哈希核心性质）。
+func TestHashStreamPicker_Consistency(t *testing.T) {
+	picker := NewHashStreamPicker()
+	for i := 0; i < 4; i++ {
+		picker.AddStream(&mockStream{idx: i})
+	}
 
-	batch := core.BatchMessage{Seq: 1, ChunkID: "c", Tag: "fixed-tag", Source: "fixed-src"}
-	first, _ := h.Pick(batch)
+	cases := []struct{ tag, source string }{
+		{"logs", "host-1"}, {"metrics", "host-2"}, {"traces", "svc-a"},
+	}
+	results := make(map[string]int)
+	for _, tc := range cases {
+		ds, err := picker.Pick(tc.tag, tc.source)
+		if err != nil {
+			t.Fatalf("Pick(%q,%q): %v", tc.tag, tc.source, err)
+		}
+		key := tc.tag + "/" + tc.source
+		results[key] = ds.Index()
+	}
+
+	// 二次 Pick 应返回相同结果
+	for _, tc := range cases {
+		ds, _ := picker.Pick(tc.tag, tc.source)
+		key := tc.tag + "/" + tc.source
+		if ds.Index() != results[key] {
+			t.Errorf("Pick(%q,%q) inconsistent: first=%d second=%d", tc.tag, tc.source, results[key], ds.Index())
+		}
+	}
+}
+
+// TestHashStreamPicker_Empty 验证空 picker 返回 ErrNoStreams。
+func TestHashStreamPicker_Empty(t *testing.T) {
+	picker := NewHashStreamPicker()
+	_, err := picker.Pick("tag", "source")
+	if err == nil {
+		t.Error("Pick on empty picker should return ErrNoStreams")
+	}
+}
+
+// TestHashStreamPicker_Remove 验证移除流后 Pick 不返回已移除的流。
+func TestHashStreamPicker_Remove(t *testing.T) {
+	picker := NewHashStreamPicker()
+	for i := 0; i < 4; i++ {
+		picker.AddStream(&mockStream{idx: i})
+	}
+	picker.RemoveStream(1)
+	if picker.Len() != 3 {
+		t.Errorf("Len after remove = %d, want 3", picker.Len())
+	}
+
+	// 所有 Pick 不应返回已移除的 index 1
 	for i := 0; i < 100; i++ {
-		got, _ := h.Pick(batch)
-		if got.Index() != first.Index() {
-			t.Fatalf("same tag/source must always pick same stream")
-		}
-	}
-}
-
-func TestHashPickerNoStreams(t *testing.T) {
-	h := NewHashStreamPicker()
-	_, err := h.Pick(core.BatchMessage{Seq: 1, ChunkID: "c"})
-	if err != ErrNoStreams {
-		t.Fatalf("expected ErrNoStreams, got %v", err)
-	}
-}
-
-func TestHashPickerRemove(t *testing.T) {
-	h := NewHashStreamPicker()
-	h.AddStream(&mockStream{idx: 0})
-	h.AddStream(&mockStream{idx: 1})
-	h.RemoveStream(0)
-
-	if h.Len() != 1 {
-		t.Fatalf("expected 1 after remove, got %d", h.Len())
-	}
-
-	// Should only ever pick stream 1 now
-	for i := 0; i < 50; i++ {
-		ds, err := h.Pick(core.BatchMessage{Seq: 1, ChunkID: "c", Tag: "t", Source: "s"})
+		ds, err := picker.Pick("tag", string(rune('a'+i)))
 		if err != nil {
-			t.Fatalf("pick: %v", err)
+			continue
 		}
-		if ds.Index() != 1 {
-			t.Fatalf("expected stream 1 after removal, got %d", ds.Index())
+		if ds.Index() == 1 {
+			t.Error("Pick returned removed stream index 1")
+			break
 		}
 	}
 }

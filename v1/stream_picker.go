@@ -4,8 +4,6 @@ import (
 	"io"
 	"sort"
 	"sync"
-
-	"github.com/iuboy/mbta-go/core"
 )
 
 // FNV-1a 32-bit 常量。手写以消除 hash/fnv 的对象分配（每帧一次的发送热路径）。
@@ -22,7 +20,7 @@ type DataStream interface {
 
 // StreamPicker selects which data stream a batch should be sent on.
 type StreamPicker interface {
-	Pick(batch core.BatchMessage) (DataStream, error)
+	Pick(tag, source string) (DataStream, error)
 	AddStream(ds DataStream)
 	RemoveStream(index int)
 	Len() int
@@ -39,10 +37,10 @@ func NewSingleStream(ds DataStream) StreamPicker {
 	return &singleStream{ds: ds}
 }
 
-func (s *singleStream) Pick(_ core.BatchMessage) (DataStream, error) { return s.ds, nil }
-func (s *singleStream) AddStream(_ DataStream)                       {}
-func (s *singleStream) RemoveStream(_ int)                           {}
-func (s *singleStream) Len() int                                     { return 1 }
+func (s *singleStream) Pick(_, _ string) (DataStream, error) { return s.ds, nil }
+func (s *singleStream) AddStream(_ DataStream)               {}
+func (s *singleStream) RemoveStream(_ int)                   {}
+func (s *singleStream) Len() int                             { return 1 }
 
 // --- HashStreamPicker: distributes by tag+source hash ---
 
@@ -69,7 +67,7 @@ func NewHashStreamPicker() StreamPicker {
 	}
 }
 
-func (h *hashStreamPicker) Pick(batch core.BatchMessage) (DataStream, error) {
+func (h *hashStreamPicker) Pick(tag, source string) (DataStream, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
@@ -77,7 +75,7 @@ func (h *hashStreamPicker) Pick(batch core.BatchMessage) (DataStream, error) {
 		return nil, ErrNoStreams
 	}
 
-	target := hashTagSource(batch.Tag, batch.Source)
+	target := hashTagSource(tag, source)
 	idx := sort.Search(len(h.ring), func(i int) bool {
 		return h.ring[i].hash >= target
 	})

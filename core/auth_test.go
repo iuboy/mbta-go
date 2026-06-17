@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
 const testAgentID = "agent-123"
@@ -105,95 +107,80 @@ func TestAgentIdentity(t *testing.T) {
 	})
 }
 
-// TestGenerateSessionKeys tests the GenerateSessionKeys function.
+// TestGenerateSessionKeys tests the GenerateSessionKeys function (r2 按 CipherSuite)。
 func TestGenerateSessionKeys(t *testing.T) {
-	t.Run("generate session keys successfully", func(t *testing.T) {
-		keys, err := GenerateSessionKeys()
+	t.Run("intl suite", func(t *testing.T) {
+		keys, err := GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
 		if err != nil {
-			t.Errorf("GenerateSessionKeys() unexpected error: %v", err)
+			t.Fatalf("GenerateSessionKeys(INTL): %v", err)
 		}
-
-		// Check KeyID is not empty
 		if keys.KeyID == "" {
-			t.Error("KeyID should not be empty")
+			t.Error("KeyID empty")
 		}
-
-		// Check HMACKey length (32 bytes)
-		if len(keys.HMACKey) != 32 {
-			t.Errorf("HMACKey length = %d, want 32", len(keys.HMACKey))
+		if keys.CipherSuite != corepb.CipherSuite_CIPHER_SUITE_INTL {
+			t.Errorf("CipherSuite = %v, want INTL", keys.CipherSuite)
 		}
+		if len(keys.HMACKey) != HMACKeyLenIntl {
+			t.Errorf("HMACKey len = %d, want %d", len(keys.HMACKey), HMACKeyLenIntl)
+		}
+		if len(keys.AEADKey) != AEADKeyLenIntl {
+			t.Errorf("AEADKey len = %d, want %d", len(keys.AEADKey), AEADKeyLenIntl)
+		}
+	})
 
-		// Check HMACAlgo
-		if keys.HMACAlgo != HMACAlgoSHA256 {
-			t.Errorf("HMACAlgo = %q, want 'sha256'", keys.HMACAlgo)
+	t.Run("gm suite", func(t *testing.T) {
+		keys, err := GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_GM)
+		if err != nil {
+			t.Fatalf("GenerateSessionKeys(GM): %v", err)
+		}
+		if len(keys.HMACKey) != HMACKeyLenGM {
+			t.Errorf("HMACKey len = %d, want %d", len(keys.HMACKey), HMACKeyLenGM)
+		}
+		if len(keys.AEADKey) != AEADKeyLenGM {
+			t.Errorf("AEADKey len = %d, want %d", len(keys.AEADKey), AEADKeyLenGM)
 		}
 	})
 
 	t.Run("generated keys are unique", func(t *testing.T) {
-		keys1, err1 := GenerateSessionKeys()
-		keys2, err2 := GenerateSessionKeys()
-
-		if err1 != nil || err2 != nil {
-			t.Errorf("GenerateSessionKeys() errors: %v, %v", err1, err2)
-		}
-
-		// KeyIDs should be different
-		if keys1.KeyID == keys2.KeyID {
-			t.Error("Generated KeyIDs should be unique")
-		}
-
-		// HMAC keys should be different
-		if string(keys1.HMACKey) == string(keys2.HMACKey) {
-			t.Error("Generated HMAC keys should be unique")
+		k1, _ := GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
+		k2, _ := GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
+		if k1.KeyID == k2.KeyID || string(k1.HMACKey) == string(k2.HMACKey) {
+			t.Error("generated keys should be unique")
 		}
 	})
 }
 
-// TestSessionKeysHMACKeyBase64 tests the HMACKeyBase64 method.
-func TestSessionKeysHMACKeyBase64(t *testing.T) {
-	keys := &SessionKeys{
-		KeyID:    "key-123",
-		HMACKey:  []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
-		HMACAlgo: HMACAlgoSHA256,
-	}
-
-	b64 := keys.HMACKeyBase64()
-	if b64 == "" {
-		t.Error("HMACKeyBase64 should not be empty")
-	}
-
-	// Base64 encoding of 8 bytes should be longer than 8
-	if len(b64) <= 8 {
-		t.Errorf("HMACKeyBase64 length = %d, should be > 8", len(b64))
-	}
-
-	// Should be valid base64 (only alphanumeric, +, /, = characters)
-	for _, c := range b64 {
-		if !isBase64Char(c) {
-			t.Errorf("HMACKeyBase64 contains invalid character: %c", c)
-		}
-	}
-}
-
-// TestSessionKeys tests SessionKeys structure.
+// TestSessionKeys tests SessionKeys structure (r2)。
 func TestSessionKeys(t *testing.T) {
-	t.Run("session keys with all fields", func(t *testing.T) {
-		keys := &SessionKeys{
-			KeyID:    "key-123",
-			HMACKey:  make([]byte, 32),
-			HMACAlgo: HMACAlgoSHA256,
-		}
+	keys := &SessionKeys{
+		KeyID:       "key-123",
+		CipherSuite: corepb.CipherSuite_CIPHER_SUITE_INTL,
+		HMACKey:     make([]byte, HMACKeyLenIntl),
+		AEADKey:     make([]byte, AEADKeyLenIntl),
+	}
+	if keys.KeyID != "key-123" {
+		t.Errorf("KeyID = %q", keys.KeyID)
+	}
+	if len(keys.HMACKey) != HMACKeyLenIntl || len(keys.AEADKey) != AEADKeyLenIntl {
+		t.Errorf("key lengths: hmac=%d aead=%d", len(keys.HMACKey), len(keys.AEADKey))
+	}
+}
 
-		if keys.KeyID != "key-123" {
-			t.Errorf("KeyID = %q, want 'key-123'", keys.KeyID)
-		}
-		if len(keys.HMACKey) != 32 {
-			t.Errorf("HMACKey length = %d, want 32", len(keys.HMACKey))
-		}
-		if keys.HMACAlgo != HMACAlgoSHA256 {
-			t.Errorf("HMACAlgo = %q, want 'sha256'", keys.HMACAlgo)
-		}
-	})
+// TestComputeChallengeResponse r2：按 CipherSuite 的挑战响应。
+func TestComputeChallengeResponse(t *testing.T) {
+	intl := ComputeChallengeResponse("token", "nonce", corepb.CipherSuite_CIPHER_SUITE_INTL)
+	gm := ComputeChallengeResponse("token", "nonce", corepb.CipherSuite_CIPHER_SUITE_GM)
+	if len(intl) != 32 {
+		t.Errorf("intl challenge response len = %d, want 32 (SHA-256)", len(intl))
+	}
+	if len(gm) != 32 {
+		t.Errorf("gm challenge response len = %d, want 32 (SM3)", len(gm))
+	}
+	// 不同 token 不同响应
+	other := ComputeChallengeResponse("other", "nonce", corepb.CipherSuite_CIPHER_SUITE_INTL)
+	if string(intl) == string(other) {
+		t.Error("different tokens should yield different responses")
+	}
 }
 
 // TestStaticTokenValidatorWithPermissions tests token validator with permissions.
@@ -248,14 +235,6 @@ func TestTokenValidatorInterface(t *testing.T) {
 	}
 }
 
-// isBase64Char checks if a character is valid in base64 encoding.
-func isBase64Char(c rune) bool {
-	return (c >= 'A' && c <= 'Z') ||
-		(c >= 'a' && c <= 'z') ||
-		(c >= '0' && c <= '9') ||
-		c == '+' || c == '/' || c == '='
-}
-
 // TestGenerateSessionKeysRandomness tests that generated keys have randomness.
 func TestGenerateSessionKeysRandomness(t *testing.T) {
 	t.Run("generated keys are random", func(t *testing.T) {
@@ -263,7 +242,7 @@ func TestGenerateSessionKeysRandomness(t *testing.T) {
 		seenKeys := make(map[string]bool)
 
 		for i := 0; i < iterations; i++ {
-			keys, err := GenerateSessionKeys()
+			keys, err := GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
 			if err != nil {
 				t.Errorf("GenerateSessionKeys() iteration %d error: %v", i, err)
 			}

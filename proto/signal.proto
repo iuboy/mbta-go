@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package mbta.v1;
+
+option go_package = "github.com/iuboy/mbta-go/corepb;mbta";
+
+// SignalBatch 对齐 OpenTelemetry 分层：Resource + InstrumentationScope + signals（§6）。
+// Server 侧 MUST 能无损映射到 OTLP Logs/Metrics/Traces/Profiles（附录 C）。
+message SignalBatch {
+  string schema_url = 1;
+  Resource resource = 2;
+  InstrumentationScope scope = 3;
+  repeated SignalRecord signals = 4;
+}
+
+message Resource {
+  map<string, AnyValue> attributes = 1;
+}
+
+message InstrumentationScope {
+  string name = 1;
+  string version = 2;
+  string collector_id = 3;
+}
+
+// AnyValue 表达动态类型字段（body、attributes 值）。
+message AnyValue {
+  oneof value {
+    string string_value = 1;
+    int64 int_value = 2;
+    double double_value = 3;
+    bytes bytes_value = 4;
+    bool bool_value = 5;
+  }
+}
+
+// histogram signal 的 exponential bucket 表达（§6.2，OTel Exponential Histogram）。
+message ExponentialHistogram {
+  int32 scale = 1;
+  int32 offset = 2;
+  repeated uint64 positive_buckets = 3;
+  repeated uint64 negative_buckets = 4;
+  double sum = 5;
+  uint64 count = 6;
+  optional double min = 7;
+  optional double max = 8;
+}
+
+// profile signal 载荷 + 与其他信号的双向关联（§6.2，OTLP v1.3.0+）。
+message ProfilePayload {
+  string profile_type = 1;       // cpu / heap / mutex / goroutine ...
+  bytes payload = 2;
+  string profile_id = 3;
+  string trace_id_ref = 4;
+  string span_id_ref = 5;
+  string log_record_ref = 6;
+}
+
+// 统一信号外壳。signal_type 必填；log MUST 用 "log"。
+message SignalRecord {
+  string signal_type = 1;
+  string event_id = 2;
+  int64 time_unix_ms = 3;
+  int64 observed_time_unix_ms = 4;
+  string trace_id = 5;
+  string span_id = 6;
+  string parent_span_id = 7;
+  map<string, AnyValue> attributes = 8;
+  AnyValue body = 9;
+  int32 severity_number = 10;
+  string severity_text = 11;
+  string metric_name = 12;
+  map<string, double> metric_fields = 13;
+  string unit = 14;
+  string temporality = 15;
+  bool is_monotonic = 16;
+  string name = 17;
+  string kind = 18;
+  int64 start_time_unix_ms = 19;
+  int64 end_time_unix_ms = 20;
+  string status_code = 21;
+  string status_message = 22;
+  ExponentialHistogram exp_histogram = 23;  // signal_type=histogram 且 aggregation=exponential
+  ProfilePayload profile = 24;              // signal_type=profile
+}

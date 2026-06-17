@@ -1,227 +1,98 @@
 package core
 
 import (
-	"encoding/json"
+	"fmt"
+
+	corepb "github.com/iuboy/mbta-go/corepb"
+	"google.golang.org/protobuf/proto"
 )
 
-// HelloMessage is sent by the agent on connect (C→S).
-type HelloMessage struct {
-	AgentID       string   `json:"agent_id"`
-	Hostname      string   `json:"hostname"`
-	Version       int      `json:"version"`
-	AgentVersion  string   `json:"agent_version"`
-	Capabilities  []string `json:"capabilities"`
-	InstanceID    string   `json:"instance_id"`
-	ConnID        string   `json:"conn_id,omitempty"`
-	StartedAtUnix int64    `json:"started_at_unix,omitempty"`
-}
+// r2 控制面/数据面消息类型 = corepb 生成类型（core spec §4 / §9.5）。
+//
+// 与旧 JSON struct 的差异：session_id / chunk_id / nonce / 密钥为原生 bytes（去 base64）；
+// chunk_id 为 ULID 16B。字段号即 wire 稳定性契约（§1.4 只追加纪律）。
+type (
+	HelloMessage      = corepb.HelloMessage
+	HelloAckMessage   = corepb.HelloAckMessage
+	AuthMessage       = corepb.AuthMessage
+	AuthOKMessage     = corepb.AuthOKMessage
+	AuthFailMessage   = corepb.AuthFailMessage
+	BatchMessage      = corepb.BatchMessage
+	DatagramMessage   = corepb.DatagramMessage
+	AckMessage        = corepb.AckMessage
+	NackMessage       = corepb.NackMessage
+	PartialAckMessage = corepb.PartialAckMessage
+	RejectedEvent     = corepb.RejectedEvent
+	WindowMessage     = corepb.WindowMessage
+	ThrottleMessage   = corepb.ThrottleMessage
+	PingMessage       = corepb.PingMessage
+	PongMessage       = corepb.PongMessage
+	CloseMessage      = corepb.CloseMessage
+	ErrorMessage      = corepb.ErrorMessage
 
-// Validate 检查HelloMessage的有效性。
-// 注意：不校验 Version 字段的具体取值——版本语义由上层（version.go ParseVersion/
-// handler 按协议版本）管理，使 core 的消息结构可被 v1/v2/ntls 复用而不冲突。
-func (m *HelloMessage) Validate() error {
-	if m.AgentID == "" {
+	// AckMode 重导出，便于 core 包调用方引用。
+	AckMode = corepb.AckMode
+)
+
+// ValidateHello 校验 HELLO。agent_id 必填。
+func ValidateHello(m *HelloMessage) error {
+	if m == nil || m.GetAgentId() == "" {
 		return NewError(NumValidation, CodeValidation, "agent_id is required")
 	}
 	return nil
 }
 
-// HelloAckMessage is the server's response to HELLO (S→C).
-type HelloAckMessage struct {
-	ServerVersion        int           `json:"server_version"`
-	ServerID             string        `json:"server_id"`
-	SessionID            string        `json:"session_id"`
-	SelectedCapabilities []string      `json:"selected_capabilities"`
-	Codec                string        `json:"codec"`
-	Compression          string        `json:"compression"`
-	HMACAlgo             string        `json:"hmac_algo"`
-	Encryption           string        `json:"encryption"`
-	HeartbeatIntervalSec int           `json:"heartbeat_interval_sec"`
-	MaxFramePayloadBytes int           `json:"max_frame_payload_bytes"`
-	MaxBatchBytes        int           `json:"max_batch_bytes"`
-	MaxEventBytes        int           `json:"max_event_bytes"`
-	MaxBatchEvents       int           `json:"max_batch_events"`
-	InitialWindow        WindowMessage `json:"initial_window"`
-	ChallengeNonce       string        `json:"challenge_nonce,omitempty"` // 服务端生成的挑战，客户端需回传
-}
-
-// Validate 检查HelloAckMessage的有效性。
-// 注意：不校验 ServerVersion 的具体取值——版本语义由上层管理，使结构可跨版本复用。
-func (m *HelloAckMessage) Validate() error {
-	if m.SessionID == "" {
+// ValidateHelloAck 校验 HELLO_ACK。session_id 必填。
+func ValidateHelloAck(m *HelloAckMessage) error {
+	if m == nil || len(m.GetSessionId()) == 0 {
 		return NewError(NumValidation, CodeValidation, "session_id is required")
 	}
 	return nil
 }
 
-// AuthMessage carries authentication credentials (C→S).
-type AuthMessage struct {
-	Token      string `json:"token,omitempty"`
-	AgentID    string `json:"agent_id"`
-	SessionID  string `json:"session_id"`
-	HMACAlgo   string `json:"hmac_algo,omitempty"`
-	SM2CertPEM string `json:"sm2_cert_pem,omitempty"` // reserved：sm2_cert_auth 协商时填充（v1 未实现，当前无生产赋值）
-	AuthNonce  string `json:"auth_nonce"`
-}
-
-// Validate 检查AuthMessage的有效性。
-func (m *AuthMessage) Validate() error {
-	if m.AgentID == "" {
+// ValidateAuth 校验 AUTH。agent_id / session_id / auth_nonce 必填。
+func ValidateAuth(m *AuthMessage) error {
+	if m == nil {
+		return NewError(NumValidation, CodeValidation, "nil auth message")
+	}
+	if m.GetAgentId() == "" {
 		return NewError(NumValidation, CodeValidation, "agent_id is required")
 	}
-	if m.SessionID == "" {
+	if len(m.GetSessionId()) == 0 {
 		return NewError(NumValidation, CodeValidation, "session_id is required")
 	}
-	if m.AuthNonce == "" {
+	if len(m.GetAuthNonce()) == 0 {
 		return NewError(NumValidation, CodeValidation, "auth_nonce is required")
 	}
 	return nil
 }
 
-// AuthOKMessage is sent on successful authentication (S→C).
-type AuthOKMessage struct {
-	SessionID        string `json:"session_id"`
-	KeyID            string `json:"key_id"`
-	HMACKey          string `json:"hmac_key,omitempty"`            // Base64(32 bytes)
-	HMACAlgo         string `json:"hmac_algo,omitempty"`           // "sha256" or "sm3"
-	SM4Key           string `json:"sm4_key,omitempty"`             // reserved：sm4_gcm 协商时下发（v1 未实现，当前无生产赋值）
-	ServerSM2CertPEM string `json:"server_sm2_cert_pem,omitempty"` // reserved：sm2_cert_auth 协商时下发（v1 未实现）
-	ExpiresAtUnix    int64  `json:"expires_at_unix,omitempty"`
-}
-
-// AuthFailMessage is sent on authentication failure (S→C).
-type AuthFailMessage struct {
-	Code      string `json:"code"`
-	Reason    string `json:"reason"`
-	Retryable bool   `json:"retryable"`
-	// ChallengeNonce carries a freshly rotated server challenge on retryable
-	// failures. Each challenge is valid for exactly one AUTH attempt, so a
-	// client implementing retry MUST recompute AuthNonce against this new nonce
-	// before resending. Older clients that do not recognize this field simply
-	// surface the failure (backwards compatible). Optional: omitted on
-	// non-retryable failures (e.g. too_many_attempts).
-	ChallengeNonce string `json:"challenge_nonce,omitempty"`
-}
-
-// BatchMessage carries a batch of events inside the SecureEnvelope payload.
-type BatchMessage struct {
-	Seq         uint64          `json:"seq"`
-	ChunkID     string          `json:"chunk_id"`
-	Tag         string          `json:"tag,omitempty"`
-	Source      string          `json:"source,omitempty"`
-	EventsCount int             `json:"events_count,omitempty"` // 事件数，供服务端 RawEventSink 快速路径省去 signalBatch 解码
-	Batch       json.RawMessage `json:"batch"`                  // 原始 SignalBatch JSON（延迟解码）
-}
-
-// Validate 检查BatchMessage的有效性。
-func (m *BatchMessage) Validate() error {
-	if m.Seq == 0 {
+// ValidateBatch 校验 BATCH。seq>=1，chunk_id（ULID 16B）必填，batch 非空。
+func ValidateBatch(m *BatchMessage) error {
+	if m == nil {
+		return NewError(NumValidation, CodeValidation, "nil batch message")
+	}
+	if m.GetSeq() == 0 {
 		return NewError(NumValidation, CodeValidation, "seq must be >= 1")
 	}
-	if m.ChunkID == "" {
+	if len(m.GetChunkId()) == 0 {
 		return NewError(NumValidation, CodeValidation, "chunk_id is required")
 	}
-	if len(m.ChunkID) > 256 {
-		return NewError(NumValidation, CodeValidation, "chunk_id exceeds maximum length of 256")
+	if len(m.GetChunkId()) > 16 {
+		return NewError(NumValidation, CodeValidation, fmt.Sprintf("chunk_id exceeds 16 bytes (ULID), got %d", len(m.GetChunkId())))
 	}
-	if len(m.Batch) == 0 {
+	if len(m.GetBatch()) == 0 {
 		return NewError(NumValidation, CodeValidation, "batch must not be empty")
 	}
-	// JSON 合法性由下游 Unmarshal 强制校验，此处不再重复扫描。
 	return nil
 }
 
-// AckMessage confirms a batch was accepted (S→C).
-type AckMessage struct {
-	Seq        uint64 `json:"seq"`
-	ChunkID    string `json:"chunk_id"`
-	Count      int    `json:"count"`
-	AckMode    string `json:"ack_mode"`
-	ReceivedAt int64  `json:"received_at_unix_ms"`
+// Encode proto 序列化消息。
+func Encode(m proto.Message) ([]byte, error) {
+	return proto.Marshal(m)
 }
 
-// NackMessage rejects an entire batch (S→C).
-type NackMessage struct {
-	Seq          uint64 `json:"seq"`
-	ChunkID      string `json:"chunk_id"`
-	Code         string `json:"code"`
-	Reason       string `json:"reason"`
-	Retryable    bool   `json:"retryable"`
-	RetryAfterMs int    `json:"retry_after_ms,omitempty"`
-}
-
-// PartialAckMessage acknowledges some events and rejects others (S→C).
-type PartialAckMessage struct {
-	Seq      uint64          `json:"seq"`
-	ChunkID  string          `json:"chunk_id"`
-	Accepted []uint32        `json:"accepted,omitempty"`
-	Rejected []RejectedEvent `json:"rejected,omitempty"`
-	AckMode  string          `json:"ack_mode"`
-}
-
-// RejectedEvent describes a single rejected event within a batch.
-type RejectedEvent struct {
-	Index     uint32 `json:"index"`
-	EventID   string `json:"event_id,omitempty"`
-	Code      string `json:"code"`
-	Reason    string `json:"reason"`
-	Retryable bool   `json:"retryable"`
-}
-
-// WindowMessage carries flow-control limits (S→C).
-type WindowMessage struct {
-	MaxInflightBatches int    `json:"max_inflight_batches"`
-	MaxInflightEvents  int    `json:"max_inflight_events"`
-	MaxInflightBytes   int64  `json:"max_inflight_bytes"`
-	Reason             string `json:"reason,omitempty"`
-}
-
-// ThrottleMessage tells the client to pause sending (S→C).
-type ThrottleMessage struct {
-	RetryDelayMs int    `json:"retry_delay_ms"`
-	Code         string `json:"code"`
-	Reason       string `json:"reason"`
-}
-
-// PingMessage is a health-check probe (bidirectional).
-type PingMessage struct {
-	TimeUnixMs int64  `json:"time_unix_ms"`
-	Nonce      string `json:"nonce"`
-}
-
-// PongMessage is a health-check response (bidirectional).
-type PongMessage struct {
-	TimeUnixMs int64  `json:"time_unix_ms"`
-	Nonce      string `json:"nonce"`
-	Status     string `json:"status"` // ok / degraded
-}
-
-// CloseMessage initiates graceful connection close (bidirectional).
-type CloseMessage struct {
-	Code   string `json:"code"`
-	Reason string `json:"reason,omitempty"`
-}
-
-// ErrorMessage reports a protocol error (bidirectional).
-type ErrorMessage struct {
-	Code      string `json:"code"`
-	Reason    string `json:"reason"`
-	Fatal     bool   `json:"fatal"`
-	Retryable bool   `json:"retryable"`
-}
-
-// AuthResult is returned for both AUTH_OK and AUTH_FAIL.
-type AuthResult struct {
-	OK     bool   `json:"ok"`
-	Reason string `json:"reason,omitempty"`
-}
-
-// Encode marshals a message to JSON bytes.
-func Encode(v any) ([]byte, error) {
-	return json.Marshal(v)
-}
-
-// Decode unmarshals JSON bytes into v.
-func Decode(data []byte, v any) error {
-	return json.Unmarshal(data, v)
+// Decode proto 反序列化到 m。
+func Decode(data []byte, m proto.Message) error {
+	return proto.Unmarshal(data, m)
 }

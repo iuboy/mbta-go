@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	mbtatest "github.com/iuboy/mbta-go/testing"
 )
@@ -147,34 +146,6 @@ func TestDurableEventSinkInterface(t *testing.T) {
 		t.Errorf("OnPressure() = %q, want 'normal'", pressure)
 	}
 }
-
-// TestAgentQueue tests AgentQueue structure.
-func TestAgentQueue(t *testing.T) {
-	t.Run("new agent queue", func(t *testing.T) {
-		queue := &AgentQueue{
-			AgentID:   testAgentID,
-			QueueType: "memory",
-			EventsIn:  100,
-			EventsOut: 95,
-			CreatedAt: time.Now(),
-		}
-
-		if queue.AgentID != testAgentID {
-			t.Errorf("AgentID = %q, want 'agent-123'", queue.AgentID)
-		}
-		if queue.QueueType != "memory" {
-			t.Errorf("QueueType = %q, want 'memory'", queue.QueueType)
-		}
-		if queue.EventsIn != 100 {
-			t.Errorf("EventsIn = %d, want 100", queue.EventsIn)
-		}
-		if queue.EventsOut != 95 {
-			t.Errorf("EventsOut = %d, want 95", queue.EventsOut)
-		}
-	})
-}
-
-// TestInflight tests Inflight operations.
 func TestInflight(t *testing.T) {
 	t.Run("Add inflight counters", func(t *testing.T) {
 		inf := &Inflight{}

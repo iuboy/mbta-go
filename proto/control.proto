@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+package mbta.v1;
+
+import "envelope.proto";
+
+option go_package = "github.com/iuboy/mbta-go/corepb;mbta";
+
+// 控制面 + 数据面 wrapper（core spec §4 / §9.5）。
+// 所有控制/数据消息统一按 Codec 编码（§4.1）；chunk_id 为 ULID 16B。
+
+enum AckMode {
+  ACK_MODE_UNSPECIFIED = 0;
+  ACK_MODE_ACCEPTED = 1;   // 已接受，未持久化
+  ACK_MODE_DURABLE = 2;    // 已持久化（durable_ack）
+}
+
+message HelloMessage {
+  string agent_id = 1;
+  string hostname = 2;
+  string instance_id = 3;
+  string agent_version = 4;
+  uint32 frame_version = 5;
+  repeated string capabilities = 6;
+  optional string resource_class = 7;   // embedded/constrained/standard/server（§9.5）
+  optional uint64 mem_limit_kb = 8;     // 受限场景触发服务端降级
+  string conn_id = 9;
+  int64 started_at_unix = 10;
+  optional bytes session_ticket = 11;   // r2 0-RTT：resumption ticket（上次 AUTH_OK 颁发）
+}
+
+message HelloAckMessage {
+  bytes session_id = 1;
+  string server_id = 2;
+  repeated string selected_capabilities = 3;
+  Codec codec = 4;
+  Compression compression = 5;
+  CipherSuite cipher_suite = 6;
+  uint32 max_frame_payload_bytes = 7;
+  uint32 max_batch_bytes = 8;
+  uint32 max_batch_events = 9;
+  uint32 max_event_bytes = 10;
+  WindowMessage initial_window = 11;
+  uint32 heartbeat_interval_sec = 12;
+  bytes challenge_nonce = 13;           // 一次性挑战，供 AUTH 应答
+}
+
+message AuthMessage {
+  string token = 1;
+  string agent_id = 2;
+  bytes session_id = 3;
+  bytes auth_nonce = 4;                 // 基于 challenge_nonce 的应答
+  bytes sm2_cert_pem = 5;               // sm2_cert_auth 协商时
+}
+
+message AuthOKMessage {
+  bytes session_id = 1;
+  string key_id = 2;
+  bytes hmac_key = 3;
+  bytes aes_key = 4;                    // cipher_suite=intl 时
+  bytes sm4_key = 5;                    // cipher_suite=gm 时
+  CipherSuite cipher_suite = 6;
+  int64 expires_at_unix = 7;
+  optional bytes session_ticket = 8;    // r2 0-RTT：新 session ticket（client 保存用于下次 resumption）
+}
+
+message AuthFailMessage {
+  string code = 1;
+  string reason = 2;
+  bool retryable = 3;
+  bytes challenge_nonce = 4;            // retryable 时回传新挑战
+}
+
+message BatchMessage {
+  uint64 seq = 1;
+  bytes chunk_id = 2;                   // ULID 16B
+  string tag = 3;
+  string source = 4;
+  int32 events_count = 5;               // 供 RawEventSink 快速路径
+  bytes batch = 6;                      // SignalBatch 编码字节
+}
+
+message DatagramMessage {
+  uint64 seq = 1;
+  bytes chunk_id = 2;                   // 可选，仅采样/关联
+  bytes batch = 3;
+  int32 events_count = 4;
+}
+
+message AckMessage {
+  uint64 seq = 1;
+  bytes chunk_id = 2;
+  int32 count = 3;
+  AckMode ack_mode = 4;
+  int64 received_at_unix_ms = 5;
+}
+
+message NackMessage {
+  uint64 seq = 1;
+  bytes chunk_id = 2;
+  string code = 3;
+  string reason = 4;
+  bool retryable = 5;
+  int32 retry_after_ms = 6;
+}
+
+message RejectedEvent {
+  uint32 index = 1;
+  string event_id = 2;
+  string code = 3;
+  string reason = 4;
+  bool retryable = 5;
+}
+
+message PartialAckMessage {
+  uint64 seq = 1;
+  bytes chunk_id = 2;
+  AckMode ack_mode = 3;
+  repeated uint32 accepted = 4;
+  repeated RejectedEvent rejected = 5;
+  optional bytes rejected_bitmap = 6;   // 大 batch 紧凑表达（§4.1）
+}
+
+message WindowMessage {
+  int32 max_inflight_batches = 1;
+  int32 max_inflight_events = 2;
+  int64 max_inflight_bytes = 3;
+  string reason = 4;
+}
+
+message ThrottleMessage {
+  int32 retry_delay_ms = 1;
+  string code = 2;
+  string reason = 3;
+}
+
+message PingMessage {
+  int64 time_unix_ms = 1;
+  string nonce = 2;
+}
+
+message PongMessage {
+  int64 time_unix_ms = 1;
+  string nonce = 2;
+  string status = 3;                    // ok / degraded（可携带自省）
+}
+
+message CloseMessage {
+  string code = 1;
+  string reason = 2;
+  optional uint32 close_timeout_ms = 3; // 优雅关闭 drain 超时（§9.6）
+}
+
+message ErrorMessage {
+  uint32 num_code = 1;
+  string code = 2;
+  string reason = 3;
+  bool fatal = 4;
+  bool retryable = 5;
+}

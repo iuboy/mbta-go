@@ -1,5 +1,10 @@
 # MBTA/1 Protocol Specification / MBTA/1 协议规范
 
+> ⚠️ **SUPERSEDED（部分）：** 本文件为 `mbta/1` 早期草案（16B 帧 + JSON envelope）。
+> 权威基准见 [mbta-core-spec.md](./mbta-core-spec.md) r2（8B 帧 / proto envelope / 双投递通道等），
+> QUIC 传输规范见 [mbta-quic-binding.md](./mbta-quic-binding.md)。
+> 本文与 core r2 冲突处（帧格式、envelope、消息类型编号、投递语义）**以 core / 新 binding 为准**。保留作历史参考。
+
 Category: Internet-Draft / 互联网草案  
 Version: 1.0  
 ALPN: `mbta/1`  

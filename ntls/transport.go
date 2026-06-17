@@ -7,18 +7,25 @@ package ntls
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 
 	"github.com/google/uuid"
 	"github.com/iuboy/mbta-go/core"
+	"github.com/iuboy/mbta-go/protocol"
 	"github.com/iuboy/pollux-go/cert"
 	"github.com/iuboy/pollux-go/tlcp"
 )
 
-// ALPNProtocol is the ALPN identifier for MBTA-NTLS.
+// ALPNProtocol is the ALPN identifier for MBTA-NTLS (TLCP).
 const ALPNProtocol = "mbta-ntls/1"
+
+// ALPNProtocolTLS is the ALPN identifier for mbta-tls/1 (TCP + TLS 1.3)。
+const ALPNProtocolTLS = "mbta-tls/1"
 
 // FrameVersion is the frame version for MBTA-NTLS (same as v1).
 const FrameVersion = 0x01
@@ -26,23 +33,33 @@ const FrameVersion = 0x01
 const defaultMaxConcurrentConns = 10000
 
 // ServerConfig holds full server configuration for NTLS.
+//
+// TLSMode 切换两个 ALPN（core spec §10 对称两维）：
+//   - TLSMode=false（默认）：mbta-ntls/1，TCP + TLCP 国密（双 SM2 证书）；
+//   - TLSMode=true：mbta-tls/1，TCP + TLS 1.3 国际（单证书 CertFile/KeyFile）。
 type ServerConfig struct {
-	Address      string
-	SignCertFile string // SM2 签名证书 PEM
-	SignKeyFile  string // SM2 签名私钥 PEM
-	EncCertFile  string // SM2 加密证书 PEM
-	EncKeyFile   string // SM2 加密私钥 PEM
-	CAFile       string // 可选 CA 根证书
-	Auth         core.TokenValidator
-	Policy       core.Policy
-	Sink         core.EventSink
-	Metrics      *core.MBTAMetrics
+	Address            string
+	TLSMode            bool   // true=mbta-tls/1（TLS1.3），false=mbta-ntls/1（TLCP，默认）
+	CertFile           string // TLS1.3 证书 PEM（TLSMode=true；单证书）
+	KeyFile            string // TLS1.3 私钥 PEM（TLSMode=true）
+	SignCertFile       string // SM2 签名证书 PEM（TLSMode=false）
+	SignKeyFile        string // SM2 签名私钥 PEM（TLSMode=false）
+	EncCertFile        string // SM2 加密证书 PEM（TLSMode=false）
+	EncKeyFile         string // SM2 加密私钥 PEM（TLSMode=false）
+	CAFile             string // 可选 CA 根证书（两种模式共用）
+	Auth               core.TokenValidator
+	Policy             core.Policy
+	Sink               core.EventSink
+	Metrics            *core.MBTAMetrics
 	ServerID           string // 服务端标识，回填 HELLO_ACK；空则 NewServer 自动生成 UUID v7
 	MaxConcurrentConns int    // 并发连接上限，0 = 使用 defaultMaxConcurrentConns
 }
 
-// ClientCredentials holds NTLS client credentials（双 SM2 证书）。
+// ClientCredentials holds NTLS client credentials（双 SM2 证书，或 TLS1.3 单证书）。
 type ClientCredentials struct {
+	TLSMode            bool // true=TLS1.3 单证书，false=TLCP 双 SM2
+	CertFile           string
+	KeyFile            string
 	SignCertFile       string
 	SignKeyFile        string
 	EncCertFile        string
@@ -111,6 +128,67 @@ func buildClientTLCP(cfg *ClientCredentials) (*tlcp.Config, error) {
 	return tc, nil
 }
 
+// --- TLS 1.3 配置（mbta-tls/1，core spec §10 对称补齐）---
+
+// buildServerTLS13 构建 TLS 1.3 server 配置（国际单证书）。
+func buildServerTLS13(cfg *ServerConfig) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	if err != nil {
+		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load TLS1.3 cert/key", err)
+	}
+	tc := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+		NextProtos:   []string{ALPNProtocolTLS},
+	}
+	if cfg.CAFile != "" {
+		pool := x509.NewCertPool()
+		caData, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "read CA file", err)
+		}
+		if !pool.AppendCertsFromPEM(caData) {
+			return nil, core.NewError(core.NumTLS, core.CodeTLS, "failed to append CA")
+		}
+		tc.ClientCAs = pool
+		tc.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return tc, nil
+}
+
+// buildClientTLS13 构建 TLS 1.3 client 配置。
+func buildClientTLS13(cfg *ClientCredentials) (*tls.Config, error) {
+	if cfg == nil {
+		return nil, core.NewError(core.NumCredential, core.CodeCredential, "TLS1.3 credentials required")
+	}
+	tc := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		NextProtos:         []string{ALPNProtocolTLS},
+		ServerName:         cfg.ServerName,
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		ClientSessionCache: tls.NewLRUClientSessionCache(8), // TLS 1.3 session resumption（降低 resumption 握手开销）
+	}
+	if cfg.CAFile != "" {
+		pool := x509.NewCertPool()
+		caData, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "read CA file", err)
+		}
+		if !pool.AppendCertsFromPEM(caData) {
+			return nil, core.NewError(core.NumTLS, core.CodeTLS, "failed to append CA")
+		}
+		tc.RootCAs = pool
+	}
+	if cfg.CertFile != "" && cfg.KeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client cert/key", err)
+		}
+		tc.Certificates = []tls.Certificate{cert}
+	}
+	return tc, nil
+}
+
 // --- Listen / Dial ---
 
 type Listener struct {
@@ -122,6 +200,17 @@ func (l *Listener) Close() error              { return l.inner.Close() }
 func (l *Listener) Addr() net.Addr            { return l.inner.Addr() }
 
 func Listen(cfg *ServerConfig) (*Listener, error) {
+	if cfg.TLSMode {
+		tc, err := buildServerTLS13(cfg)
+		if err != nil {
+			return nil, err
+		}
+		ln, err := tls.Listen("tcp", cfg.Address, tc)
+		if err != nil {
+			return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen tls1.3", err)
+		}
+		return &Listener{inner: ln}, nil
+	}
 	tc, err := buildServerTLCP(cfg)
 	if err != nil {
 		return nil, err
@@ -133,17 +222,29 @@ func Listen(cfg *ServerConfig) (*Listener, error) {
 	return &Listener{inner: ln}, nil
 }
 
-func Dial(ctx context.Context, cfg *ClientConfig) (*tlcp.Conn, error) {
-	tc, err := buildClientTLCP(cfg.Credentials)
-	if err != nil {
-		return nil, err
-	}
+func Dial(ctx context.Context, cfg *ClientConfig) (net.Conn, error) {
+	isTLS := cfg.Credentials != nil && cfg.Credentials.TLSMode
 	type result struct {
-		c   *tlcp.Conn
+		c   net.Conn
 		err error
 	}
 	ch := make(chan result, 1)
 	go func() {
+		if isTLS {
+			tc, err := buildClientTLS13(cfg.Credentials)
+			if err != nil {
+				ch <- result{nil, err}
+				return
+			}
+			c, err := tls.Dial("tcp", cfg.Server, tc)
+			ch <- result{c, err}
+			return
+		}
+		tc, err := buildClientTLCP(cfg.Credentials)
+		if err != nil {
+			ch <- result{nil, err}
+			return
+		}
 		c, err := tlcp.Dial("tcp", cfg.Server, tc)
 		ch <- result{c, err}
 	}()
@@ -157,7 +258,7 @@ func Dial(ctx context.Context, cfg *ClientConfig) (*tlcp.Conn, error) {
 		return nil, ctx.Err()
 	case r := <-ch:
 		if r.err != nil {
-			return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial tlcp", r.err)
+			return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial", r.err)
 		}
 		return r.c, nil
 	}
@@ -176,8 +277,14 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Address == "" {
 		return nil, core.NewError(core.NumConfig, core.CodeConfig, "address required")
 	}
-	if cfg.SignCertFile == "" || cfg.EncCertFile == "" {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "dual SM2 certificates required")
+	if cfg.TLSMode {
+		if cfg.CertFile == "" || cfg.KeyFile == "" {
+			return nil, core.NewError(core.NumConfig, core.CodeConfig, "TLS1.3 cert/key required for mbta-tls/1")
+		}
+	} else {
+		if cfg.SignCertFile == "" || cfg.EncCertFile == "" {
+			return nil, core.NewError(core.NumConfig, core.CodeConfig, "dual SM2 certificates required for mbta-ntls/1")
+		}
 	}
 	if cfg.ServerID == "" {
 		cfg.ServerID = uuid.Must(uuid.NewV7()).String()
@@ -213,7 +320,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// 监听器 Close 幂等，与 Server.Close 并发调用安全。
 	go func() {
 		<-ctx.Done()
-		l.Close()
+		_ = l.Close()
 	}()
 
 	for {
@@ -231,20 +338,20 @@ func (s *Server) Start(ctx context.Context) error {
 			slog.Warn("accept error", "error", err)
 			continue
 		}
-		go func() {
+		go func(conn net.Conn) {
 			defer func() { <-s.connSem }()
-			h := NewConnectionHandler(ConnectionHandlerConfig{
-				Conn:     conn,
+			tr := newTCPTransport(conn)
+			h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
 				Auth:     s.config.Auth,
 				Policy:   s.config.Policy,
 				Sink:     s.config.Sink,
 				Metrics:  s.config.Metrics,
 				ServerID: s.config.ServerID,
 			})
-			if err := h.HandleConnection(ctx); err != nil {
+			if err := h.Handle(ctx); err != nil {
 				slog.Error("handler error", "error", err)
 			}
-		}()
+		}(conn)
 	}
 }
 

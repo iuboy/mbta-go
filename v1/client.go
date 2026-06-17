@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 	"github.com/iuboy/mbta-go/spool"
 	"github.com/quic-go/quic-go"
 )
@@ -43,8 +43,8 @@ type Client struct {
 	picker         StreamPicker
 	controlStr     *quic.Stream
 	controlMu      sync.Mutex // protects concurrent writes to controlStr
-	sessionID      string
-	challengeNonce string    // server challenge from HELLO_ACK
+	sessionID      []byte
+	challengeNonce []byte    // server challenge from HELLO_ACK
 	expiresAt      time.Time // 会话过期时间，从 AUTH_OK 的 expires_at_unix 获取
 
 	// sendMu serializes SendBatch calls so that the throttle/window check
@@ -88,13 +88,13 @@ type Client struct {
 }
 
 type pendingBatch struct {
-	Seq      uint64
-	Events   int
-	Bytes    int64
-	SentAt   time.Time
-	Deadline time.Time // when this batch expires if no ACK received
-	RecordIDs    []string // spool 删除用；无 spool 时为空
-	SpoolChunkID string   // spool key；全新发送==wire chunkID，重发==原 spool key
+	Seq          uint64
+	Events       int
+	Bytes        int64
+	SentAt       time.Time
+	Deadline     time.Time // when this batch expires if no ACK received
+	RecordIDs    []string  // spool 删除用；无 spool 时为空
+	SpoolChunkID string    // spool key；全新发送==wire chunkID，重发==原 spool key
 }
 
 // ackTask is a queued user ACK/NACK callback invocation.
@@ -131,7 +131,7 @@ func (w *quicStreamWrapper) Write(p []byte) (int, error) { return w.stream.Write
 // 锁内按 ctx.Deadline 设 SetWriteDeadline，写完恢复（time.Time{}）。
 // 语义：ctx 已取消进入即返回；带 Deadline 超时让 Write 失败；仅 WithCancel 无 deadline 不中断阻塞写。
 // 超时写失败可能留下半帧，调用方收到错误后应视为连接损坏（Close 重连）。
-func (w *quicStreamWrapper) writeFrameCtx(ctx context.Context, typ uint16, flags byte, payload []byte) error {
+func (w *quicStreamWrapper) writeFrameCtx(ctx context.Context, typ uint8, flags byte, channel uint8, payload []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -141,9 +141,9 @@ func (w *quicStreamWrapper) writeFrameCtx(ctx context.Context, typ uint16, flags
 		if err := w.stream.SetWriteDeadline(dl); err != nil {
 			return core.WrapError(core.NumStream, core.CodeStream, "set write deadline", err)
 		}
-		defer w.stream.SetWriteDeadline(time.Time{}) // 恢复，避免影响后续无 ctx 的写
+		defer func() { _ = w.stream.SetWriteDeadline(time.Time{}) }() // 恢复，避免影响后续无 ctx 的写
 	}
-	return core.Write(w, typ, flags, payload)
+	return core.Write(w, typ, flags, channel, payload)
 }
 
 // NewClient creates a new MBTA client.
@@ -209,21 +209,19 @@ func (c *Client) Connect(ctx context.Context) error {
 		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello_ack", err)
 	}
 
-	c.sessionID = helloAck.SessionID
+	c.sessionID = helloAck.GetSessionId()
 	if err := c.sm.Transition(core.StateHelloAcked); err != nil {
 		return core.WrapError(core.NumSession, core.CodeSession, "transition to HELLO_ACKED", err)
 	}
 
 	// Update window from HELLO_ACK
-	c.window.Update(
-		helloAck.InitialWindow.MaxInflightBatches,
-		helloAck.InitialWindow.MaxInflightEvents,
-		helloAck.InitialWindow.MaxInflightBytes,
-	)
+	if w := helloAck.GetInitialWindow(); w != nil {
+		c.window.Update(int(w.GetMaxInflightBatches()), int(w.GetMaxInflightEvents()), w.GetMaxInflightBytes())
+	}
 
 	// Store heartbeat interval from server
-	if helloAck.HeartbeatIntervalSec > 0 {
-		c.heartbeatInterval = time.Duration(helloAck.HeartbeatIntervalSec) * time.Second
+	if helloAck.GetHeartbeatIntervalSec() > 0 {
+		c.heartbeatInterval = time.Duration(helloAck.GetHeartbeatIntervalSec()) * time.Second
 	} else {
 		c.heartbeatInterval = 30 * time.Second
 	}
@@ -383,14 +381,14 @@ func (c *Client) sendTracked(ctx context.Context, signalBatch *core.SignalBatch,
 	if writeErr := c.buildAndSend(ctx, seq, chunkID, tag, source, batchPayload); writeErr != nil {
 		// 写失败：回滚 inflight/pending，但保留 spool 条目（at-least-once，重连重发）。
 		c.inflight.Remove(batchEvents, batchBytes)
-		if _, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
+		if _, ok := c.pendingAcks.LoadAndDelete(chunkID.String()); ok {
 			c.pendingCount.Add(-1)
 		}
 		return "", writeErr
 	}
 
-	slog.Debug("batch sent", "seq", seq, "chunk", chunkID, "events", batchEvents, "retransmit", !fresh)
-	return chunkID, nil
+	slog.Debug("batch sent", "seq", seq, "chunk", chunkID.String(), "events", batchEvents, "retransmit", !fresh)
+	return chunkID.String(), nil
 }
 
 // buildRecords 为一批 event 构造 spool Record 与对应 RecordID（每 event 一个 UUID v7）。
@@ -470,24 +468,32 @@ func (c *Client) drainSpoolAfterConnect(ctx context.Context) {
 // reserveInflight 在 sendMu 保护下原子完成：取 seq/chunkID、构造 batch wrapper
 // （手写，避免 json.Marshal 对 RawMessage 的 compact 扫描）、窗口检查、inflight 与 pending 登记。
 // 返回 seq、chunkID 与构造好的 batchPayload（供 buildAndSend 直接 Build，避免重复 marshal）。
-func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEvents int, records []spool.Record, recordIDs []string, alreadySpooledChunkID *string) (uint64, string, []byte, error) {
+func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEvents int, records []spool.Record, recordIDs []string, alreadySpooledChunkID *string) (uint64, core.ChunkID, []byte, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
 	seq := c.seq.Next()
-	chunkID := uuid.Must(uuid.NewV7()).String()
+	chunkID := core.NewChunkID()
 
-	batchPayload := buildBatchPayload(seq, chunkID, tag, source, batchEvents, batchJSON)
+	// r2：BatchMessage 用 corepb proto 编码（替代手写 JSON）。
+	batchMsg := &corepb.BatchMessage{Seq: seq, ChunkId: chunkID.Bytes(), Tag: tag, Source: source}
+	if batchEvents > 0 {
+		batchMsg.EventsCount = int32(batchEvents)
+	}
+	batchMsg.Batch = batchJSON // SignalBatch 编码字节（JSON，与 server decodeSignalBatch 一致）
+	batchPayload, err := core.Encode(batchMsg)
+	if err != nil {
+		return 0, core.ChunkID{}, nil, core.WrapError(core.NumBatch, core.CodeBatch, "encode batch message", err)
+	}
 	batchBytes := int64(len(batchPayload))
 
-	// 窗口检查与 inflight 登记同处一个临界区，防止并发调用双双通过后超限。
 	if !c.window.CanSend(c.inflight, batchEvents, batchBytes) {
-		return 0, "", nil, ErrWindowFull
+		return 0, core.ChunkID{}, nil, ErrWindowFull
 	}
 	c.inflight.Add(batchEvents, batchBytes)
 
 	// spool 持久化（与 inflight/pending 同临界区，保证三者原子）。
-	// buffered 模式 PutBatch 仅 map 写 + markDirty 无 I/O；同步模式有 I/O 但用户显式选强持久化。
+	chunkIDText := chunkID.String()
 	var spoolChunkID string
 	if c.spool != nil {
 		if alreadySpooledChunkID != nil {
@@ -496,19 +502,18 @@ func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEven
 		} else {
 			if err := c.spool.PutBatch(records, spool.Batch{
 				Seq:             seq,
-				ChunkID:         chunkID,
+				ChunkID:         chunkIDText,
 				RecordIDs:       recordIDs,
 				CreatedAtUnixMs: time.Now().UnixMilli(),
 			}); err != nil {
-				// Put 失败（spool 满等）：回滚 inflight，无法承诺持久化 → abort。
 				c.inflight.Remove(batchEvents, batchBytes)
-				return 0, "", nil, core.WrapError(core.NumSpool, core.CodeSpool, "spool put batch", err)
+				return 0, core.ChunkID{}, nil, core.WrapError(core.NumSpool, core.CodeSpool, "spool put batch", err)
 			}
-			spoolChunkID = chunkID
+			spoolChunkID = chunkIDText
 		}
 	}
 
-	c.pendingAcks.Store(chunkID, &pendingBatch{
+	c.pendingAcks.Store(chunkIDText, &pendingBatch{
 		Seq:          seq,
 		Events:       batchEvents,
 		Bytes:        batchBytes,
@@ -522,90 +527,56 @@ func (c *Client) reserveInflight(tag, source string, batchJSON []byte, batchEven
 	return seq, chunkID, batchPayload, nil
 }
 
-// buildBatchPayload 手写 BatchMessage 的 JSON，避免 json.Marshal 对 RawMessage
-// （整个 signalBatch JSON）做 O(n) compact 扫描。字段顺序与 json tag 一致，
-// Tag/Source 的 omitempty 用空串判断，字符串字段用 strconv.AppendQuote 保证 escape
-// 与 encoding/json 一致，server 端 json.Unmarshal 完全兼容。
-// eventsCount 写入 events_count 字段，供服务端 RawEventSink 快速路径省去解码。
-func buildBatchPayload(seq uint64, chunkID, tag, source string, eventsCount int, batchJSON []byte) []byte {
-	buf := make([]byte, 0, 160+len(batchJSON))
-	buf = append(buf, `{"seq":`...)
-	buf = strconv.AppendUint(buf, seq, 10)
-	buf = append(buf, `,"chunk_id":`...)
-	buf = strconv.AppendQuote(buf, chunkID)
-	if tag != "" {
-		buf = append(buf, `,"tag":`...)
-		buf = strconv.AppendQuote(buf, tag)
-	}
-	if source != "" {
-		buf = append(buf, `,"source":`...)
-		buf = strconv.AppendQuote(buf, source)
-	}
-	if eventsCount > 0 {
-		buf = append(buf, `,"events_count":`...)
-		buf = strconv.AppendInt(buf, int64(eventsCount), 10)
-	}
-	buf = append(buf, `,"batch":`...)
-	buf = append(buf, batchJSON...)
-	buf = append(buf, '}')
-	return buf
-}
-
 // buildAndSend 在锁外完成 envelope 构建（gzip+HMAC）、envelope marshal、流选择与网络写。
 // batchPayload 由 reserveInflight 已构造（手写），此处直接 Build，不再重复 marshal。
-func (c *Client) buildAndSend(ctx context.Context, seq uint64, chunkID, tag, source string, batchPayload []byte) error {
-	// batch 仅用于 picker.Pick 的 tag+source 哈希，不含 Batch RawMessage，不 marshal。
-	batch := core.BatchMessage{
-		Seq:     seq,
-		ChunkID: chunkID,
-		Tag:     tag,
-		Source:  source,
-	}
-
-	params := core.Params{
-		SessionID:   c.sessionID,
-		Seq:         seq,
-		ChunkID:     chunkID,
-		Codec:       "json",
-		Compression: "none",
-		Encryption:  "none",
-		HMACAlgo:    "none",
-	}
+func (c *Client) buildAndSend(ctx context.Context, seq uint64, chunkID core.ChunkID, tag, source string, batchPayload []byte) error {
+	cs := corepb.CipherSuite_CIPHER_SUITE_INTL
+	codec := corepb.Codec_CODEC_JSON
+	comp := corepb.Compression_COMPRESSION_NONE
 	if c.negotiated != nil {
-		params.Codec = c.negotiated.Codec
-		params.Compression = c.negotiated.Compression
-		params.Encryption = c.negotiated.Encryption
-		params.HMACAlgo = c.negotiated.HMACAlgo
+		cs = c.negotiated.CipherSuite
+		codec = c.negotiated.Codec
+		comp = c.negotiated.Compression
+	}
+	params := core.BuildParams{
+		SessionID:    c.sessionID,
+		Seq:          seq,
+		ChunkID:      chunkID,
+		Codec:        codec,
+		Compression:  comp,
+		CipherSuite:  cs,
+		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
+		MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
 	}
 	if c.keys != nil {
 		params.KeyID = c.keys.KeyID
 		params.HMACKey = c.keys.HMACKey
-		params.SM4Key = c.keys.SM4Key
+		params.AEADKey = c.keys.AEADKey
 	}
 
-	env, err := core.Build(params, batchPayload)
+	params.BatchPayload = batchPayload
+	env, err := core.Build(params)
 	if err != nil {
 		return core.WrapError(core.NumEnvelope, core.CodeEnvelope, "build envelope", err)
 	}
-	envPayload, err := core.FastMarshal(env)
+	envPayload, err := core.Encode(env)
 	if err != nil {
-		return core.WrapError(core.NumEnvelope, core.CodeEnvelope, "marshal envelope", err)
+		return core.WrapError(core.NumEnvelope, core.CodeEnvelope, "encode envelope", err)
 	}
 
-	ds, err := c.picker.Pick(batch)
+	ds, err := c.picker.Pick(tag, source)
 	if err != nil {
 		return core.WrapError(core.NumBatch, core.CodeBatch, "pick stream", err)
 	}
 
-	// ctx 约束网络写：quicStreamWrapper 经 per-stream mu 安全绑定 SetWriteDeadline
-	// （对端卡死时调用方超时及时返回）。非 *quicStreamWrapper（test mock）回退普通 Write。
+	// ctx 约束网络写：quicStreamWrapper 经 per-stream mu 安全绑定 SetWriteDeadline。
 	if w, ok := ds.(*quicStreamWrapper); ok {
-		if err := w.writeFrameCtx(ctx, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
+		if err := w.writeFrameCtx(ctx, core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, envPayload); err != nil {
 			return core.WrapError(core.NumBatch, core.CodeBatch, "write batch", err)
 		}
 		return nil
 	}
-	if err := core.Write(ds, core.TypeBatch, core.FlagEnvelope|core.FlagData, envPayload); err != nil {
+	if err := core.Write(ds, core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, envPayload); err != nil {
 		return core.WrapError(core.NumBatch, core.CodeBatch, "write batch", err)
 	}
 	return nil
@@ -692,9 +663,9 @@ func (c *Client) close() {
 	// 1. Send CLOSE frame before cancelling so the server learns we're done.
 	if c.controlStr != nil {
 		c.controlMu.Lock()
-		closeMsg := core.CloseMessage{Code: "shutdown", Reason: "client closing"}
-		if payload, err := core.FastMarshal(closeMsg); err == nil {
-			if err := core.Write(c.controlStr, core.TypeClose, core.FlagControl, payload); err != nil {
+		closeMsg := &corepb.CloseMessage{Code: "shutdown", Reason: "client closing"}
+		if payload, err := core.Encode(closeMsg); err == nil {
+			if err := core.Write(c.controlStr, core.TypeClose, core.FlagControl, core.ChannelControl, payload); err != nil {
 				slog.Warn("write close frame", "error", err)
 			}
 		}
@@ -758,8 +729,8 @@ func (c *Client) close() {
 		for i := range c.keys.HMACKey {
 			c.keys.HMACKey[i] = 0
 		}
-		for i := range c.keys.SM4Key {
-			c.keys.SM4Key[i] = 0
+		for i := range c.keys.AEADKey {
+			c.keys.AEADKey[i] = 0
 		}
 		c.keys = nil
 	}
@@ -808,7 +779,7 @@ func (c *Client) countPendingAcks() int {
 
 // SessionID returns the current session ID.
 func (c *Client) SessionID() string {
-	return c.sessionID
+	return string(c.sessionID)
 }
 
 // State returns the current client state.
@@ -874,17 +845,17 @@ func (c *Client) heartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ping := core.PingMessage{
+			ping := &corepb.PingMessage{
 				TimeUnixMs: time.Now().UnixMilli(),
 				Nonce:      uuid.Must(uuid.NewV7()).String(),
 			}
-			payload, err := core.FastMarshal(ping)
+			payload, err := core.Encode(ping)
 			if err != nil {
 				slog.Debug("marshal ping failed", "error", err)
 				continue
 			}
 			c.controlMu.Lock()
-			if err := core.Write(c.controlStr, core.TypePing, core.FlagControl, payload); err != nil {
+			if err := core.Write(c.controlStr, core.TypePing, core.FlagControl, core.ChannelControl, payload); err != nil {
 				c.controlMu.Unlock()
 				slog.Warn("write ping failed", "error", err)
 				return

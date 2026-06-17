@@ -67,15 +67,6 @@ type RawEventSink interface {
 	OnRawBatch(ctx context.Context, agentID string, eventsCount int, batchJSON json.RawMessage) (*RouteResult, error)
 }
 
-// AgentQueue 跟踪每个 agent 的投递状态。
-type AgentQueue struct {
-	AgentID   string
-	QueueType string
-	EventsIn  int64
-	EventsOut int64
-	CreatedAt time.Time
-}
-
 // Inflight tracks bytes, events, and batches that are in-flight (sent but not yet ACKed).
 // 三个标量用 atomic 计数，避免高频数据流（服务端 64 stream × N 连接）下的互斥锁竞争。
 type Inflight struct {

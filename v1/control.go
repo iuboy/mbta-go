@@ -4,12 +4,12 @@ import (
 	"context"
 	"log/slog"
 
+	corepb "github.com/iuboy/mbta-go/corepb"
+
 	"github.com/iuboy/mbta-go/core"
 )
 
-// readControlLoop reads frames from the control stream and dispatches them
-// to the appropriate handler. Exits when the context is cancelled or the
-// control stream returns an error.
+// readControlLoop reads frames from the control stream and dispatches them.
 func (c *Client) readControlLoop(ctx context.Context) {
 	for {
 		select {
@@ -44,11 +44,11 @@ func (c *Client) readControlLoop(ctx context.Context) {
 			c.handlePing(f.Payload)
 		case core.TypeError:
 			var errMsg core.ErrorMessage
-			if err := core.FastUnmarshal(f.Payload, &errMsg); err != nil {
+			if err := core.Decode(f.Payload, &errMsg); err != nil {
 				slog.Debug("invalid error payload", "error", err)
 			} else {
-				slog.Warn("server error", "code", errMsg.Code, "reason", core.SanitizeForLog(errMsg.Reason), "fatal", errMsg.Fatal)
-				if errMsg.Fatal {
+				slog.Warn("server error", "code", errMsg.GetCode(), "reason", core.SanitizeForLog(errMsg.GetReason()), "fatal", errMsg.GetFatal())
+				if errMsg.GetFatal() {
 					return
 				}
 			}
@@ -56,109 +56,108 @@ func (c *Client) readControlLoop(ctx context.Context) {
 	}
 }
 
-// handleAck processes an ACK frame: removes the batch from inflight tracking
-// and invokes the registered ACK handler callback.
+// handleAck 处理 ACK：清除 inflight，删除 spool，回调。
+// chunk_id（wire ULID 16B）转 ULID 文本匹配 pendingAcks key（与发送端一致）。
 func (c *Client) handleAck(payload []byte) {
 	var ack core.AckMessage
-	if err := core.FastUnmarshal(payload, &ack); err != nil {
+	if err := core.Decode(payload, &ack); err != nil {
 		slog.Debug("invalid ack payload", "error", err)
 		return
 	}
 
-	if val, ok := c.pendingAcks.LoadAndDelete(ack.ChunkID); ok {
+	chunkID := ulidText(ack.GetChunkId())
+	if val, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
 		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
 			c.inflight.Remove(pb.Events, pb.Bytes)
-			// ACK 即持久化确认：删除 spool 中对应 batch + records。
 			c.deleteSpooled(pb)
 		}
 	}
 
-	// Notify ACK handler asynchronously (e.g., EnhancedSender for reliable
-	// delivery). Dispatching off the control loop prevents a slow handler from
-	// head-of-line blocking NACK/WINDOW/THROTTLE processing.
-	c.dispatchACK(ack.ChunkID, ack.AckMode)
-
+	c.dispatchACK(chunkID, ackModeString(ack.GetAckMode()))
 	c.notifyDrainIfEmpty()
 
-	slog.Debug("ack received", "seq", ack.Seq, "chunk", ack.ChunkID, "count", ack.Count, "mode", ack.AckMode)
+	slog.Debug("ack received", "seq", ack.GetSeq(), "chunk", chunkID, "count", ack.GetCount(), "mode", ackModeString(ack.GetAckMode()))
 }
 
-// handleNack processes a NACK frame: removes the batch from inflight tracking
-// and invokes the ACK handler with "nack" mode for retry logic.
+// handleNack 处理 NACK：清除 inflight；retryable 保留 spool 待重连重发，毒消息丢弃。
 func (c *Client) handleNack(payload []byte) {
 	var nack core.NackMessage
-	if err := core.FastUnmarshal(payload, &nack); err != nil {
+	if err := core.Decode(payload, &nack); err != nil {
 		slog.Debug("invalid nack payload", "error", err)
 		return
 	}
 
-	if val, ok := c.pendingAcks.LoadAndDelete(nack.ChunkID); ok {
+	chunkID := ulidText(nack.GetChunkId())
+	if val, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
 		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
 			c.inflight.Remove(pb.Events, pb.Bytes)
-			// 毒消息（不可重试）：从 spool 丢弃，避免无限重试循环。
-			// retryable 的 NACK 保留 spool 条目，待重连 drain 重发（at-least-once）。
-			if !nack.Retryable {
+			if !nack.GetRetryable() {
 				c.deleteSpooled(pb)
 			}
 		}
 	}
 
-	// Notify ACK handler asynchronously with "nack" mode so the sender can
-	// handle retry logic (see dispatchACK — never blocks the control loop).
-	c.dispatchACK(nack.ChunkID, "nack")
-
+	c.dispatchACK(chunkID, "nack")
 	c.notifyDrainIfEmpty()
 
-	slog.Warn("nack received", "seq", nack.Seq, "code", nack.Code, "reason", core.SanitizeForLog(nack.Reason), "retryable", nack.Retryable)
+	slog.Warn("nack received", "seq", nack.GetSeq(), "code", nack.GetCode(), "reason", core.SanitizeForLog(nack.GetReason()), "retryable", nack.GetRetryable())
 }
 
-// handleWindow processes a WINDOW frame: updates the local flow-control limits.
 func (c *Client) handleWindow(payload []byte) {
 	var win core.WindowMessage
-	if err := core.FastUnmarshal(payload, &win); err != nil {
+	if err := core.Decode(payload, &win); err != nil {
 		slog.Debug("invalid window payload", "error", err)
 		return
 	}
-	c.window.Update(win.MaxInflightBatches, win.MaxInflightEvents, win.MaxInflightBytes)
-	slog.Debug("window updated", "batches", win.MaxInflightBatches, "events", win.MaxInflightEvents)
+	c.window.Update(int(win.GetMaxInflightBatches()), int(win.GetMaxInflightEvents()), win.GetMaxInflightBytes())
+	slog.Debug("window updated", "batches", win.GetMaxInflightBatches(), "events", win.GetMaxInflightEvents())
 }
 
-// handleThrottle processes a THROTTLE frame: applies backoff to prevent
-// overwhelming the server.
 func (c *Client) handleThrottle(payload []byte) {
 	var throt core.ThrottleMessage
-	if err := core.FastUnmarshal(payload, &throt); err != nil {
+	if err := core.Decode(payload, &throt); err != nil {
 		slog.Debug("invalid throttle payload", "error", err)
 		return
 	}
-	c.throttle.Apply(throt.RetryDelayMs)
-	slog.Info("throttled", "delay_ms", throt.RetryDelayMs, "reason", core.SanitizeForLog(throt.Reason))
+	c.throttle.Apply(int(throt.GetRetryDelayMs()))
+	slog.Info("throttled", "delay_ms", throt.GetRetryDelayMs(), "reason", core.SanitizeForLog(throt.GetReason()))
 }
 
-// handlePing responds to a server PING with a PONG frame.
 func (c *Client) handlePing(payload []byte) {
 	var ping core.PingMessage
-	if err := core.FastUnmarshal(payload, &ping); err != nil {
+	if err := core.Decode(payload, &ping); err != nil {
 		slog.Debug("invalid ping payload", "error", err)
 		return
 	}
 
-	pong := core.PongMessage{
-		TimeUnixMs: ping.TimeUnixMs,
-		Nonce:      ping.Nonce,
-		Status:     "ok",
-	}
-	pongPayload, err := core.FastMarshal(pong)
+	pong := &corepb.PongMessage{TimeUnixMs: ping.GetTimeUnixMs(), Nonce: ping.GetNonce(), Status: "ok"}
+	pongPayload, err := core.Encode(pong)
 	if err != nil {
 		slog.Warn("marshal pong failed", "error", err)
 		return
 	}
 	c.controlMu.Lock()
-	err = core.Write(c.controlStr, core.TypePong, core.FlagControl, pongPayload)
+	err = core.Write(c.controlStr, core.TypePong, core.FlagControl, core.ChannelControl, pongPayload)
 	c.controlMu.Unlock()
 	if err != nil {
 		slog.Warn("write pong failed", "error", err)
 	}
+}
+
+// ackModeString 把 corepb.AckMode 转为回调期望的字符串（"durable"/"accepted"）。
+func ackModeString(m corepb.AckMode) string {
+	if m == corepb.AckMode_ACK_MODE_DURABLE {
+		return "durable"
+	}
+	return "accepted"
+}
+
+// ulidText 把 wire chunk_id（ULID 16B）转为文本，匹配 pendingAcks/spool key。
+func ulidText(chunkID []byte) string {
+	if c, err := core.ChunkIDFromBytes(chunkID); err == nil {
+		return c.String()
+	}
+	return string(chunkID)
 }

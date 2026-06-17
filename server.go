@@ -185,8 +185,11 @@ func (s *Server) initV1Server() error {
 		Metrics:   s.cfg.Metrics,
 	}
 
-	// v1.NewServer returns *Server, not (*Server, error)
-	s.v1Server = v1.NewServer(cfg)
+	v1srv, err := v1.NewServer(cfg)
+	if err != nil {
+		return core.WrapError(core.NumConfig, core.CodeConfig, "v1 server init", err)
+	}
+	s.v1Server = v1srv
 	return nil
 }
 

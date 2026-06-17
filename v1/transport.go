@@ -119,7 +119,8 @@ func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 		MinVersion:         tls.VersionTLS13,
 		NextProtos:         []string{ALPNProtocol},
 		ServerName:         cfg.ServerName,
-		InsecureSkipVerify: cfg.InsecureSkipVerify, // #nosec G402 -- intentional for dev, warning logged below
+		InsecureSkipVerify: cfg.InsecureSkipVerify,          // #nosec G402 -- intentional for dev, warning logged below
+		ClientSessionCache: tls.NewLRUClientSessionCache(8), // 0-RTT resumption ticket cache
 	}
 
 	if cfg.InsecureSkipVerify {
@@ -179,6 +180,7 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 		InitialConnectionReceiveWindow: initialConnectionWnd,
 		MaxStreamReceiveWindow:         maxStreamWnd,
 		MaxConnectionReceiveWindow:     maxConnectionWnd,
+		Allow0RTT:                      true, // 接受 0-RTT resumption（core spec §11.6）
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Address)
@@ -316,6 +318,50 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 	if err != nil {
 		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to listen error
 		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial QUIC", err)
+	}
+
+	cs := qc.ConnectionState().TLS
+	return &Conn{
+		QC:         qc,
+		RemoteAddr: qc.RemoteAddr(),
+		TLSState:   cs,
+	}, nil
+}
+
+// DialEarly establishes a 0-RTT QUIC connection for session resumption (core spec §11.6).
+// Requires ClientSessionCache populated from a previous Dial (TLS session ticket).
+func DialEarly(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
+	tlsCfg, err := buildClientTLS(cfg.Credentials)
+	if err != nil {
+		return nil, err
+	}
+
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultIdleTimeout
+	}
+	quicCfg := &quic.Config{
+		MaxIdleTimeout:                 idleTimeout,
+		KeepAlivePeriod:                idleTimeout / 3,
+		InitialStreamReceiveWindow:     initialStreamWnd,
+		InitialConnectionReceiveWindow: initialConnectionWnd,
+		MaxStreamReceiveWindow:         maxStreamWnd,
+		MaxConnectionReceiveWindow:     maxConnectionWnd,
+	}
+
+	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Server)
+	if err != nil {
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "resolve address", err)
+	}
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen UDP", err)
+	}
+
+	qc, err := quic.DialEarly(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
+	if err != nil {
+		_ = udpConn.Close() //nolint:errcheck
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial early (0-RTT)", err)
 	}
 
 	cs := qc.ConnectionState().TLS

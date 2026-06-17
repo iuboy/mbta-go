@@ -1,5 +1,7 @@
 # MBTA/2 Protocol Specification / MBTA/2 协议规范
 
+> ⚠️ **SUPERSEDED（部分）：** 权威基准见 [mbta-core-spec.md](./mbta-core-spec.md) r2，QUIC 传输规范见 [mbta-quic-binding.md](./mbta-quic-binding.md)。`mbta/2`（QUIC+RFC8998 国密）依赖无独立 RFC 的国密 QUIC 实现，可用性待生态成熟（见 core §10）。冲突处以 core 为准。
+
 Category: Internet-Draft / 互联网草案  
 Version: 1.0  
 ALPN: `mbta/2`  

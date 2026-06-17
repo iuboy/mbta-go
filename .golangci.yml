@@ -60,14 +60,13 @@ issues:
     - linters: [staticcheck]
       text: "SA5011"
       path: _test\.go
-    # G115: integer overflow in test helpers
+    # G115: integer overflow int→int32/uint32 — values bounded by protocol limits (maxBatchEvents, MaxPayloadSize)
     - linters: [gosec]
       text: "G115"
-      path: _test\.go
     # G402: TLS InsecureSkipVerify — intentionally used in examples and tests
     - linters: [gosec]
       text: "G402"
-      path: (examples|v1/transport\.go|_test\.go)
+      path: (examples|v1/transport\.go|ntls/transport\.go|_test\.go)
     # G104: error not checked — best-effort cleanup in defer/close paths
     - linters: [gosec]
       text: "G104"
@@ -96,6 +95,10 @@ issues:
     # hugeParam: existing API contract, changing to pointer is a breaking change
     - linters: [gocritic]
       text: "hugeParam"
+    # SpoolOption stutter: existing public API, rename is breaking change
+    - linters: [revive]
+      text: "stutters"
+      path: spool/spool\.go
     # wrappers implementing interface: unused-parameter is intentional (no-op)
     - linters: [revive]
       text: "unused-parameter"

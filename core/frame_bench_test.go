@@ -16,7 +16,7 @@ func BenchmarkWrite(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		var buf bytes.Buffer
-		if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, payload); err != nil {
+		if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, ChannelData, payload); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -28,7 +28,7 @@ func BenchmarkRead(b *testing.B) {
 		payload[i] = byte(i)
 	}
 	var buf bytes.Buffer
-	if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, payload); err != nil {
+	if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, ChannelData, payload); err != nil {
 		b.Fatal(err)
 	}
 	data := buf.Bytes()
@@ -53,7 +53,7 @@ func BenchmarkWriteLargePayload(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		var buf bytes.Buffer
-		if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, payload); err != nil {
+		if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, ChannelData, payload); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -65,7 +65,7 @@ func BenchmarkReadLargePayload(b *testing.B) {
 		payload[i] = byte(i)
 	}
 	var buf bytes.Buffer
-	if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, payload); err != nil {
+	if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, ChannelData, payload); err != nil {
 		b.Fatal(err)
 	}
 	data := buf.Bytes()
@@ -88,7 +88,7 @@ func BenchmarkWriteDiscard(b *testing.B) {
 	payload := make([]byte, 1024)
 	b.ReportAllocs()
 	for b.Loop() {
-		if err := Write(io.Discard, TypeBatch, FlagEnvelope|FlagData, payload); err != nil {
+		if err := Write(io.Discard, TypeBatch, FlagEnvelope|FlagData, ChannelData, payload); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -99,7 +99,7 @@ func BenchmarkWriteDiscard(b *testing.B) {
 func BenchmarkReadPersistent(b *testing.B) {
 	payload := make([]byte, 1024)
 	var buf bytes.Buffer
-	if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, payload); err != nil {
+	if err := Write(&buf, TypeBatch, FlagEnvelope|FlagData, ChannelData, payload); err != nil {
 		b.Fatal(err)
 	}
 	data := buf.Bytes()

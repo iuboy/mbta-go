@@ -2,321 +2,230 @@ package core
 
 import (
 	"bytes"
-	"compress/gzip"
-	"encoding/base64"
-	"encoding/json"
-	"io"
-	"strings"
 	"testing"
 
-	mbtatest "github.com/iuboy/mbta-go/testing"
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
-// TestBuildEnvelope tests the Build function with various parameters.
-func TestBuildEnvelope(t *testing.T) {
-	batchPayload := []byte(`{"signals":[{"type":"log","message":"test"}]}`)
+// r2 envelope 测试基线：corepb.SecureEnvelope + 原生 bytes + canonical HMAC +
+// 双轨 CipherSuite（intl/gm）+ 四压缩（none/gzip/zstd/lz4）。
 
-	tests := []struct {
-		name    string
-		params  Params
-		wantErr bool
-		check   func(*testing.T, *SecureEnvelope)
-	}{
-		{
-			name: "minimal envelope",
-			params: Params{
-				SessionID:   "sess-123",
-				Seq:         1,
-				ChunkID:     "chunk-1",
-				Codec:       "json",
-				Compression: "none",
-				HMACAlgo:    "none",
-			},
-			wantErr: false,
-			check: func(t *testing.T, env *SecureEnvelope) {
-				if env.EnvelopeVersion != EnvelopeVersion {
-					t.Errorf("EnvelopeVersion = %d, want %d", env.EnvelopeVersion, EnvelopeVersion)
-				}
-				if env.MessageType != "batch" {
-					t.Errorf("MessageType = %q, want 'batch'", env.MessageType)
-				}
-				if env.SessionID != "sess-123" {
-					t.Errorf("SessionID = %q, want 'sess-123'", env.SessionID)
-				}
-				if env.Seq != 1 {
-					t.Errorf("Seq = %d, want 1", env.Seq)
-				}
-				if env.ChunkID != "chunk-1" {
-					t.Errorf("ChunkID = %q, want 'chunk-1'", env.ChunkID)
-				}
-			},
-		},
-		{
-			name: "with gzip compression",
-			params: Params{
-				SessionID:   "sess-123",
-				Seq:         1,
-				ChunkID:     "chunk-1",
-				Codec:       "json",
-				Compression: "gzip",
-				HMACAlgo:    "none",
-			},
-			wantErr: false,
-			check: func(t *testing.T, env *SecureEnvelope) {
-				if env.Compression != "gzip" {
-					t.Errorf("Compression = %q, want 'gzip'", env.Compression)
-				}
-				// Verify payload is base64 encoded
-				_, err := base64.StdEncoding.DecodeString(env.Payload)
-				if err != nil {
-					t.Errorf("Payload should be valid base64, got error: %v", err)
-				}
-			},
-		},
-		{
-			name: "with HMAC-SHA256",
-			params: Params{
-				SessionID:   "sess-123",
-				Seq:         1,
-				ChunkID:     "chunk-1",
-				Codec:       "json",
-				Compression: "none",
-				HMACAlgo:    "sha256",
-				HMACKey:     make([]byte, 32), // Use zero key for testing
-			},
-			wantErr: false,
-			check: func(t *testing.T, env *SecureEnvelope) {
-				if env.HMACAlgo != "sha256" {
-					t.Errorf("HMACAlgo = %q, want 'sha256'", env.HMACAlgo)
-				}
-				if env.MAC == "" {
-					t.Error("MAC should not be empty for sha256")
-				}
-				// Verify MAC is base64 encoded
-				_, err := base64.StdEncoding.DecodeString(env.MAC)
-				if err != nil {
-					t.Errorf("MAC should be valid base64, got error: %v", err)
-				}
-			},
-		},
-		{
-			name: "with KeyID",
-			params: Params{
-				SessionID:   "sess-123",
-				KeyID:       "key-456",
-				Seq:         1,
-				ChunkID:     "chunk-1",
-				Codec:       "json",
-				Compression: "none",
-				HMACAlgo:    "none",
-			},
-			wantErr: false,
-			check: func(t *testing.T, env *SecureEnvelope) {
-				if env.KeyID != "key-456" {
-					t.Errorf("KeyID = %q, want 'key-456'", env.KeyID)
-				}
-			},
-		},
+func makeBuildParams(cs corepb.CipherSuite, comp corepb.Compression, hmacKey, aeadKey []byte, payload []byte) BuildParams {
+	return BuildParams{
+		SessionID:    []byte("sess-1"),
+		KeyID:        "key-1",
+		Seq:          1,
+		ChunkID:      NewChunkID(),
+		Codec:        corepb.Codec_CODEC_PROTO,
+		Compression:  comp,
+		CipherSuite:  cs,
+		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
+		MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
+		HMACKey:      hmacKey,
+		AEADKey:      aeadKey,
+		BatchPayload: payload,
+	}
+}
+
+func TestBuildOpenRoundTrip_Intl_AESGCM(t *testing.T) {
+	hmacKey := make([]byte, HMACKeyLenIntl)
+	aeadKey := make([]byte, AEADKeyLenIntl)
+	payload := []byte("hello intl envelope")
+
+	env, err := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, payload))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if env.CipherSuite != corepb.CipherSuite_CIPHER_SUITE_INTL {
+		t.Errorf("cipher suite = %v, want INTL", env.CipherSuite)
+	}
+	if len(env.Nonce) != AEADNonceSize {
+		t.Errorf("nonce len = %d, want %d", len(env.Nonce), AEADNonceSize)
+	}
+	if len(env.Mac) == 0 {
+		t.Error("mac empty")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			env, err := Build(tt.params, batchPayload)
-			if tt.wantErr {
-				mbtatest.AssertError(t, err, tt.name)
-			} else {
-				mbtatest.AssertNoError(t, err, tt.name)
-				if tt.check != nil {
-					tt.check(t, env)
-				}
+	ok, err := VerifyMAC(hmacKey, env)
+	if err != nil || !ok {
+		t.Fatalf("VerifyMAC: ok=%v err=%v", ok, err)
+	}
+
+	got, err := Open(env, aeadKey)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+}
+
+func TestBuildOpenRoundTrip_GM_SM4GCM(t *testing.T) {
+	hmacKey := make([]byte, HMACKeyLenGM)
+	aeadKey := make([]byte, AEADKeyLenGM)
+	payload := []byte("hello gm envelope 国密")
+
+	env, err := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_GM, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, payload))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if env.CipherSuite != corepb.CipherSuite_CIPHER_SUITE_GM {
+		t.Errorf("cipher suite = %v, want GM", env.CipherSuite)
+	}
+
+	ok, err := VerifyMAC(hmacKey, env)
+	if err != nil || !ok {
+		t.Fatalf("VerifyMAC: ok=%v err=%v", ok, err)
+	}
+
+	got, err := Open(env, aeadKey)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+}
+
+func TestBuildOpen_Compressions(t *testing.T) {
+	hmacKey := make([]byte, HMACKeyLenIntl)
+	aeadKey := make([]byte, AEADKeyLenIntl)
+	payload := bytes.Repeat([]byte("ABCDEFGH"), 256) // 2KB
+
+	comps := []corepb.Compression{
+		corepb.Compression_COMPRESSION_NONE,
+		corepb.Compression_COMPRESSION_GZIP,
+		corepb.Compression_COMPRESSION_ZSTD,
+		corepb.Compression_COMPRESSION_LZ4,
+	}
+	for _, c := range comps {
+		t.Run(c.String(), func(t *testing.T) {
+			env, err := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, c, hmacKey, aeadKey, payload))
+			if err != nil {
+				t.Fatalf("Build(%v): %v", c, err)
+			}
+			if env.Compression != c {
+				t.Errorf("compression field = %v, want %v", env.Compression, c)
+			}
+			got, err := Open(env, aeadKey)
+			if err != nil {
+				t.Fatalf("Open(%v): %v", c, err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Errorf("%v: payload mismatch (got %d bytes, want %d)", c, len(got), len(payload))
 			}
 		})
 	}
 }
 
-// TestCanonicalSigningString tests the CanonicalSigningString function.
-func TestCanonicalSigningString(t *testing.T) {
-	env := &SecureEnvelope{
-		EnvelopeVersion: EnvelopeVersion,
-		MessageType:     "batch",
-		SessionID:       "sess-123",
-		KeyID:           "key-456",
-		Seq:             1,
-		ChunkID:         "chunk-1",
-		CreatedAtUnixMs: 1234567890,
-		Codec:           "json",
-		Compression:     "gzip",
-		Encryption:      "none",
-		HMACAlgo:        "sha256",
-		Nonce:           "nonce-789",
-		Payload:         "base64payload",
+func TestVerifyMAC_WrongKey(t *testing.T) {
+	hmacKey := make([]byte, HMACKeyLenIntl)
+	aeadKey := make([]byte, AEADKeyLenIntl)
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte("x")))
+
+	wrong := make([]byte, HMACKeyLenIntl)
+	wrong[0] = 1
+	ok, err := VerifyMAC(wrong, env)
+	if err != nil {
+		t.Fatalf("VerifyMAC err: %v", err)
 	}
-
-	signingBytes := CanonicalSigningString(env)
-	signingStr := string(signingBytes)
-
-	// Verify format
-	expectedParts := []string{
-		"envelope_version=1",
-		"message_type=batch",
-		"session_id=sess-123",
-		"key_id=key-456",
-		"seq=1",
-		"chunk_id=chunk-1",
-		"created_at_unix_ms=1234567890",
-		"codec=json",
-		"compression=gzip",
-		"encryption=none",
-		"hmac_algo=sha256",
-		"nonce=nonce-789",
-		"payload=base64payload",
-	}
-
-	for _, part := range expectedParts {
-		if !strings.Contains(signingStr, part) {
-			t.Errorf("Signing string missing %q", part)
-		}
-	}
-
-	// Verify each field is on its own line (except payload which is last without trailing newline)
-	lines := strings.Split(signingStr, "\n")
-	if len(lines) != 13 { // 12 fields with newline + payload without trailing newline
-		t.Errorf("Expected 13 lines, got %d", len(lines))
+	if ok {
+		t.Error("VerifyMAC should fail with wrong key")
 	}
 }
 
-// TestGzipCompression tests that gzip compression works correctly.
-func TestGzipCompression(t *testing.T) {
-	batchPayload := []byte(`{"signals":[{"type":"log","message":"test"}]}`)
+func TestVerifyMAC_TamperedPayload(t *testing.T) {
+	hmacKey := make([]byte, HMACKeyLenIntl)
+	aeadKey := make([]byte, AEADKeyLenIntl)
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte("plaintext")))
 
-	params := Params{
-		SessionID:   "sess-123",
-		Seq:         1,
-		ChunkID:     "chunk-1",
-		Codec:       "json",
-		Compression: "gzip",
-		HMACAlgo:    "none",
+	if len(env.Payload) > 0 {
+		env.Payload[0] ^= 0xFF
 	}
-
-	env, err := Build(params, batchPayload)
-	mbtatest.AssertNoError(t, err, "Build()")
-
-	// Decode base64 payload
-	decodedPayload, err := base64.StdEncoding.DecodeString(env.Payload)
-	mbtatest.AssertNoError(t, err, "base64 decode")
-
-	// Decompress gzip
-	reader, err := gzip.NewReader(bytes.NewReader(decodedPayload))
-	mbtatest.AssertNoError(t, err, "gzip reader")
-	defer reader.Close()
-
-	decompressed, err := io.ReadAll(reader)
-	mbtatest.AssertNoError(t, err, "gzip decompress")
-
-	// Verify original data
-	if !bytes.Equal(decompressed, batchPayload) {
-		t.Errorf("Decompressed payload = %q, want %q", decompressed, batchPayload)
+	ok, err := VerifyMAC(hmacKey, env)
+	if err != nil {
+		t.Fatalf("VerifyMAC err: %v", err)
+	}
+	if ok {
+		t.Error("VerifyMAC should fail after payload tamper")
 	}
 }
 
-// TestSecureEnvelopeJSON tests JSON encoding/decoding of SecureEnvelope.
-func TestSecureEnvelopeJSON(t *testing.T) {
-	env := &SecureEnvelope{
-		EnvelopeVersion: EnvelopeVersion,
-		MessageType:     "batch",
-		SessionID:       "sess-123",
-		KeyID:           "key-456",
-		Seq:             1,
-		ChunkID:         "chunk-1",
-		CreatedAtUnixMs: 1234567890,
-		Codec:           "json",
-		Compression:     "none",
-		HMACAlgo:        "sha256",
-		Payload:         "base64payload",
-		MAC:             "base64mac",
-	}
-
-	// Encode
-	data, err := json.Marshal(env)
-	mbtatest.AssertNoError(t, err, "JSON marshal")
-
-	// Verify it's valid JSON
-	if !json.Valid(data) {
-		t.Error("Encoded data is not valid JSON")
-	}
-
-	// Decode
-	var decoded SecureEnvelope
-	err = json.Unmarshal(data, &decoded)
-	mbtatest.AssertNoError(t, err, "JSON unmarshal")
-
-	// Verify fields
-	if decoded.EnvelopeVersion != env.EnvelopeVersion {
-		t.Errorf("EnvelopeVersion = %d, want %d", decoded.EnvelopeVersion, env.EnvelopeVersion)
-	}
-	if decoded.SessionID != env.SessionID {
-		t.Errorf("SessionID = %q, want %q", decoded.SessionID, env.SessionID)
+func TestBuild_RejectsUnspecifiedCipherSuite(t *testing.T) {
+	p := makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED, corepb.Compression_COMPRESSION_NONE, make([]byte, 32), make([]byte, 32), []byte("x"))
+	if _, err := Build(p); err == nil {
+		t.Error("Build should reject unspecified cipher suite")
 	}
 }
 
-// TestEnvelopeConstants tests envelope-related constants.
-func TestEnvelopeConstants(t *testing.T) {
-	if EnvelopeVersion != 1 {
-		t.Errorf("EnvelopeVersion = %d, want 1", EnvelopeVersion)
+func TestBuild_OpenDecryptionFailure(t *testing.T) {
+	hmacKey := make([]byte, HMACKeyLenIntl)
+	aeadKey := make([]byte, AEADKeyLenIntl)
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte("secret")))
+
+	wrong := make([]byte, AEADKeyLenIntl)
+	wrong[0] = 1
+	if _, err := Open(env, wrong); err == nil {
+		t.Error("Open should fail with wrong AEAD key")
 	}
 }
 
-// TestBuildWithLargePayload tests building envelope with large payload.
-func TestBuildWithLargePayload(t *testing.T) {
-	// Create a 1MB payload
-	largePayload := make([]byte, 1024*1024)
-	for i := range largePayload {
-		largePayload[i] = byte('a' + (i % 26))
+func TestBuild_LargeAndEmptyPayload(t *testing.T) {
+	hmacKey := make([]byte, HMACKeyLenIntl)
+	aeadKey := make([]byte, AEADKeyLenIntl)
+
+	env, err := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_ZSTD, hmacKey, aeadKey, []byte{}))
+	if err != nil {
+		t.Fatalf("Build empty: %v", err)
+	}
+	got, err := Open(env, aeadKey)
+	if err != nil || len(got) != 0 {
+		t.Errorf("empty payload round trip: got=%v err=%v", got, err)
 	}
 
-	params := Params{
-		SessionID:   "sess-123",
-		Seq:         1,
-		ChunkID:     "chunk-1",
-		Codec:       "json",
-		Compression: "gzip",
-		HMACAlgo:    "none",
+	large := bytes.Repeat([]byte{0xAB}, 1<<16)
+	env2, err := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_ZSTD, hmacKey, aeadKey, large))
+	if err != nil {
+		t.Fatalf("Build large: %v", err)
 	}
-
-	env, err := Build(params, largePayload)
-	mbtatest.AssertNoError(t, err, "Build() with large payload")
-
-	if env == nil {
-		t.Fatal("Envelope should not be nil")
-		return
+	got2, err := Open(env2, aeadKey)
+	if err != nil {
+		t.Fatalf("Open large: %v", err)
 	}
-	if env.Payload == "" {
-		t.Error("Payload should not be empty")
+	if !bytes.Equal(got2, large) {
+		t.Error("large payload mismatch")
 	}
 }
 
-// TestBuildWithEmptyPayload tests building envelope with empty payload.
-func TestBuildWithEmptyPayload(t *testing.T) {
-	emptyPayload := []byte{}
+func TestCanonicalMAC_Deterministic(t *testing.T) {
+	hmacKey := make([]byte, HMACKeyLenIntl)
+	aeadKey := make([]byte, AEADKeyLenIntl)
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte("deterministic")))
 
-	params := Params{
-		SessionID:   "sess-123",
-		Seq:         1,
-		ChunkID:     "chunk-1",
-		Codec:       "json",
-		Compression: "none",
-		HMACAlgo:    "none",
+	m1, _ := canonicalMAC(env.CipherSuite, hmacKey, env)
+	m2, _ := canonicalMAC(env.CipherSuite, hmacKey, env)
+	if !bytes.Equal(m1, m2) {
+		t.Error("canonicalMAC must be deterministic for same envelope")
 	}
-
-	env, err := Build(params, emptyPayload)
-	mbtatest.AssertNoError(t, err, "Build() with empty payload")
-
-	if env == nil {
-		t.Fatal("Envelope should not be nil")
-		return
+	if !bytes.Equal(m1, env.Mac) {
+		t.Error("canonicalMAC must equal env.Mac")
 	}
-	// Empty bytes encode to empty base64 string
-	if env.Payload != "" {
-		t.Errorf("Payload should be empty for empty input, got %q", env.Payload)
+}
+
+func TestEncodeDecodeEnvelopeRoundTrip(t *testing.T) {
+	hmacKey := make([]byte, HMACKeyLenIntl)
+	aeadKey := make([]byte, AEADKeyLenIntl)
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_GZIP, hmacKey, aeadKey, []byte("wire trip")))
+
+	wire, err := EncodeEnvelope(env)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	got, err := DecodeEnvelope(wire)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !bytes.Equal(got.Payload, env.Payload) || !bytes.Equal(got.Mac, env.Mac) {
+		t.Error("encode/decode payload/mac mismatch")
 	}
 }

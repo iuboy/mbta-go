@@ -4,11 +4,11 @@ import (
 	"testing"
 )
 
-// TestMessageTypeConstants tests that all message type constants are correctly defined.
+// TestMessageTypeConstants tests that all message type constants are correctly defined (r2 uint8).
 func TestMessageTypeConstants(t *testing.T) {
 	tests := []struct {
 		name  string
-		value uint16
+		value uint8
 	}{
 		{"TypeHello", TypeHello},
 		{"TypeHelloAck", TypeHelloAck},
@@ -16,6 +16,7 @@ func TestMessageTypeConstants(t *testing.T) {
 		{"TypeAuthOK", TypeAuthOK},
 		{"TypeAuthFail", TypeAuthFail},
 		{"TypeBatch", TypeBatch},
+		{"TypeDatagram", TypeDatagram},
 		{"TypeAck", TypeAck},
 		{"TypeNack", TypeNack},
 		{"TypePartialAck", TypePartialAck},
@@ -36,145 +37,50 @@ func TestMessageTypeConstants(t *testing.T) {
 	}
 }
 
-// TestMessageTypeValues tests specific message type values.
+// TestMessageTypeValues tests specific message type values (r2 编号，core spec §4)。
 func TestMessageTypeValues(t *testing.T) {
 	tests := []struct {
-		constant    uint16
-		expectValue uint16
+		constant    uint8
+		expectValue uint8
 	}{
-		{TypeHello, 0x0001},
-		{TypeHelloAck, 0x0002},
-		{TypeAuth, 0x0003},
-		{TypeAuthOK, 0x0004},
-		{TypeAuthFail, 0x0005},
-		{TypeBatch, 0x0010},
-		{TypeAck, 0x0011},
-		{TypeNack, 0x0012},
-		{TypePartialAck, 0x0013},
-		{TypeWindow, 0x0020},
-		{TypeThrottle, 0x0021},
-		{TypePing, 0x0030},
-		{TypePong, 0x0031},
-		{TypeClose, 0x0040},
-		{TypeError, 0x0050},
+		{TypeHello, 1},
+		{TypeHelloAck, 2},
+		{TypeAuth, 3},
+		{TypeAuthOK, 4},
+		{TypeAuthFail, 5},
+		{TypeBatch, 6},
+		{TypeDatagram, 7},
+		{TypeAck, 8},
+		{TypeNack, 9},
+		{TypePartialAck, 10},
+		{TypeWindow, 11},
+		{TypeThrottle, 12},
+		{TypePing, 13},
+		{TypePong, 14},
+		{TypeClose, 15},
+		{TypeError, 16},
 	}
 
 	for _, tt := range tests {
 		t.Run("", func(t *testing.T) {
 			if tt.constant != tt.expectValue {
-				t.Errorf("Expected 0x%04x, got 0x%04x", tt.expectValue, tt.constant)
+				t.Errorf("Expected %d, got %d", tt.expectValue, tt.constant)
 			}
 		})
 	}
 }
 
 // TestCodecConstants tests codec algorithm constants.
-func TestCodecConstants(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-	}{
-		{"CodecJSON", CodecJSON},
-		{"CodecMsgpack", CodecMsgpack},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.value == "" {
-				t.Errorf("%s should not be empty", tt.name)
-			}
-		})
-	}
-}
-
-// TestCompressionConstants tests compression algorithm constants.
-func TestCompressionConstants(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-	}{
-		{"CompressionNone", CompressionNone},
-		{"CompressionGzip", CompressionGzip},
-		{"CompressionZstd", CompressionZstd},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.value == "" {
-				t.Errorf("%s should not be empty", tt.name)
-			}
-		})
-	}
-}
-
-// TestEncryptionConstants tests encryption algorithm constants.
-func TestEncryptionConstants(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-	}{
-		{"EncryptionNone", EncryptionNone},
-		{"EncryptionSM4", EncryptionSM4},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.value == "" {
-				t.Errorf("%s should not be empty", tt.name)
-			}
-		})
-	}
-}
-
-// TestHMACAlgoConstants tests HMAC algorithm constants.
-func TestHMACAlgoConstants(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-	}{
-		{"HMACAlgoNone", HMACAlgoNone},
-		{"HMACAlgoSHA256", HMACAlgoSHA256},
-		{"HMACAlgoSM3", HMACAlgoSM3},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.value == "" {
-				t.Errorf("%s should not be empty", tt.name)
-			}
-		})
-	}
-}
-
-// TestAckModeConstants tests ACK mode constants.
-func TestAckModeConstants(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-	}{
-		{"AckModeAccepted", AckModeAccepted},
-		{"AckModeDurable", AckModeDurable},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.value == "" {
-				t.Errorf("%s should not be empty", tt.name)
-			}
-		})
-	}
-}
-
-// TestConstantsUniqueness tests that constants have unique values where appropriate.
 func TestConstantsUniqueness(t *testing.T) {
 	// Test message type constants are unique
-	messageTypeValues := map[uint16]bool{
+	messageTypeValues := map[uint8]bool{
 		TypeHello:      true,
 		TypeHelloAck:   true,
 		TypeAuth:       true,
 		TypeAuthOK:     true,
 		TypeAuthFail:   true,
 		TypeBatch:      true,
+		TypeDatagram:   true,
 		TypeAck:        true,
 		TypeNack:       true,
 		TypePartialAck: true,
@@ -186,7 +92,7 @@ func TestConstantsUniqueness(t *testing.T) {
 		TypeError:      true,
 	}
 
-	if len(messageTypeValues) != 15 {
-		t.Errorf("Expected 15 unique message types, got %d", len(messageTypeValues))
+	if len(messageTypeValues) != 16 {
+		t.Errorf("Expected 16 unique message types, got %d", len(messageTypeValues))
 	}
 }

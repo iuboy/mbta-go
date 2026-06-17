@@ -4,12 +4,13 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"hash"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/iuboy/pollux-go/sm3"
+
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
 // DefaultSessionTTL is the default time-to-live for authenticated sessions.
@@ -92,68 +93,45 @@ var (
 	_ TokenResolver  = (*StaticTokenValidator)(nil)
 )
 
-// SessionKeys holds the cryptographic material for an authenticated session.
+// SessionKeys 持有已认证会话的密码材料（r2：CipherSuite 统一算法）。
 type SessionKeys struct {
-	KeyID    string
-	HMACKey  []byte // 32 bytes
-	SM4Key   []byte // 16 bytes，SM4-GCM 加密密钥（encryption=sm4_gcm 协商时使用）
-	HMACAlgo string // sha256 or sm3
+	KeyID       string
+	CipherSuite corepb.CipherSuite
+	HMACKey     []byte // len = HMACKeyLen(cs)：intl=32 SHA-256, gm=32 SM3
+	AEADKey     []byte // len = AEADKeyLen(cs)：intl=32 AES-256, gm=16 SM4
 }
 
-// GenerateSessionKeys creates fresh session keys for an authenticated agent.
-// HMAC key（32B）与 SM4 key（16B）总是生成；SM4 key 在未协商 sm4_gcm 时不使用。
-// If hmacAlgo is empty, it defaults to "sha256".
-func GenerateSessionKeys(hmacAlgo ...string) (*SessionKeys, error) {
-	hmacKey := make([]byte, 32)
+// GenerateSessionKeys 为已认证 agent 生成会话密钥（r2 按 CipherSuite）。
+func GenerateSessionKeys(cs corepb.CipherSuite) (*SessionKeys, error) {
+	hmacKey := make([]byte, HMACKeyLen(cs))
 	if _, err := rand.Read(hmacKey); err != nil {
 		return nil, WrapError(NumHMAC, CodeHMAC, "generate HMAC key", err)
 	}
-	sm4Key := make([]byte, 16)
-	if _, err := rand.Read(sm4Key); err != nil {
-		return nil, WrapError(NumEnvelope, CodeEnvelope, "generate SM4 key", err)
+	aeadKey := make([]byte, AEADKeyLen(cs))
+	if _, err := rand.Read(aeadKey); err != nil {
+		return nil, WrapError(NumEnvelope, CodeEnvelope, "generate AEAD key", err)
 	}
-
-	algo := HMACAlgoSHA256
-	if len(hmacAlgo) > 0 && hmacAlgo[0] != "" {
-		algo = hmacAlgo[0]
-	}
-
 	return &SessionKeys{
-		KeyID:    uuid.Must(uuid.NewV7()).String(),
-		HMACKey:  hmacKey,
-		SM4Key:   sm4Key,
-		HMACAlgo: algo,
+		KeyID:       uuid.Must(uuid.NewV7()).String(),
+		CipherSuite: cs,
+		HMACKey:     hmacKey,
+		AEADKey:     aeadKey,
 	}, nil
 }
 
-// HMACKeyBase64 returns the HMAC key as a base64 string for AUTH_OK messages.
-func (sk *SessionKeys) HMACKeyBase64() string {
-	return base64.StdEncoding.EncodeToString(sk.HMACKey)
-}
-
-// SM4KeyBase64 returns the SM4 key as a base64 string for AUTH_OK messages.
-func (sk *SessionKeys) SM4KeyBase64() string {
-	return base64.StdEncoding.EncodeToString(sk.SM4Key)
-}
-
-// ComputeChallengeResponse 计算挑战-响应值 HMAC(token, nonce)。
-// 客户端使用此函数证明自己持有 token，而非仅回显 nonce。
+// ComputeChallengeResponse 计算挑战-响应 HMAC(token, nonce)，返回 raw 字节（r2）。
+// 客户端用它证明持有 token，而非仅回显 nonce。算法按协商 CipherSuite（intl=SHA-256, gm=SM3）。
 //
-// 设计权衡说明：
-//   - 此函数在 AUTH 阶段使用，此时 session key 尚未建立，只能用 token 作为 HMAC 密钥。
-//   - token 是长期凭证，直接参与密码学运算有理论上的侧信道风险（即使 Go 的 hmac 实现
-//     是常量时间的，密钥材料仍存在于内存中更长时间）。
-//   - 未来改进方向：(a) 使用 HKDF(token, nonce) 派生临时密钥，避免 token 直接参与 HMAC；
-//     (b) 在 v2 中使用 SM2 签名代替 HMAC 挑战响应。
-//   - 当前设计的风险等级：低。因为挑战响应仅在 TLS 1.3 加密通道内传输，且 nonce 是一次性的。
-func ComputeChallengeResponse(token, nonce, algo string) string {
+// 注：此函数在 AUTH 阶段使用，session key 尚未建立，只能用 token 作 HMAC 密钥
+// （token 长度任意，故不走 NewHMAC 的长度校验，直接 hmac.New）。挑战响应仅在
+// TLS/TLCP 加密通道内传输，且 nonce 一次性，侧信道风险低。
+func ComputeChallengeResponse(token, nonce string, cs corepb.CipherSuite) []byte {
 	var h hash.Hash
-	switch algo {
-	case HMACAlgoSM3:
+	if cs == corepb.CipherSuite_CIPHER_SUITE_GM {
 		h = hmac.New(sm3.New, []byte(token))
-	default:
+	} else {
 		h = hmac.New(sha256.New, []byte(token))
 	}
 	h.Write([]byte(nonce))
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+	return h.Sum(nil)
 }
