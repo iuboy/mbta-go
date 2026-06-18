@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/protocol"
+	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/iuboy/mbta-go/internal/binding"
+	"github.com/iuboy/mbta-go/internal/protocol"
 	"github.com/quic-go/quic-go"
 )
 
@@ -113,6 +115,11 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		Hostname:     cfg.Hostname,
 		Token:        cfg.Token,
 		Capabilities: cfg.Capabilities,
+		// binding 默认算法（spec §8.3：跟随传输 binding 合规语境）。
+		// v1 走 QUIC + TLS1.3 → 国际密码套件；codec/compression 用协议 baseline 默认。
+		DefaultCodec:       corepb.Codec_CODEC_PROTO,
+		DefaultCipherSuite: corepb.CipherSuite_CIPHER_SUITE_INTL,
+		DefaultCompression: corepb.Compression_COMPRESSION_ZSTD,
 	})
 	cc.SetReadControlLoop(cc.ReadControlLoop)
 	cc.SetHeartbeatLoop(cc.HeartbeatLoop)
@@ -124,78 +131,48 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // ctx 仅用于控制握手阶段（Dial、开 stream、HELLO/AUTH）的超时与取消。
 // 握手成功后，后台 goroutine 运行在独立的 lifecycle ctx 上。
 func (c *Client) Connect(ctx context.Context) error {
-	if err := c.core.SmTransitionConnecting(); err != nil {
-		return err
-	}
-
-	conn, err := Dial(ctx, c.cfg.Transport)
-	if err != nil {
-		return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
-	}
-	c.mu.Lock()
-	c.conn = conn
-	c.mu.Unlock()
-
-	// Open control stream
-	ctrlStr, err := conn.OpenControlStream(ctx)
-	if err != nil {
-		return core.WrapError(core.NumStream, core.CodeStream, "open control stream", err)
-	}
-	c.mu.Lock()
-	c.controlStr = ctrlStr
-	c.mu.Unlock()
-
-	if err := c.core.SmTransition(core.StateControlStreamOpen); err != nil {
-		return err
-	}
-
-	// 设置 transport（picker 在握手后、StartLifecycle 前打开）。
-	tr := &v1ClientTransport{conn: conn, controlStr: ctrlStr}
-	c.core.SetTransport(tr)
-
-	if err := c.core.SendHello(); err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello", err)
-	}
-	helloAck, err := c.core.RecvHelloAck()
-	if err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello_ack", err)
-	}
-
-	c.core.SetSessionID(helloAck.GetSessionId())
-	if err := c.core.SmTransition(core.StateHelloAcked); err != nil {
-		return err
-	}
-	if w := helloAck.GetInitialWindow(); w != nil {
-		c.core.UpdateWindow(int(w.GetMaxInflightBatches()), int(w.GetMaxInflightEvents()), w.GetMaxInflightBytes())
-	}
-	if helloAck.GetHeartbeatIntervalSec() > 0 {
-		c.core.SetHeartbeatInterval(time.Duration(helloAck.GetHeartbeatIntervalSec()) * time.Second)
-	} else {
-		c.core.SetHeartbeatInterval(30 * time.Second)
-	}
-
-	if err := c.core.SendAuth(); err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth", err)
-	}
-	// v1 独有：AUTH_OK 后调用 SetAuthed(true) 开放 data stream 门禁。
-	c.core.SetOnAuthed(func(context.Context) { conn.SetAuthed(true) })
-	if err := c.core.RecvAuthResult(); err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth_result", err)
-	}
-
-	c.core.StartLifecycle()
-
-	// Open data stream(s) per PickStrategy（握手成功后，data stream 门禁已开放）。
-	picker, err := c.openDataStreams(ctx)
-	if err != nil {
-		return err
-	}
-	c.mu.Lock()
-	c.picker = picker
-	tr.picker = picker
-	c.mu.Unlock()
-
-	return nil
+	tr := &v1ClientTransport{}
+	return binding.Handshake(ctx, c.core,
+		// dial: 建立 QUIC 连接
+		func(ctx context.Context) error {
+			conn, err := Dial(ctx, c.cfg.Transport)
+			if err != nil {
+				return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
+			}
+			c.mu.Lock()
+			c.conn = conn
+			c.mu.Unlock()
+			return nil
+		},
+		// setupTransport: 开 control stream、设置 transport、注册 onAuthed
+		func(ctx context.Context, cc *protocol.CoreClient) error {
+			ctrlStr, err := c.conn.OpenControlStream(ctx)
+			if err != nil {
+				return core.WrapError(core.NumStream, core.CodeStream, "open control stream", err)
+			}
+			c.mu.Lock()
+			c.controlStr = ctrlStr
+			tr.conn = c.conn
+			tr.controlStr = ctrlStr
+			c.mu.Unlock()
+			cc.SetTransport(tr)
+			// v1 独有：AUTH_OK 后调用 SetAuthed(true) 开放 data stream 门禁。
+			cc.SetOnAuthed(func(context.Context) { c.conn.SetAuthed(true) })
+			return nil
+		},
+		// postAuth: StartLifecycle 后打开 data stream(s)
+		func(ctx context.Context) error {
+			picker, err := c.openDataStreams(ctx)
+			if err != nil {
+				return err
+			}
+			c.mu.Lock()
+			c.picker = picker
+			tr.picker = picker
+			c.mu.Unlock()
+			return nil
+		},
+	)
 }
 
 // openDataStreams 按 PickStrategy 打开数据流并构造 StreamPicker。

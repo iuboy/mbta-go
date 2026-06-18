@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/protocol"
+	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/iuboy/mbta-go/internal/binding"
+	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
 // Client 是 MBTA-NTLS 客户端：单 TCP（TLCP）连接上多路复用 control/data 帧。
@@ -72,6 +74,11 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		Hostname:     cfg.Hostname,
 		Token:        cfg.Token,
 		Capabilities: cfg.Capabilities,
+		// binding 默认算法（spec §8.3：跟随传输 binding 合规语境）。
+		// ntls 走 TCP + TLCP/RFC8998 → 国密密码套件；codec/compression 用协议 baseline 默认。
+		DefaultCodec:       corepb.Codec_CODEC_PROTO,
+		DefaultCipherSuite: corepb.CipherSuite_CIPHER_SUITE_GM,
+		DefaultCompression: corepb.Compression_COMPRESSION_ZSTD,
 	})
 	// ntls 单连接无 SetAuthed 门禁，onAuthed 留空。
 	cc.SetReadControlLoop(cc.ReadControlLoop)
@@ -84,58 +91,28 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // ctx 仅控制握手阶段（Dial、HELLO/AUTH）的超时与取消。握手成功后，后台 goroutine
 // 运行在独立的 lifecycle ctx 上，不随 ctx 取消而退出；client 生命周期由 Close() 终结。
 func (c *Client) Connect(ctx context.Context) error {
-	if err := c.core.SmTransitionConnecting(); err != nil {
-		return err
-	}
-
-	conn, err := Dial(ctx, &c.cfg)
-	if err != nil {
-		return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
-	}
-	c.mu.Lock()
-	c.conn = conn
-	c.mu.Unlock()
-
-	tr := &ntlsClientTransport{conn: conn}
-	c.core.SetTransport(tr)
-
-	// ntls 单 TCP 连接：无独立 control stream，但状态机仍要求
-	// Connecting -> ControlStreamOpen -> HelloSent 路径。
-	if err := c.core.SmTransition(core.StateControlStreamOpen); err != nil {
-		return err
-	}
-
-	if err := c.core.SendHello(); err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello", err)
-	}
-	helloAck, err := c.core.RecvHelloAck()
-	if err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello_ack", err)
-	}
-
-	c.core.SetSessionID(helloAck.GetSessionId())
-	if err := c.core.SmTransition(core.StateHelloAcked); err != nil {
-		return err
-	}
-
-	if w := helloAck.GetInitialWindow(); w != nil {
-		c.core.UpdateWindow(int(w.GetMaxInflightBatches()), int(w.GetMaxInflightEvents()), w.GetMaxInflightBytes())
-	}
-	if helloAck.GetHeartbeatIntervalSec() > 0 {
-		c.core.SetHeartbeatInterval(time.Duration(helloAck.GetHeartbeatIntervalSec()) * time.Second)
-	} else {
-		c.core.SetHeartbeatInterval(30 * time.Second)
-	}
-
-	if err := c.core.SendAuth(); err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth", err)
-	}
-	if err := c.core.RecvAuthResult(); err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth_result", err)
-	}
-
-	c.core.StartLifecycle()
-	return nil
+	tr := &ntlsClientTransport{}
+	return binding.Handshake(ctx, c.core,
+		// dial: 建立 TCP（TLCP/TLS1.3）连接
+		func(ctx context.Context) error {
+			conn, err := Dial(ctx, &c.cfg)
+			if err != nil {
+				return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
+			}
+			c.mu.Lock()
+			c.conn = conn
+			tr.conn = conn
+			c.mu.Unlock()
+			return nil
+		},
+		// setupTransport: 单 TCP 连接，无独立 control stream，仅设置 transport
+		func(ctx context.Context, cc *protocol.CoreClient) error {
+			cc.SetTransport(tr)
+			return nil
+		},
+		// postAuth: ntls 无 post-auth 工作
+		nil,
+	)
 }
 
 // SendBatch 通过 MBTA-NTLS 协议发送一个 SignalBatch。

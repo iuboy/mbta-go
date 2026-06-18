@@ -10,7 +10,7 @@ import (
 // r2 控制面/数据面消息类型 = corepb 生成类型（core spec §4 / §9.5）。
 //
 // 与旧 JSON struct 的差异：session_id / chunk_id / nonce / 密钥为原生 bytes（去 base64）；
-// chunk_id 为 ULID 16B。字段号即 wire 稳定性契约（§1.4 只追加纪律）。
+// chunk_id 为 ULID 16B。字段号发布后不可改（§1.4）。
 type (
 	HelloMessage      = corepb.HelloMessage
 	HelloAckMessage   = corepb.HelloAckMessage

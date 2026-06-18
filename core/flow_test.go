@@ -5,8 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-
-	mbtatest "github.com/iuboy/mbta-go/testing"
 )
 
 // TestPressureStateString tests PressureState enum values.
@@ -108,7 +106,9 @@ func TestEventSinkInterface(t *testing.T) {
 
 	// Test OnSignalBatch
 	err := mock.OnSignalBatch(ctx, agentID, batch)
-	mbtatest.AssertNoError(t, err, "OnSignalBatch")
+	if err != nil {
+		t.Errorf("%s: %v", "OnSignalBatch", err)
+	}
 
 	// Test OnPressure
 	pressure := mock.OnPressure(agentID)

@@ -7,16 +7,16 @@ import (
 	"time"
 )
 
-// PressureState 背压状态（string 枚举，匹配项目风格：model.Status、ACKStatus 等）。
+// PressureState 背压状态
 type PressureState string
 
 const (
-	PressureNormal   PressureState = "normal"
+	PressureNormal   PressureState = "normal" //
 	PressureDegraded PressureState = "degraded"
 	PressureCritical PressureState = "critical"
 )
 
-// ACKStatus 确认状态（从 router_enhanced.go 迁移到 core）。
+// ACKStatus 确认状态
 type ACKStatus string
 
 const (

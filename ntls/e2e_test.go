@@ -50,7 +50,7 @@ func TestE2E_NTLS_SendBatch(t *testing.T) {
 		Auth:         core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
 		Policy: core.Policy{
 			SupportedCapabilities: []string{"codec_proto", "cs_gm"},
-			DefaultCodec:          corepb.Codec_CODEC_JSON,
+			DefaultCodec:          corepb.Codec_CODEC_PROTO,
 			DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 			CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_GM,
 		},
@@ -118,7 +118,7 @@ func TestE2E_MBTATLS_SendBatch(t *testing.T) {
 		Auth:     core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
 		Policy: core.Policy{
 			SupportedCapabilities: []string{"codec_proto", "cs_intl"},
-			DefaultCodec:          corepb.Codec_CODEC_JSON,
+			DefaultCodec:          corepb.Codec_CODEC_PROTO,
 			DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 			CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 		},

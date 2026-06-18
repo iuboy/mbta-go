@@ -9,7 +9,7 @@
 | `mbta-tls/1` | TCP + TLS 1.3（国际） | **本规范定义（补齐对称性）** |
 | `mbta-ntls/1` | TCP + TLCP（国密，GB/T 38636-2020） | 本规范定义 |
 
-**Scope:** 本 binding 遵循 [mbta-core-spec.md](./mbta-core-spec.md) r2 全部核心语义。两者共用 TCP framing，**唯一差异是 TLS 握手层**（传输×密码正交两维，见 core §10）。凡本文件未定义处，以 core 为准。
+**Scope:** 本 binding 遵循 [mbta-core-spec.md](./mbta-core-spec.md) r2。两者共用 TCP framing，差异仅在 TLS 握手层（见 core §10）。本文件未定义处以 core 为准。
 
 ---
 
@@ -59,7 +59,7 @@ TCP 是单字节流，无原生多路复用。本 binding 用帧头 `ChannelID` 
 
 - 每连接 MUST 至少一个 **control channel**（`channel_id=0`），承载 HELLO/AUTH/WINDOW/THROTTLE/PING/PONG/CLOSE/ERROR；
 - **data channel**（`channel_id≥1`）承载 BATCH/ACK/NACK/PARTIAL_ACK；
-- 基础实现可只用单连接单 data channel（`channel_id=1`）；多 data channel 通过 capability `multi_channel`（core 附录 E）协商启用；
+- 基础实现可只用单连接单 data channel（`channel_id=1`）；多 data channel 通过 capability `multi_channel`（core 附录 C）协商启用；
 - 所有帧在同 TCP 连接交替传输；**写侧 MUST 串行化**（同一连接的帧不得交错），由实现用单写锁保证。
 
 ### 3.3 拆包/粘包/半开/短读防护（MUST）
@@ -80,7 +80,7 @@ TCP 是连续字节流，接收端 MUST：
 
 - 客户端声明 `durability=lossy` 的 signal 在 TCP binding 下 **退化为 reliable BATCH**（走 `channel_id≥1`，正常 ACK/spool）；
 - 服务端不接受 DATAGRAM 消息类型（core §4 type=7）在此 binding 上的使用；
-- 实时/不可靠投递需求须使用 QUIC binding（见 [mbta-quic-binding.md](./mbta-quic-binding.md)）。
+- 实时/不可靠投递需求须使用 QUIC binding（mbta-quic-binding.md 待编写）。
 
 ---
 
@@ -132,7 +132,7 @@ TCP 是连续字节流，接收端 MUST：
 - 写侧串行化（并发发送者帧不交错）；
 - HELLO/AUTH/BATCH/ACK/NACK/PARTIAL_ACK/WINDOW/THROTTLE 端到端；
 - spool 崩溃恢复 + 重连重发（core §11.5）；
-- OTLP Logs/Metrics/Traces/Profiles 映射（core 附录 C）。
+- OTLP Logs/Metrics/Traces/Profiles 映射（core 附录 B）。
 
 ---
 

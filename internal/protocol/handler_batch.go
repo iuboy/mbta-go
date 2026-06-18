@@ -1,0 +1,281 @@
+package protocol
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"time"
+
+	corepb "github.com/iuboy/mbta-go/corepb"
+
+	"github.com/iuboy/mbta-go/core"
+)
+
+// processBatch 处理 reliable BATCH：envelope → 校验 → 路由 → ACK。
+func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
+	env, err := core.DecodeEnvelope(payload)
+	if err != nil {
+		slog.Debug("invalid envelope", "error", err)
+		h.sendError(ctx, core.CodeDecodeFailed, "invalid_envelope", false)
+		return
+	}
+
+	if h.expiresAt.Load() > 0 && time.Now().Unix() > h.expiresAt.Load() {
+		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "session_expired", "session TTL exceeded, please reconnect", false)
+		return
+	}
+
+	// Verify HMAC（在解密/解码前）。
+	if h.keys != nil {
+		ok, verr := core.VerifyMAC(h.keys.HMACKey(), env)
+		if verr != nil || !ok {
+			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "hmac_mismatch", "HMAC verification failed", false)
+			h.config.Metrics.HMACFailures().Inc()
+			return
+		}
+	}
+
+	// 算法一致性复核（依据权威协商结果）。
+	if h.verifyEnvelopeAlgo(env) {
+		return
+	}
+
+	// Open envelope（解密+解压）。
+	var aeadKey []byte
+	if h.keys != nil {
+		aeadKey = h.keys.AEADKey()
+	}
+	batchPayload, err := core.Open(env, aeadKey)
+	if err != nil {
+		slog.Debug("envelope open failed", "error", err)
+		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "envelope_open_error", "envelope could not be opened", true)
+		return
+	}
+	if len(batchPayload) > maxBatchBytes {
+		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "batch_too_large",
+			fmt.Sprintf("batch payload %d bytes exceeds limit %d", len(batchPayload), maxBatchBytes), false)
+		return
+	}
+
+	var batchMsg corepb.BatchMessage
+	if err := core.Decode(batchPayload, &batchMsg); err != nil {
+		slog.Debug("batch decode failed", "error", err)
+		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "invalid_batch", "batch message could not be decoded", false)
+		return
+	}
+	if err := core.ValidateBatch(&batchMsg); err != nil {
+		slog.Debug("batch validation failed", "error", err)
+		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "batch_validation", "batch failed validation", false)
+		return
+	}
+
+	// chunk_id dedup key（ULID 文本）。
+	chunkIDText := chunkIDText(batchMsg.GetChunkId())
+	batchEvents, signalBatchPtr := h.resolveBatchEvents(&batchMsg)
+	if batchEvents < 0 {
+		return // 已发 NACK
+	}
+	batchBytes := int64(len(batchPayload))
+
+	// 服务端流控强制。
+	if !h.window.CanSend(h.inflight, batchEvents, batchBytes) {
+		h.sendThrottle(ctx, throttleRetryMs, "window_exceeded", "server flow-control window exceeded")
+		return
+	}
+	h.inflight.Add(batchEvents, batchBytes)
+
+	// Replay 去重。
+	if existing := h.replay.SeenOrAdd(h.agentID, chunkIDText); existing != nil {
+		h.inflight.Remove(batchEvents, batchBytes)
+		ackMode := corepb.AckMode_ACK_MODE_ACCEPTED
+		if existing.Status == core.ReplayDurable {
+			ackMode = corepb.AckMode_ACK_MODE_DURABLE
+		}
+		h.sendAck(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), batchEvents, ackMode)
+		return
+	}
+
+	h.replay.Update(h.agentID, chunkIDText, core.ReplayAccepted)
+	h.routeAndACK(ctx, h.agentID, chunkIDText, &batchMsg, signalBatchPtr, batchEvents, batchBytes)
+}
+
+// processDatagram 处理 unreliable DATAGRAM：at-most-once，无 ACK/spool（core spec §11.4）。
+func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
+	env, err := core.DecodeEnvelope(payload)
+	if err != nil {
+		slog.Debug("datagram decode envelope failed", "error", err)
+		return // 静默丢弃
+	}
+	if h.keys != nil {
+		ok, _ := core.VerifyMAC(h.keys.HMACKey(), env)
+		if !ok {
+			slog.Debug("datagram hmac failed")
+			return // HMAC 失败静默丢弃
+		}
+	}
+	var aeadKey []byte
+	if h.keys != nil {
+		aeadKey = h.keys.AEADKey()
+	}
+	batchPayload, err := core.Open(env, aeadKey)
+	if err != nil {
+		slog.Debug("datagram open failed", "error", err)
+		return
+	}
+	var batchMsg corepb.DatagramMessage
+	if err := core.Decode(batchPayload, &batchMsg); err != nil {
+		slog.Debug("datagram decode message failed", "error", err)
+		return
+	}
+	// 不可靠投递：尽力路由，无 ACK。
+	if h.config.Sink != nil {
+		if rawSink, ok := h.config.Sink.(core.RawEventSink); ok {
+			slog.Debug("datagram delivering to raw sink", "events", batchMsg.GetEventsCount())
+			_, _ = rawSink.OnRawBatch(ctx, h.agentID, int(batchMsg.GetEventsCount()), batchMsg.GetBatch())
+		} else {
+			slog.Debug("datagram sink is not RawEventSink")
+		}
+	}
+}
+
+// codecForUnmarshal 返回服务端解码 SignalBatch 应使用的 codec：优先协商结果，
+// 否则回退到 HandlerConfig.Policy.DefaultCodec。
+func (h *CoreHandler) codecForUnmarshal() corepb.Codec {
+	if h.negotiated != nil {
+		return h.negotiated.Codec
+	}
+	return h.config.Policy.DefaultCodec
+}
+
+// resolveBatchEvents 解析事件数（RawEventSink 快速路径 vs 完整解码）。batchEvents<0 表示已发 NACK。
+func (h *CoreHandler) resolveBatchEvents(batchMsg *corepb.BatchMessage) (int, *core.SignalBatch) {
+	rawSink, _ := h.config.Sink.(core.RawEventSink)
+	if rawSink != nil && batchMsg.GetEventsCount() > 0 {
+		ec := int(batchMsg.GetEventsCount())
+		if ec > maxBatchEvents {
+			h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "too_many_events",
+				fmt.Sprintf("event count %d exceeds limit %d", ec, maxBatchEvents), false)
+			return -1, nil
+		}
+		return ec, nil
+	}
+	sb, ok := h.decodeSignalBatch(batchMsg)
+	if !ok {
+		return -1, nil
+	}
+	return len(sb.Signals), sb
+}
+
+func (h *CoreHandler) decodeSignalBatch(batchMsg *corepb.BatchMessage) (*core.SignalBatch, bool) {
+	sb, err := core.UnmarshalSignalBatchCodec(h.codecForUnmarshal(), batchMsg.GetBatch())
+	if err != nil {
+		slog.Debug("signal batch decode failed", "error", err)
+		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "invalid_signal_batch", "signal batch could not be decoded", false)
+		return nil, false
+	}
+	if err := sb.Validate(); err != nil {
+		slog.Debug("signal validation failed", "error", err)
+		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "signal_validation", "signal batch failed validation", false)
+		return nil, false
+	}
+	if len(sb.Signals) > maxBatchEvents {
+		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "too_many_events",
+			fmt.Sprintf("event count %d exceeds limit %d", len(sb.Signals), maxBatchEvents), false)
+		return nil, false
+	}
+	return sb, true
+}
+
+// verifyEnvelopeAlgo 强制 envelope 使用协商算法（Compression + Codec + CipherSuite）。
+// 任一不一致即拒绝——防止客户端单方面降级或注入未协商算法（defense-in-depth，
+// 即使 HMAC 通过也不允许 wire 字段与权威协商结果不符）。返回 true 表示已发 NACK，调用方中止。
+func (h *CoreHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
+	if h.negotiated == nil {
+		return false
+	}
+	if env.Compression != h.negotiated.Compression {
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+			"compression not negotiated", false)
+		return true
+	}
+	if env.Codec != h.negotiated.Codec {
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+			"codec not negotiated", false)
+		return true
+	}
+	if env.CipherSuite != h.negotiated.CipherSuite {
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+			"cipher suite not negotiated", false)
+		return true
+	}
+	return false
+}
+
+// routeAndACK 路由 batch 到 sink 并发送 ACK（core spec §11）。
+func (h *CoreHandler) routeAndACK(ctx context.Context, agentID, chunkID string, batchMsg *corepb.BatchMessage, signalBatch *core.SignalBatch, batchEvents int, batchBytes int64) {
+	defer h.inflight.Remove(batchEvents, batchBytes)
+
+	ackMode := corepb.AckMode_ACK_MODE_ACCEPTED
+
+	if h.config.Sink != nil {
+		if rawSink, ok := h.config.Sink.(core.RawEventSink); ok && signalBatch == nil {
+			result, err := rawSink.OnRawBatch(ctx, h.agentID, batchEvents, batchMsg.GetBatch())
+			if err != nil {
+				slog.Warn("raw routing failed", "error", err)
+			} else if h.applyRouteResult(ctx, result, agentID, chunkID, &ackMode) {
+				return
+			}
+		} else if durable, ok := h.config.Sink.(core.DurableEventSink); ok {
+			result, err := durable.OnSignalBatchWithResult(ctx, h.agentID, signalBatch)
+			if err != nil {
+				slog.Warn("durable routing failed", "error", err)
+			} else if h.applyRouteResult(ctx, result, agentID, chunkID, &ackMode) {
+				return
+			}
+		} else {
+			if err := h.config.Sink.OnSignalBatch(ctx, h.agentID, signalBatch); err != nil {
+				slog.Warn("event routing failed", "error", err)
+			}
+			pressure := h.config.Sink.OnPressure(h.agentID)
+			if pressure != "" && pressure != h.loadLastPressure() {
+				h.lastPressure.Store(pressure)
+				b, e, by := pressureToWindow(pressure)
+				h.window.Update(b, e, by)
+				h.sendWindowUpdate(ctx, b, e, by, string(pressure))
+			}
+		}
+	}
+
+	h.sendAck(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), batchEvents, ackMode)
+	h.config.Metrics.BatchesAcked().Inc()
+}
+
+func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteResult, agentID, chunkID string, ackMode *corepb.AckMode) bool {
+	if result == nil {
+		return false
+	}
+	switch result.Status {
+	case core.ACKStatusDurable:
+		*ackMode = corepb.AckMode_ACK_MODE_DURABLE
+		h.replay.Update(agentID, chunkID, core.ReplayDurable)
+	case core.ACKStatusThrottle:
+		h.sendThrottle(ctx, throttleRetryMs, "queue_pressure", "queue pressure critical, retry later")
+		return true
+	default:
+		*ackMode = corepb.AckMode_ACK_MODE_ACCEPTED
+	}
+	if result.Pressure != "" && result.Pressure != h.loadLastPressure() {
+		h.lastPressure.Store(result.Pressure)
+		b, e, by := pressureToWindow(result.Pressure)
+		h.window.Update(b, e, by)
+		h.sendWindowUpdate(ctx, b, e, by, string(result.Pressure))
+	}
+	return false
+}
+
+func (h *CoreHandler) loadLastPressure() core.PressureState {
+	if v := h.lastPressure.Load(); v != nil {
+		return v.(core.PressureState)
+	}
+	return core.PressureNormal
+}

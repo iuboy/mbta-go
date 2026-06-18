@@ -10,7 +10,6 @@ import (
 	"github.com/iuboy/mbta-go/core"
 	ntls "github.com/iuboy/mbta-go/ntls"
 	v1 "github.com/iuboy/mbta-go/v1"
-	v2 "github.com/iuboy/mbta-go/v2"
 )
 
 // ServerOption configures a Server.
@@ -22,7 +21,6 @@ type ServerOption func(*ServerConfig) error
 type Server struct {
 	cfg        *ServerConfig
 	v1Server   *v1.Server
-	v2Server   *v2.Server
 	ntlsServer *ntls.Server
 	mu         sync.RWMutex
 	started    bool
@@ -34,7 +32,6 @@ type Server struct {
 type ServerConfig struct {
 	// Version selection
 	EnableV1   bool
-	EnableV2   bool
 	EnableNTLS bool
 
 	// Shared configuration (all versions)
@@ -45,11 +42,6 @@ type ServerConfig struct {
 
 	// V1 specific configuration
 	V1QUIC v1.QUICServerConfig
-
-	// V2 specific configuration
-	// EXPERIMENTAL: v2 尚未实现（需 GM TLS 库）。EnableV2=true 或配置 V2QUIC 会在
-	// NewServer 时返回「未实现」错误，而非启动一个注定失败的服务。
-	V2QUIC v2.QUICServerConfig
 
 	// NTLS specific configuration
 	NTLSCfg ntls.ServerConfig
@@ -70,7 +62,7 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 	}
 
 	// Validate at least one version is enabled
-	if !cfg.EnableV1 && !cfg.EnableV2 && !cfg.EnableNTLS {
+	if !cfg.EnableV1 && !cfg.EnableNTLS {
 		return nil, core.NewError(core.NumConfig, core.CodeConfig, "at least one version must be enabled")
 	}
 
@@ -98,14 +90,6 @@ func (s *Server) Start(ctx context.Context) error {
 			return core.WrapError(core.NumConfig, core.CodeConfig, "init v1", err)
 		}
 	}
-	if s.cfg.EnableV2 {
-		if err := s.initV2Server(); err != nil {
-			s.mu.Lock()
-			s.started = false
-			s.mu.Unlock()
-			return core.WrapError(core.NumConfig, core.CodeConfig, "init v2", err)
-		}
-	}
 	if s.cfg.EnableNTLS {
 		if err := s.initNTLSServer(); err != nil {
 			s.mu.Lock()
@@ -121,11 +105,6 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.v1Server != nil {
 		g.Go(func() error {
 			return core.WrapError(core.NumTransport, core.CodeTransport, "v1", s.v1Server.Start(ctx))
-		})
-	}
-	if s.v2Server != nil {
-		g.Go(func() error {
-			return core.WrapError(core.NumTransport, core.CodeTransport, "v2", s.v2Server.Start(ctx))
 		})
 	}
 	if s.ntlsServer != nil {
@@ -154,12 +133,6 @@ func (s *Server) Close() error {
 	if s.v1Server != nil {
 		if err := s.v1Server.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("v1 close: %w", err))
-		}
-	}
-
-	if s.v2Server != nil {
-		if err := s.v2Server.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("v2 close: %w", err))
 		}
 	}
 
@@ -195,25 +168,6 @@ func (s *Server) initV1Server() error {
 	return nil
 }
 
-// initV2Server initializes the V2 server.
-func (s *Server) initV2Server() error {
-	cfg := v2.ServerConfig{
-		Transport: s.cfg.V2QUIC,
-		Auth:      s.cfg.Auth,
-		Policy:    s.cfg.Policy,
-		Sink:      s.cfg.Sink,
-		Metrics:   s.cfg.Metrics,
-	}
-
-	server, err := v2.NewServer(cfg)
-	if err != nil {
-		return err
-	}
-
-	s.v2Server = server
-	return nil
-}
-
 // initNTLSServer initializes the NTLS server.
 func (s *Server) initNTLSServer() error {
 	cfg := s.cfg.NTLSCfg
@@ -234,7 +188,7 @@ func (s *Server) initNTLSServer() error {
 // Server Options (functional options pattern)
 
 // WithoutV1 disables V1 (QUIC + TLS 1.3). V1 is enabled by default for backward
-// compatibility; use this option when only V2/NTLS is needed, to avoid意外拉起 v1 listener。
+// compatibility; use this option when only NTLS is needed, to avoid意外拉起 v1 listener。
 func WithoutV1() ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.EnableV1 = false
@@ -247,15 +201,6 @@ func WithV1(cfg v1.QUICServerConfig) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.EnableV1 = true
 		sc.V1QUIC = cfg
-		return nil
-	}
-}
-
-// WithV2 enables V2 support with custom QUIC configuration.
-func WithV2(cfg v2.QUICServerConfig) ServerOption {
-	return func(sc *ServerConfig) error {
-		sc.EnableV2 = true
-		sc.V2QUIC = cfg
 		return nil
 	}
 }

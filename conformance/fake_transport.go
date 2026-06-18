@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/protocol"
+	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
 // FakeTransport 是 protocol.Transport 的内存实现，用于测试 CoreHandler。

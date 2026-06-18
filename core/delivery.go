@@ -86,17 +86,18 @@ func NewReplayCacheWithSize(maxSize int) *ReplayCache {
 	}
 }
 
-// Key builds the dedup key.
-func Key(agentID, chunkID string) string {
+// replayKey builds the dedup key from agentID and chunkID.
+func replayKey(agentID, chunkID string) string {
 	return agentID + "\x00" + chunkID
 }
 
-// SeenOrAdd checks if a key has been seen. Returns the entry if so.
+// SeenOrAdd checks if a (agentID, chunkID) pair has been seen. Returns the entry if so.
 // If not seen, creates a new Processing entry and returns nil.
 //
 // 淘汰策略（O(1)）：缓存满时优先从 doneList 队首驱逐一个已完成条目；
 // 若 doneList 为空（全部 Processing），则从 processingList 队首驱逐最早条目并记录告警。
-func (rc *ReplayCache) SeenOrAdd(key string) *ReplayEntry {
+func (rc *ReplayCache) SeenOrAdd(agentID, chunkID string) *ReplayEntry {
+	key := replayKey(agentID, chunkID)
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
@@ -135,9 +136,10 @@ func (rc *ReplayCache) SeenOrAdd(key string) *ReplayEntry {
 	return nil
 }
 
-// Update changes the status of an existing entry.
+// Update changes the status of an existing (agentID, chunkID) entry.
 // 条目从 Processing 迁移到完成态时，同步从 processingList 移到 doneList。
-func (rc *ReplayCache) Update(key string, status ReplayStatus) {
+func (rc *ReplayCache) Update(agentID, chunkID string, status ReplayStatus) {
+	key := replayKey(agentID, chunkID)
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
@@ -153,8 +155,9 @@ func (rc *ReplayCache) Update(key string, status ReplayStatus) {
 	}
 }
 
-// Get retrieves the current entry for a key.
-func (rc *ReplayCache) Get(key string) *ReplayEntry {
+// Get retrieves the current entry for a (agentID, chunkID) pair.
+func (rc *ReplayCache) Get(agentID, chunkID string) *ReplayEntry {
+	key := replayKey(agentID, chunkID)
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	if n, ok := rc.entries[key]; ok {

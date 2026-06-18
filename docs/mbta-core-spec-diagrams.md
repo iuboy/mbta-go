@@ -8,8 +8,7 @@
 
 ### 1.1 帧布局（§2）
 
-```
- 0                   1                   2                   3
+``` 0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                          Magic "MBTA"                         |  Offset 0, 4B
@@ -25,22 +24,21 @@
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-| 字段 | 偏移 | 大小 | 说明 |
-|------|------|------|------|
-| Magic | 0 | 4B | 固定 `"MBTA"`（0x4D425441） |
-| Version | 4 | 1B | 固定 `0x01` |
-| Flags | 5 | 1B | 见 §2 |
-| Type | 6 | 1B | uint8，消息类型（§3） |
-| ChannelID | 7 | 1B | 0=control, ≥1=data |
-| Length | 8 | varint | payload 字节数（LEB128，1–5B） |
-| Payload | 8+v | Length | 消息内容 |
+| 字段      | 偏移 | 大小   | 说明                           |
+| --------- | ---- | ------ | ------------------------------ |
+| Magic     | 0    | 4B     | 固定 `"MBTA"`（0x4D425441）    |
+| Version   | 4    | 1B     | 固定 `0x01`                    |
+| Flags     | 5    | 1B     | 见 §2                          |
+| Type      | 6    | 1B     | uint8，消息类型（§3）          |
+| ChannelID | 7    | 1B     | 0=control, ≥1=data             |
+| Length    | 8    | varint | payload 字节数（LEB128，1–5B） |
+| Payload   | 8+v  | Length | 消息内容                       |
 
 **最小帧：9B（8B 定长前缀 + 1B varint Length=0 + 空 payload）。**
 
 ### 1.2 Flags 位定义（§3）
 
-```
-  Bit 7  6  5  4  3  2  1  0
+```  Bit 7  6  5  4  3  2  1  0
      ┌──┬──┬──┬──┬──┬──┬──┬──┐
      │FC1│FC0│ Co│ NC│ MF│ D │ C │ En│
      └──┴──┴──┴──┴──┴──┴──┴──┘
@@ -49,15 +47,15 @@
                  Coal  Rsv4  MF  Dat Ctl Env
 ```
 
-| Bit | 掩码 | 名称 | 说明 |
-|-----|------|------|------|
-| 0 | 0x01 | Envelope | payload 是 SecureEnvelope |
-| 1 | 0x02 | Control | 控制面消息 |
-| 2 | 0x04 | Data | 数据面消息（与 Control 互斥） |
-| 3 | 0x08 | MoreFollows | 逻辑多片消息（§3） |
-| 4 | 0x10 | Reserved | MUST NOT set（v2 预留） |
-| 5 | 0x20 | Coalesced | 多条同类型小消息合并打包 |
-| 6–7 | 0xC0 | FlowClass | 00=normal, 01=best-effort, 10=critical, 11=reserved(MUST 拒绝) |
+| Bit | 掩码 | 名称        | 说明                                                           |
+| --- | ---- | ----------- | -------------------------------------------------------------- |
+| 0   | 0x01 | Envelope    | payload 是 SecureEnvelope                                      |
+| 1   | 0x02 | Control     | 控制面消息                                                     |
+| 2   | 0x04 | Data        | 数据面消息（与 Control 互斥）                                  |
+| 3   | 0x08 | MoreFollows | 逻辑多片消息（§3）                                             |
+| 4   | 0x10 | Reserved    | MUST NOT set（v2 预留）                                        |
+| 5   | 0x20 | Coalesced   | 多条同类型小消息合并打包                                       |
+| 6–7 | 0xC0 | FlowClass   | 00=normal, 01=best-effort, 10=critical, 11=reserved(MUST 拒绝) |
 
 **校验规则**：Control ∧ Data 互斥；MoreFollows ∧ Coalesced 互斥；FlowClass=3 MUST 拒绝。
 
@@ -100,22 +98,22 @@
 
 ### 3.1 字段表（corepb.SecureEnvelope）
 
-| 字段号 | 字段 | 类型 | 说明 |
-|--------|------|------|------|
-| 1 | envelope_version | uint32 | =1 |
-| 2 | message_type | enum | BATCH=1 / DATAGRAM=2 |
-| 3 | session_id | bytes | 会话标识 |
-| 4 | key_id | bytes | 密钥标识 |
-| 5 | seq | uint64 | 会话内单调递增（仅 reliable） |
-| 6 | chunk_id | bytes(16) | ULID，全局唯一+时序 |
-| 7 | created_at_unix_ms | int64 | 创建时间 |
-| 8 | codec | enum | PROTO=1 / CBOR=2 / JSON=3 |
-| 9 | compression | enum | ZSTD=1 / LZ4=2 / NONE=3 / GZIP=4 |
-| 10 | cipher_suite | enum | INTL=1 / GM=2 |
-| 11 | delivery_mode | enum | RELIABLE=1 / LOSSY=2 |
-| 12 | nonce | bytes | 显式 nonce，同密钥禁止复用 |
-| 13 | payload | bytes | 加密+压缩后载荷（原生 bytes，无 base64） |
-| 14 | mac | bytes | HMAC 输出（原生 bytes） |
+| 字段号 | 字段               | 类型      | 说明                                     |
+| ------ | ------------------ | --------- | ---------------------------------------- |
+| 1      | envelope_version   | uint32    | =1                                       |
+| 2      | message_type       | enum      | BATCH=1 / DATAGRAM=2                     |
+| 3      | session_id         | bytes     | 会话标识                                 |
+| 4      | key_id             | bytes     | 密钥标识                                 |
+| 5      | seq                | uint64    | 会话内单调递增（仅 reliable）            |
+| 6      | chunk_id           | bytes(16) | ULID，全局唯一+时序                      |
+| 7      | created_at_unix_ms | int64     | 创建时间                                 |
+| 8      | codec              | enum      | PROTO=1 / CBOR=2 / JSON=3                |
+| 9      | compression        | enum      | ZSTD=1 / LZ4=2 / NONE=3 / GZIP=4         |
+| 10     | cipher_suite       | enum      | INTL=1 / GM=2                            |
+| 11     | delivery_mode      | enum      | RELIABLE=1 / LOSSY=2                     |
+| 12     | nonce              | bytes     | 显式 nonce，同密钥禁止复用               |
+| 13     | payload            | bytes     | 加密+压缩后载荷（原生 bytes，无 base64） |
+| 14     | mac                | bytes     | HMAC 输出（原生 bytes）                  |
 
 ### 3.2 处理顺序（§5.1）
 
@@ -292,7 +290,7 @@
  ├─────────────────────────────────────────────────────────┤
  │                                                         │
  │  ┌─────────────────────────────────────────────────┐   │
- │  │              protocol/CoreHandler                 │   │
+ │  │           internal/protocol/CoreHandler           │   │
  │  │  (传输无关：握手 / envelope / 投递 / 流控 / ACK)   │   │
  │  │                                                   │   │
  │  │  Transport interface                              │   │
@@ -324,29 +322,29 @@
 
 ---
 
-## 8. Capability Registry（附录 E）
+## 8. Capability Registry（附录 C）
 
-| Capability | 阶段 | 仅 QUIC? | 引用 |
-|------------|------|----------|------|
-| `partial_ack` | stable | 否 | §11.2 |
-| `durable_ack` | stable | 否 | §11.3 |
-| `dedup` | stable | 否 | §11.3 |
-| `unreliable_datagram` | stable | **仅 QUIC** | §11.4 |
-| `early_data` | stable | **仅 QUIC** | §11.6 |
-| `multi_channel` | stable | 否 | §10.1 |
-| `pmtu_probe` | stable | 否 | §9.4 |
-| `flow_class` | stable | 否 | §9.3 |
-| `symmetric_role` | stable | 否 | §11.1 |
-| `more_follows` | stable | 否 | §3 |
-| `coalesce_control` | stable | 否 | §3 |
-| `comp_zstd` / `comp_lz4` / `comp_gzip` | stable | 否 | §7 |
-| `codec_proto` / `codec_cbor` / `codec_json` | stable | 否 | §6 |
-| `cs_intl` / `cs_gm` | stable | 否 | §8 |
-| `histogram_exponential` | stable | 否 | §6.2 |
+| Capability                                  | 阶段   | 仅 QUIC?    | 引用  |
+| ------------------------------------------- | ------ | ----------- | ----- |
+| `partial_ack`                               | stable | 否          | §11.2 |
+| `durable_ack`                               | stable | 否          | §11.3 |
+| `dedup`                                     | stable | 否          | §11.3 |
+| `unreliable_datagram`                       | stable | **仅 QUIC** | §11.4 |
+| `early_data`                                | stable | **仅 QUIC** | §11.6 |
+| `multi_channel`                             | stable | 否          | §10.1 |
+| `pmtu_probe`                                | stable | 否          | §9.4  |
+| `flow_class`                                | stable | 否          | §9.3  |
+| `symmetric_role`                            | stable | 否          | §11.1 |
+| `more_follows`                              | stable | 否          | §3    |
+| `coalesce_control`                          | stable | 否          | §3    |
+| `comp_zstd` / `comp_lz4` / `comp_gzip`      | stable | 否          | §7    |
+| `codec_proto` / `codec_cbor` / `codec_json` | stable | 否          | §6    |
+| `cs_intl` / `cs_gm`                         | stable | 否          | §8    |
+| `histogram_exponential`                     | stable | 否          | §6.2  |
 
 ---
 
-## 9. OTLP 映射（附录 C）
+## 9. OTLP 映射（附录 B）
 
 ```
  MBTA SignalBatch                    OTLP

@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/protocol"
+	"github.com/iuboy/mbta-go/internal/protocol"
 	"github.com/quic-go/quic-go"
 )
 

@@ -120,11 +120,11 @@ func TestGenerateSessionKeys(t *testing.T) {
 		if keys.CipherSuite != corepb.CipherSuite_CIPHER_SUITE_INTL {
 			t.Errorf("CipherSuite = %v, want INTL", keys.CipherSuite)
 		}
-		if len(keys.HMACKey) != HMACKeyLenIntl {
-			t.Errorf("HMACKey len = %d, want %d", len(keys.HMACKey), HMACKeyLenIntl)
+		if len(keys.HMACKey()) != HMACKeyLenIntl {
+			t.Errorf("HMACKey len = %d, want %d", len(keys.HMACKey()), HMACKeyLenIntl)
 		}
-		if len(keys.AEADKey) != AEADKeyLenIntl {
-			t.Errorf("AEADKey len = %d, want %d", len(keys.AEADKey), AEADKeyLenIntl)
+		if len(keys.AEADKey()) != AEADKeyLenIntl {
+			t.Errorf("AEADKey len = %d, want %d", len(keys.AEADKey()), AEADKeyLenIntl)
 		}
 	})
 
@@ -133,18 +133,18 @@ func TestGenerateSessionKeys(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GenerateSessionKeys(GM): %v", err)
 		}
-		if len(keys.HMACKey) != HMACKeyLenGM {
-			t.Errorf("HMACKey len = %d, want %d", len(keys.HMACKey), HMACKeyLenGM)
+		if len(keys.HMACKey()) != HMACKeyLenGM {
+			t.Errorf("HMACKey len = %d, want %d", len(keys.HMACKey()), HMACKeyLenGM)
 		}
-		if len(keys.AEADKey) != AEADKeyLenGM {
-			t.Errorf("AEADKey len = %d, want %d", len(keys.AEADKey), AEADKeyLenGM)
+		if len(keys.AEADKey()) != AEADKeyLenGM {
+			t.Errorf("AEADKey len = %d, want %d", len(keys.AEADKey()), AEADKeyLenGM)
 		}
 	})
 
 	t.Run("generated keys are unique", func(t *testing.T) {
 		k1, _ := GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
 		k2, _ := GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
-		if k1.KeyID == k2.KeyID || string(k1.HMACKey) == string(k2.HMACKey) {
+		if k1.KeyID == k2.KeyID || string(k1.HMACKey()) == string(k2.HMACKey()) {
 			t.Error("generated keys should be unique")
 		}
 	})
@@ -155,14 +155,14 @@ func TestSessionKeys(t *testing.T) {
 	keys := &SessionKeys{
 		KeyID:       "key-123",
 		CipherSuite: corepb.CipherSuite_CIPHER_SUITE_INTL,
-		HMACKey:     make([]byte, HMACKeyLenIntl),
-		AEADKey:     make([]byte, AEADKeyLenIntl),
+		hmacKey:     make([]byte, HMACKeyLenIntl),
+		aeadKey:     make([]byte, AEADKeyLenIntl),
 	}
 	if keys.KeyID != "key-123" {
 		t.Errorf("KeyID = %q", keys.KeyID)
 	}
-	if len(keys.HMACKey) != HMACKeyLenIntl || len(keys.AEADKey) != AEADKeyLenIntl {
-		t.Errorf("key lengths: hmac=%d aead=%d", len(keys.HMACKey), len(keys.AEADKey))
+	if len(keys.HMACKey()) != HMACKeyLenIntl || len(keys.AEADKey()) != AEADKeyLenIntl {
+		t.Errorf("key lengths: hmac=%d aead=%d", len(keys.HMACKey()), len(keys.AEADKey()))
 	}
 }
 
@@ -247,7 +247,7 @@ func TestGenerateSessionKeysRandomness(t *testing.T) {
 				t.Errorf("GenerateSessionKeys() iteration %d error: %v", i, err)
 			}
 
-			keyStr := string(keys.HMACKey)
+			keyStr := string(keys.HMACKey())
 			if seenKeys[keyStr] {
 				t.Errorf("Duplicate HMAC key generated at iteration %d", i)
 			}

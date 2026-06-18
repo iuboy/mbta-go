@@ -1,183 +1,129 @@
 # 性能与架构参考
 
-本文档记录 mbta-go 的性能特征、序列化策略、国密能力、传输层架构，以及端到端压测数据。
+本文档记录 mbta-go 参考实现的性能特征、序列化策略、传输层架构与压测数据。
+
+> **范围说明**：本文档是 Go 参考实现的实现笔记，**不构成协议一致性要求**。对象池 / atomic / 分片等属 Go 优化，协议规范见 [mbta-core-spec.md](./mbta-core-spec.md)。
 
 ---
 
 ## 一、热路径优化
 
-| 组件 | 优化 | 效果 |
-|------|------|------|
-| gzip 压缩/解压 | `sync.Pool` 复用 writer/reader | BuildGzip 分配 815KB→2KB，耗时 -67% |
-| HMAC 签名串 | 预分配 `[]byte` + `strconv` 替代 `fmt.Fprintf` | allocs 23→8 |
-| envelope Open | 预分配 buffer + reader pool | 内存 -79% |
-| frame header | `var [16]byte` 栈数组 | 消除 16B 堆分配（`io.Writer` 接口仍导致 1 次逃逸，ROI 极低接受） |
-| ReplayCache 淘汰 | `container/list` 双链表（processingList + doneList）| O(1)，1万→百万恒定 ~720 ns/op |
-| Spool 大小检查 | 增量 `curSize int64` 计数 | O(1)，10k→500k 恒定 ~200 ns/op |
-| Inflight/Window/ThrottleState | `atomic.Int64` 替代 `sync.Mutex` | 8→256 并发恒定 312 ns/op / 0 allocs |
-| EnhancedRouter | EventsIn atomic + RLock 快路径，evict 节流（每 128 次） | 消除全局写锁串行 |
-| ACK 排空检测 | `pendingCount atomic.Int64` 替代 `sync.Map.Range` | 每 ACK 零开销 |
-| QUIC 流控窗口 | 8/64/16/128 MiB（匹配 maxBatchBytes） | 跨地域大 batch 不多 RTT |
-| hashKey | 手写 FNV-1a 零分配 | 消除 fnv hasher 堆分配 |
-| BatchMessage wrapper | 手写 `buildBatchPayload`（strconv 拼接）| 280µs→7µs（40x），消除 compact 扫描 |
-| SendBatch 锁粒度 | `reserveInflight`（锁内 window/seq/inflight）+ `buildAndSend`（锁外 marshal/Build/Write）| 多发送者并行 +21% |
-| 多流支持 | `PickStrategy="hash"` 一致哈希 + N 流 | 跨网络绕过队头阻塞 |
-| message.go | 删除冗余 `json.Valid` | 省 25% JSON 处理 |
+| 组件 | 优化 | 位置 |
+| ---- | ---- | ---- |
+| 压缩 writer/reader（gzip/zstd） | `sync.Pool` 复用，预分配 cap | `core/envelope.go` |
+| envelope Build | 随机 nonce 预分配 `make([]byte, AEADNonceSize)` | `core/envelope.go:91` |
+| envelope Open | 预分配 buffer（`make([]byte, 0, len(src)*4)` 解压放大预留） | `core/envelope.go:294` |
+| frame header | `var [N]byte` 栈数组 | `core/frame.go` |
+| ReplayCache 淘汰 | `container/list` 双链表（processingList + doneList） | `core/delivery.go` |
+| Inflight / Window | `atomic.Int64` 替代 `sync.Mutex` | `internal/protocol/client.go` |
+| ACK 排空检测 | `pendingCount atomic.Int64` 替代 `sync.Map.Range` | `internal/protocol/client_control.go` |
+| QUIC 流控窗口 | 按 maxBatchBytes 匹配 | `v1/quic_transport.go` |
+| SendBatch 锁粒度 | `reserveInflight`（锁内 window/seq/inflight）+ `buildAndSend`（锁外 marshal/Build/Write） | `internal/protocol/client_batch.go` |
+| 多流支持（v1 QUIC） | 一致哈希 StreamPicker + N 流，绕过队头阻塞 | `v1/stream_picker.go` |
+| EnhancedRouter | EventsIn atomic + RLock 快路径，evict 节流 | `core/metrics.go` |
 
 ---
 
-## 二、序列化策略：sonic
+## 二、序列化策略：SignalCodec 注册表
 
-`core/json.go` 的 `FastMarshal`/`FastUnmarshal` 封装 [bytedance/sonic](https://github.com/bytedance/sonic)，替换热路径所有 `encoding/json` 调用。
+SignalBatch 的编码由 `core.SignalCodec` 接口 + 包级注册表分发（`core/codec.go`），HELLO 协商决定用哪种 codec（`core/capability.go` pickCodec，优先级 proto > cbor > json）。
 
-| 场景 | 标准库 | sonic | 收益 |
-|------|:---:|:---:|:---:|
-| marshal 1k events | 360µs / 5001 allocs | ~378µs / **1002 allocs** | allocs -80% |
-| unmarshal 1k events | 824µs / 13008 allocs | **274µs** / 6005 allocs | 耗时 **-67%** |
+| Codec | capability | 实现 | 适用 |
+| ----- | ---------- | ---- | ---- |
+| Protobuf | `codec_proto` | `core/codec_proto.go`（经 corepb AnyValue oneof） | **baseline 默认**：wire 紧凑、跨语言、OTLP 互通 |
+| CBOR | `codec_cbor` | `core/codec_cbor.go`（fxamacker/cbor v2，Canonical EncMode） | constrained 场景：自描述、紧凑 |
+| JSON | `codec_json` | `core/codec_json.go`（stdlib encoding/json） | 仅调试/人类可读 |
 
-兼容性：sonic 输出可被 `encoding/json` 正常 Unmarshal（sonic 不做 HTML escape，但两端语义等价）。HMAC 作用于 base64 后的 payload，不受影响。平台：amd64/arm64，其他平台自动回退纯 Go。
-
-未选 jsoniter（marshal 退化 +75%）、easyjson（map 仍反射）、手写 MarshalJSON（经 `json.Marshal` 有 per-record compact 开销，耗时 +33%）。
+- **MAC 确定性**：HMAC（`core/envelope.go` canonicalMAC）作用于 SecureEnvelope 的 deterministic protobuf wire bytes，与 SignalBatch codec 无关——故 codec 选择不影响跨实现 MAC 可复现性。
+- **RawEventSink 快路径**：转发型 sink 可不解码 SignalBatch，直接拿原始 codec bytes（见 §三）。
 
 ---
 
 ## 三、RawEventSink 快速路径
 
-转发型 sink（不需读取 signal 字段详情）可实现 `RawEventSink` 接口，服务端跳过 `json.Unmarshal(signalBatch)` + `Validate`（~13 allocs/event）。`BatchMessage.EventsCount` 字段（client 填）供快速路径取事件数。
+转发型 sink（不需读取 signal 字段详情）可实现 `RawEventSink` 接口（`core/flow.go:62`），服务端跳过 `UnmarshalSignalBatch` + `Validate`。`BatchMessage.EventsCount`（client 填）供快速路径取事件数。
 
 接口层级：`EventSink` → `DurableEventSink`（+RouteResult）→ `RawEventSink`（+OnRawBatch）。
 
-| 场景 | events/s | allocs/op |
-|------|:---:|:---:|
-| 解码 sink（需 signal 详情）| 125万 | 7,235 |
-| **RawEventSink（纯转发）** | **133万** | 1,219 |
+`OnRawBatch` 收到的 `batchData` 是**按协商 codec 编码的原始字节**（proto/cbor/json 之一）。
 
 ---
 
-## 四、SM4-GCM envelope 加密
+## 四、国密（GM）密码套件
 
-使用 pollux-go/sm4 `NewGCM`（标准 `cipher.AEAD` 接口）。
+GM 套件经 `CipherSuite_CIPHER_SUITE_GM` 表达，与 INTL 在每一层对称（`core/cipher.go`）：
 
-- **Build**：compress → SM4-GCM Seal（密文 = nonce(12) + ciphertext + tag(16)）→ base64 → HMAC
-- **Open**：base64 decode → SM4-GCM Open → decompress
-- **密钥分发**：`SessionKeys.SM4Key`（16B），`GenerateSessionKeys` 总生成，AUTH_OK 下发
-- **协商**：`Policy.EnableSM4GCM` + client offer `sm4_gcm` → Negotiate 选中
-- **安全**：每次 Build 生成随机 12B nonce（`rand.Read`），无重用风险；连接关闭时 HMACKey + SM4Key 均清零
+- **HMAC**：SM3（`hmac.New(sm3.New)`）
+- **AEAD**：SM4-GCM（`NewAEAD` 分发）
+- **密钥分发**：`SessionKeys` 按 CipherSuite 生成 HMACKey + AEADKey，AUTH_OK 下发；INTL 取 `AesKey` 字段、GM 取 `Sm4Key` 字段（`internal/protocol/handler_handshake.go`）
+- **协商**：client offer `cs_gm` → `pickCipherSuite` 优先选 GM（`core/capability.go`）
+- **安全**：每次 Build 生成随机 nonce，连接关闭时密钥清零
 
-SM2CertAuth（mTLS）属传输层 TLS，依赖国密 TLS 栈（v2/RFC 8998），v1 标准 TLS 1.3 不支持。
+SM2 证书认证（mTLS）属传输层 TLS（TLCP / RFC 8998），依赖 pollux-go 国密 TLS 栈。
 
 ---
 
-## 五、ntls（TCP + TLCP）传输层
+## 五、传输层架构
 
-使用 pollux-go/tlcp（高层 Listen/Dial）+ pollux-go/cert（SM2 双证书加载）。
+### v1（QUIC + TLS 1.3，`mbta/1`）
 
-### 设计：单连接帧多路复用
+`v1/` 包。QUIC UDP 多流：control/data 分离的 QUIC 流，BATCH 跨多流并发（一致哈希 StreamPicker 绕过队头阻塞）。0-RTT data 完整支持（见 [0-rtt-design.md](./0-rtt-design.md)）。
 
-ntls 是单 TCP 连接，所有帧（control + data）在同连接交替。`core.Read`/`core.Write` 按 type/flags 区分。`writeMu` 保护所有写（避免帧头交错）。BATCH 在读循环中内联处理（自然背压）。
+### ntls（TCP + TLCP / TLS 1.3，`mbta-ntls/1`、`mbta-tls/1`）
 
-| 方面 | v1 (QUIC) | ntls (TCP+TLCP) |
-|------|-----------|-----------------|
-| 传输 | QUIC UDP 多流 | TCP + TLCP 单连接 |
-| 证书 | 单 X.509 | 双 SM2（签名+加密） |
+`ntls/` 包。单 TCP 连接帧多路复用：control + data 帧在同连接交替，`writeMu` 保护写避免帧头交错。TLCP 用 pollux-go/tlcp（高层 Listen/Dial）+ pollux-go/cert（SM2 双证书）。`mbta-tls/1` 是 TLSMode 分支走标准 TLS 1.3。
+
+| 方面 | v1 (QUIC) | ntls (TCP) |
+| ---- | --------- | ---------- |
+| 传输 | QUIC UDP 多流 | TCP 单连接 |
+| 证书 | 单 X.509 | 双 SM2（TLCP）/ X.509（TLSMode） |
 | control/data | 分离 QUIC 流 | 同连接帧多路复用 |
-| BATCH 并发 | 64 并发流 goroutine | 读循环内联（串行） |
+| BATCH 并发 | 多流 goroutine | 单连接顺序 |
+| 0-RTT data | ✅ | ❌（crypto/tls 无 0-RTT data API） |
 
-### 实现文件
+### 协议核心共享层（`internal/protocol`）
 
-| 文件 | 行数 | 内容 |
-|------|:---:|------|
-| `ntls/transport.go` | ~240 | TLCP Config + Listen/Dial + Server |
-| `ntls/handler.go` | 815 | ConnectionHandler + 21 协议方法 |
-| `ntls/client.go` | ~280 | Client + Connect/SendBatch/Close |
-| `ntls/handshake.go` | ~150 | 握手 |
-| `ntls/control.go` | ~120 | ACK/NACK/WINDOW 处理 |
+v1 与 ntls 共享 `internal/protocol.CoreHandler` / `CoreClient`（CoreClient 接口见 `internal/protocol/client.go`）。各 binding 仅实现传输专属的 `Transport` / `ClientTransport` 与 binding 默认算法注入（spec §8.3：默认 CipherSuite 跟随 binding——v1=INTL，ntls=GM），协议逻辑全部在核心层。
 
-E2E 测试（`TestE2E_NTLS_SendBatch`）：TLCP 握手 + HELLO/AUTH + SendBatch + ACK 全链路通过。
-
-### v2 状态
-
-v2（QUIC + RFC 8998 国密）因 pollux-go 缺少高层 `quicgm.Listen/Dial` API 而推迟。
+| 方面 | 实现 |
+| ---- | ---- |
+| 握手 / envelope / 投递 / 流控 / ACK / DATAGRAM / drain | `internal/protocol/handler_*.go` / `client_*.go` |
+| Transport 抽象 | `internal/protocol/transport.go` |
+| binding 默认算法注入 | `CoreClientConfig.DefaultCodec/DefaultCipherSuite/DefaultCompression` |
 
 ---
 
 ## 六、Client.Connect 生命周期设计
 
-`Connect(ctx)` 的 `ctx` 仅控制握手超时（Dial、开 stream、HELLO/AUTH）。握手成功后，后台 goroutine 运行在独立的 `lifecycleCtx`（派生自 `context.Background()`），不随 `ctx` 取消退出。client 生命周期完全由 `Close()` 终结。
+`Connect(ctx)` 的 `ctx` 仅控制握手超时（Dial、开 stream、HELLO/AUTH）。握手成功后，后台 goroutine 运行在独立的 `lifecycleCtx`（派生自 `context.Background()`，见 `internal/protocol/client.go:258`），不随 `ctx` 取消退出。client 生命周期完全由 `Close()` 终结。
 
 caller 可安全使用 `context.WithTimeout + defer cancel` 限定握手时长。若需「ctx 取消即停止 client」，调用方应自行监听 ctx 并调 `Close()`。
 
 ---
 
-## 七、端到端吞吐数据
+## 七、压测与基准文件索引
 
-### v1 QUIC（Apple M5，localhost，gzip+HMAC+sonic 全开）
-
-**单发送者**：
-
-| batch events | batch/s | events/s | allocs/op |
-|:---:|:---:|:---:|:---:|
-| 100 | 1,250 | **125万** | 7,235 |
-| 1,000 | 1,329 | **133万** | 1,219（RawEventSink）|
-| 10,000 | 57 | **57万** | — |
-
-**多发送者并发**（1000 events/batch）：
-
-| senders | events/s | 备注 |
-|:---:|:---:|:---|
-| 1 | 57.6万 | 基线 |
-| 16 | **70万+** | sendMu 缩小后多核并行 |
-
-### 微基准关键数据
-
-| 基准 | 值 |
-|------|:---:|
-| `BuildGzip` 4KB | 25µs / 2KB / 7 allocs |
-| `OpenGzip` 4KB | 2.8µs / 11KB / 7 allocs |
-| `BuildGzip` 1MiB | 1.3ms / 833 MB/s / 21 allocs |
-| `MarshalSignalBatch` 1k | 378µs / 1002 allocs |
-| `ReplayCache` 淘汰 | 720 ns/op（1万→百万恒定）|
-| `Spool Put` | 188-236 ns/op（10k→500k 恒定）|
-| `Inflight` 8→256 并发 | 312 ns/op / 0 allocs |
-
-### ntls TLCP（单连接，Apple M5，localhost，HMAC-SHA256 + window 全开）
-
-`BenchmarkE2E_NTLS_SendBatch`（`ntls/e2e_throughput_test.go`）：
-
-| batch events | batch/s | events/s | allocs/op |
-|:---:|:---:|:---:|:---:|
-| 100 | 8,719 | **87万** | 771 |
-| 1,000 | 992 | **99万** | 7,083 |
-| 10,000 | 71 | **71万** | 78,427 |
-
-单 TCP 连接、control/data 帧多路复用。服务端 readLoop 把 BATCH 帧派发到有界 worker 池（`defaultBatchWorkers=8`）并发处理，单个大 batch 不再阻塞后续帧的读取（解除队头阻塞）；control 帧（HELLO/AUTH/PING/CLOSE）仍内联保序。ACK 按完成顺序返回（client 按 chunkID 关联）。batchSem 满时 readLoop 停止读新帧，形成自然背压。绝对吞吐低于 v1 QUIC（单连接、无多流），但 events=1000 区段吞吐与 v1 RawEventSink 路径相当。TLCP 加密开销已包含在端到端数据中。
-
-## 九、客户端 spool 可靠投递（at-least-once）
-
-`spool/` 包（与 core 平级，v1 + ntls 共享）实现发送前持久化、ACK 后删除、崩溃/重连重发。
-
-- **发送**：`sendTracked` 为每个 event 生成 Record，`PutBatch` 持久化（buffered 模式默认 500ms 后台 flush，仅 map 写无 I/O），与 inflight/pending 同 sendMu 临界区原子。
-- **ACK**：`handleAck` 删除对应 batch + records；`handleNack` 区分 retryable（保留待重连重发）/ non-retryable（毒消息丢弃）。
-- **崩溃恢复**：`drainSpoolAfterConnect` 握手成功后按 Seq 升序重发 `PendingBatches`。重发走 `alreadySpooledChunkID` 分支跳过 PutBatch（防双重持久化），wire 用新 seq/chunkID（服务端 ReplayCache per-connection，跨重连不去重），pendingBatch.SpoolChunkID 指向原 key 以便 ACK 删除。
-- **write 失败保留**：PutBatch 成功后即使写失败也保留 spool 条目（at-least-once 核心），由重连重发。
-- **配置**：`ClientConfig.SpoolDir` 空=禁用（无可靠投递，向后兼容）。
-
-测试：`v1/spool_integration_test.go`、`ntls/spool_integration_test.go`（ACK 删除 + 崩溃恢复重发）。
-
-
-> 关闭正确性：`server.Start` 早期仅在 select 阶段响应 ctx 取消，若取消到达时循环阻塞在 `Accept` 则永不返回（竞态）。已修复为 ctx-Done watcher 关闭 listener 解除阻塞，见 `TestServer_Start_ReturnsOnCtxCancel`。
+| 文件 | 覆盖 |
+| ---- | ---- |
+| `core/perf_scale_test.go` | ReplayCache / Inflight 高并发规模压测 |
+| `core/signal_bench_test.go` | SignalBatch marshal/unmarshal（proto codec）各层开销 |
+| `core/frame_bench_test.go` | Write/Read 真实开销 |
+| `core/delivery_bench_test.go` | ReplayCache 淘汰 |
+| `core/flow_bench_test.go` | EnhancedRouter / EventSink |
+| `core/session_bench_test.go` | session 状态机 |
+| `v1/stream_picker_test.go` | 一致哈希 StreamPicker |
+| `v1/e2e_test.go` | 端到端 QUIC（握手 + SendBatch + sink） |
+| `ntls/e2e_test.go` | 端到端 TCP + TLCP / TLS 1.3 |
 
 ---
 
-## 八、压测与基准文件索引
+## 八、可靠投递（reliable 通道，at-least-once）
 
-| 文件 | 覆盖 |
-|------|------|
-| `core/perf_scale_test.go` | ReplayCache / Inflight / Spool 规模压测 |
-| `core/signal_bench_test.go` | SignalBatch marshal/unmarshal 各层开销 |
-| `core/envelope_bench_test.go` | Build/Open/gzip/HMAC 不同 payload 规模 |
-| `core/frame_bench_test.go` | Write/Read 真实开销（io.Discard 隔离）|
-| `v1/spool_perf_test.go` | Spool Put 规模压测 |
-| `v1/stream_picker_bench_test.go` | hash picker 并发基准 |
-| `v1/e2e_throughput_test.go` | 端到端 QUIC 吞吐（单/多发送者、RawEventSink、多流对比）|
-| `ntls/e2e_throughput_test.go` | 端到端 ntls TLCP 吞吐（单连接、不同 batch 规模）|
+reliable BATCH 通道提供 at-least-once 投递语义：
+
+- **发送追踪**：每个 batch 在 `pendingAcks`（`sync.Map`，chunkID → `*pendingBatch`）登记，含 seq / chunkID / spoolChunkID / 发送时间，用于 ACK 关联与超时重发。
+- **ACK**：`handleAck` 删除对应 pendingBatch；`handleNack` 区分 retryable / non-retryable。
+- **超时重发**：`ackReaper`（`internal/protocol/client_control.go`）周期扫描 pendingAcks，超 `ackTimeout` 的 batch 重发（新 seq/chunkID，服务端 ReplayCache per-connection）。
+- **0-RTT / 重连重发**：握手成功后 pending batch 随 resumption 重发。
+
+> **持久化限制**：当前可靠投递基于内存 `pendingAcks`——进程崩溃会丢失待发 batch。跨进程崩溃的持久化 at-least-once（基于文件的 spool 层）待后续实现。

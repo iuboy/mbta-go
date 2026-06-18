@@ -10,7 +10,7 @@ import (
 	corepb "github.com/iuboy/mbta-go/corepb"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/protocol"
+	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
 // doHandshake 完成完整 HELLO/AUTH 握手，返回 transport / 会话密钥 / 协商套件。
@@ -87,12 +87,8 @@ func doHandshake(t *testing.T, sink core.EventSink) (*FakeTransport, *core.Sessi
 	if err := core.Decode(okF.Payload, &ok); err != nil {
 		t.Fatalf("decode auth_ok: %v", err)
 	}
-	keys := &core.SessionKeys{
-		KeyID:       ok.GetKeyId(),
-		CipherSuite: cs,
-		HMACKey:     ok.GetHmacKey(),
-		AEADKey:     ok.GetAesKey(),
-	}
+	keys := core.NewSessionKeys(ok.GetKeyId(), cs, ok.GetHmacKey())
+	keys.SetAEADKey(ok.GetAesKey())
 	return tr, keys, cs
 }
 
@@ -102,11 +98,11 @@ func TestCoreHandler_Handshake(t *testing.T) {
 	if cs != corepb.CipherSuite_CIPHER_SUITE_INTL {
 		t.Errorf("cipher suite = %v, want INTL", cs)
 	}
-	if len(keys.HMACKey) != core.HMACKeyLenIntl {
-		t.Errorf("HMACKey len = %d, want %d", len(keys.HMACKey), core.HMACKeyLenIntl)
+	if len(keys.HMACKey()) != core.HMACKeyLenIntl {
+		t.Errorf("HMACKey len = %d, want %d", len(keys.HMACKey()), core.HMACKeyLenIntl)
 	}
-	if len(keys.AEADKey) != core.AEADKeyLenIntl {
-		t.Errorf("AEADKey len = %d, want %d", len(keys.AEADKey), core.AEADKeyLenIntl)
+	if len(keys.AEADKey()) != core.AEADKeyLenIntl {
+		t.Errorf("AEADKey len = %d, want %d", len(keys.AEADKey()), core.AEADKeyLenIntl)
 	}
 }
 
@@ -136,8 +132,8 @@ func TestCoreHandler_Delivery(t *testing.T) {
 		CipherSuite:  cs,
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
-		HMACKey:      keys.HMACKey,
-		AEADKey:      keys.AEADKey,
+		HMACKey:      keys.HMACKey(),
+		AEADKey:      keys.AEADKey(),
 		BatchPayload: batchPayload,
 	}
 	env, err := core.Build(params)
@@ -186,7 +182,7 @@ func TestCoreHandler_ReplayDedup(t *testing.T) {
 			Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 			CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 			MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
-			HMACKey: keys.HMACKey, AEADKey: keys.AEADKey, BatchPayload: bp,
+			HMACKey: keys.HMACKey(), AEADKey: keys.AEADKey(), BatchPayload: bp,
 		}
 		env, _ := core.Build(params)
 		ep, _ := core.Encode(env)
@@ -248,8 +244,8 @@ func TestCoreHandler_Datagram(t *testing.T) {
 		CipherSuite:  cs,
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_LOSSY,
 		MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_DATAGRAM,
-		HMACKey:      keys.HMACKey,
-		AEADKey:      keys.AEADKey,
+		HMACKey:      keys.HMACKey(),
+		AEADKey:      keys.AEADKey(),
 		BatchPayload: dgPayload,
 	}
 	env, err := core.Build(params)
@@ -333,8 +329,8 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 		CipherSuite:  corepb.CipherSuite_CIPHER_SUITE_INTL,
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
-		HMACKey:      resumptionKeys.HMACKey,
-		AEADKey:      resumptionKeys.AEADKey,
+		HMACKey:      resumptionKeys.HMACKey(),
+		AEADKey:      resumptionKeys.AEADKey(),
 		BatchPayload: batchPayload,
 	}
 	env, _ := core.Build(params)
@@ -404,7 +400,7 @@ func TestCoreHandler_HmacTampered(t *testing.T) {
 		Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 		CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
-		HMACKey: keys.HMACKey, AEADKey: keys.AEADKey, BatchPayload: bp,
+		HMACKey: keys.HMACKey(), AEADKey: keys.AEADKey(), BatchPayload: bp,
 	}
 	env, _ := core.Build(params)
 	if len(env.Mac) > 0 {
@@ -437,7 +433,7 @@ func TestCoreHandler_BatchTooManyEvents(t *testing.T) {
 		Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 		CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
-		HMACKey: keys.HMACKey, AEADKey: keys.AEADKey, BatchPayload: bp,
+		HMACKey: keys.HMACKey(), AEADKey: keys.AEADKey(), BatchPayload: bp,
 	}
 	env, _ := core.Build(params)
 	envPayload, _ := core.Encode(env)

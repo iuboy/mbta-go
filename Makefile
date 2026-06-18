@@ -11,11 +11,11 @@ PKGS := ./...
 proto:
 	buf generate
 
-## proto-lint: Lint .proto schemas (字段命名/enum 前缀等，§1.4 纪律)
+## proto-lint: Lint .proto schemas (字段命名/enum 前缀)
 proto-lint:
 	buf lint
 
-## proto-breaking: Detect breaking wire changes vs main (字段号/enum 只追加保障)
+## proto-breaking: Detect breaking wire changes vs main
 proto-breaking:
 	buf breaking --against '.git#branch=main'
 

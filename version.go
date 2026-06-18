@@ -18,18 +18,6 @@ import (
 	"github.com/iuboy/mbta-go/core"
 )
 
-// Version represents an MBTA protocol version.
-type Version interface {
-	// Name returns the version name ("v1", "v2", "ntls").
-	Name() string
-
-	// ALPN returns the ALPN protocol identifier.
-	ALPN() string
-
-	// FrameVersion returns the frame version byte.
-	FrameVersion() uint8
-}
-
 // Version constants for comparison and validation.
 const (
 	Version1    = "v1"

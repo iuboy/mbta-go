@@ -6,7 +6,7 @@ import (
 	corepb "github.com/iuboy/mbta-go/corepb"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/protocol"
+	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
 // buildMismatchedEnvelope 构造一个 BATCH envelope，但 Codec/CipherSuite/Compression
@@ -28,7 +28,7 @@ func buildMismatchedEnvelope(t *testing.T, keys *core.SessionKeys, cs corepb.Cip
 		Codec: overrideCodec, Compression: overrideComp, CipherSuite: cs,
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
-		HMACKey:      keys.HMACKey, AEADKey: keys.AEADKey, BatchPayload: bp,
+		HMACKey:      keys.HMACKey(), AEADKey: keys.AEADKey(), BatchPayload: bp,
 	}
 	env, err := core.Build(params)
 	if err != nil {

@@ -7,27 +7,33 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// MarshalSignalBatch 将 core.SignalBatch 序列化为 proto bytes（spec §6 codec=proto）。
-// 替代旧 sonic JSON 编码——wire 更紧凑、跨语言、MAC 确定性。
-func MarshalSignalBatch(sb *SignalBatch) ([]byte, error) {
-	if sb == nil {
-		return nil, NewError(NumValidation, CodeValidation, "nil signal batch")
-	}
+// protoCodec 以 Protobuf wire 格式编解码 SignalBatch（core spec §6.3 baseline 默认）。
+//
+// 这是唯一经 corepb AnyValue oneof 表达动态类型（attributes/body）的 codec：
+// wire 紧凑、跨语言代码生成、与 OTLP schema 直接互通。确定性编码由 proto wire
+// format + 字段号稳定性保证，HMAC canonical 形式见 envelope.canonicalMAC。
+type protoCodec struct{}
+
+func (protoCodec) Codec() corepb.Codec { return corepb.Codec_CODEC_PROTO }
+
+func (protoCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 	pb := toProtoSignalBatch(sb)
 	return proto.Marshal(pb)
 }
 
-// UnmarshalSignalBatch 从 proto bytes 解析 core.SignalBatch。
-func UnmarshalSignalBatch(data []byte) (*SignalBatch, error) {
-	if len(data) == 0 {
-		return nil, NewError(NumValidation, CodeValidation, "empty signal batch data")
-	}
+func (protoCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	var pb corepb.SignalBatch
 	if err := proto.Unmarshal(data, &pb); err != nil {
 		return nil, WrapError(NumValidation, CodeValidation, "unmarshal signal batch", err)
 	}
 	return fromProtoSignalBatch(&pb), nil
 }
+
+func init() {
+	RegisterCodec(protoCodec{})
+}
+
+// --- proto 转换 helpers ---
 
 func toProtoSignalBatch(sb *SignalBatch) *corepb.SignalBatch {
 	pb := &corepb.SignalBatch{

@@ -3,8 +3,6 @@ package core
 import (
 	"strings"
 	"testing"
-
-	mbtatest "github.com/iuboy/mbta-go/testing"
 )
 
 func TestStateMachineTransition(t *testing.T) {
@@ -48,9 +46,13 @@ func TestStateMachineTransition(t *testing.T) {
 
 			err := sm.Transition(tt.to)
 			if tt.wantErr {
-				mbtatest.AssertError(t, err, "transition should fail")
+				if err == nil {
+					t.Errorf("%s: expected error, got nil", "transition should fail")
+				}
 			} else {
-				mbtatest.AssertNoError(t, err, "transition should succeed")
+				if err != nil {
+					t.Errorf("%s: %v", "transition should succeed", err)
+				}
 				if sm.State() != tt.to {
 					t.Errorf("State() = %v, want %v", sm.State(), tt.to)
 				}
@@ -81,7 +83,9 @@ func TestStateMachineFullHandshake(t *testing.T) {
 	}
 	for _, next := range steps {
 		err := sm.Transition(next)
-		mbtatest.AssertNoError(t, err, "transition to "+next.String())
+		if err != nil {
+			t.Errorf("%s: %v", "transition to "+next.String(), err)
+		}
 		if sm.State() != next {
 			t.Errorf("State() = %v, want %v", sm.State(), next)
 		}
@@ -133,12 +137,16 @@ func TestServerMachineValidTransitions(t *testing.T) {
 
 			err := sm.Transition(tt.to)
 			if tt.wantErr {
-				mbtatest.AssertError(t, err, "transition should fail")
+				if err == nil {
+					t.Errorf("%s: expected error, got nil", "transition should fail")
+				}
 				if err != nil && !strings.Contains(err.Error(), "invalid server transition") {
 					t.Errorf("Error = %v, want error containing 'invalid server transition'", err)
 				}
 			} else {
-				mbtatest.AssertNoError(t, err, "transition should succeed")
+				if err != nil {
+					t.Errorf("%s: %v", "transition should succeed", err)
+				}
 				if sm.State() != tt.to {
 					t.Errorf("State() = %v, want %v", sm.State(), tt.to)
 				}
@@ -161,7 +169,9 @@ func TestServerMachineFullHandshake(t *testing.T) {
 	}
 	for _, next := range steps {
 		err := sm.Transition(next)
-		mbtatest.AssertNoError(t, err, "transition to "+next.String())
+		if err != nil {
+			t.Errorf("%s: %v", "transition to "+next.String(), err)
+		}
 		if sm.State() != next {
 			t.Errorf("State() = %v, want %v", sm.State(), next)
 		}
@@ -173,8 +183,12 @@ func TestServerMachineErrorPath(t *testing.T) {
 	sm := NewServerMachine()
 
 	// Accepted -> ControlWait -> Closed (client disconnects during hello)
-	mbtatest.AssertNoError(t, sm.Transition(ServerStateControlWait), "control wait")
-	mbtatest.AssertNoError(t, sm.Transition(ServerStateClosed), "close from control wait")
+	if err := sm.Transition(ServerStateControlWait); err != nil {
+		t.Errorf("%s: %v", "control wait", err)
+	}
+	if err := sm.Transition(ServerStateClosed); err != nil {
+		t.Errorf("%s: %v", "close from control wait", err)
+	}
 }
 
 func TestStateMachineErrorIs(t *testing.T) {

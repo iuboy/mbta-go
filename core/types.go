@@ -1,7 +1,7 @@
 package core
 
 // Message types (wire values, uint8, core spec §4).
-// 值一旦发布不可改（§1.4 只追加纪律）。1–16 已分配，17–255 保留。
+// 值发布后不可改（§1.4）。1–16 已分配，17–255 保留。
 const (
 	TypeHello    uint8 = 1 // C→S handshake
 	TypeHelloAck uint8 = 2 // S→C handshake response

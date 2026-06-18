@@ -163,6 +163,23 @@ func VerifyMAC(hmacKey []byte, env *SecureEnvelope) (bool, error) {
 	return hmac.Equal(env.Mac, want), nil
 }
 
+// OpenAndVerify 是默认安全入口：先验签再解密解压。
+// 大多数调用方应使用此函数，避免漏调 VerifyMAC 导致未验签解密。
+// 若调用方已在别处验签，可直接用 Open 跳过重复验签。
+func OpenAndVerify(env *SecureEnvelope, hmacKey, aeadKey []byte) ([]byte, error) {
+	if env == nil {
+		return nil, NewError(NumEnvelope, CodeEnvelope, "nil envelope")
+	}
+	ok, err := VerifyMAC(hmacKey, env)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, NewError(NumEnvelope, CodeEnvelope, "hmac mismatch")
+	}
+	return Open(env, aeadKey)
+}
+
 // canonicalMAC 计算 HMAC over env 的 canonical（deterministic）wire bytes。
 // HMAC 输入 = proto.MarshalOptions{Deterministic:true} 对 mac 清空后的 envelope（§5.3）。
 // SecureEnvelope 内无 map 字段，确定性序列化保证跨实现 HMAC 可验证。

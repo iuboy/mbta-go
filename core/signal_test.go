@@ -3,8 +3,6 @@ package core
 import (
 	"strings"
 	"testing"
-
-	mbtatest "github.com/iuboy/mbta-go/testing"
 )
 
 // TestSignalBatchValidate tests the SignalBatch.Validate() method.
@@ -84,12 +82,16 @@ func TestSignalBatchValidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.batch.Validate()
 			if tt.wantErr {
-				mbtatest.AssertError(t, err, tt.name)
+				if err == nil {
+					t.Errorf("%s: expected error, got nil", tt.name)
+				}
 				if err != nil && !strings.Contains(err.Error(), tt.errSub) {
 					t.Errorf("Error = %v, want error containing %q", err, tt.errSub)
 				}
 			} else {
-				mbtatest.AssertNoError(t, err, tt.name)
+				if err != nil {
+					t.Errorf("%s: %v", tt.name, err)
+				}
 			}
 		})
 	}

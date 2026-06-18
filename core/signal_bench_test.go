@@ -39,12 +39,11 @@ func BenchmarkMarshalSignalBatch(b *testing.B) {
 func BenchmarkUnmarshalSignalBatch(b *testing.B) {
 	for _, n := range []int{100, 1000, 10000} {
 		batch := makeBenchBatch(n)
-		data, _ := MarshalSignalBatch(batch)
+		data, _ := MarshalSignalBatch(batch) // proto 编码（baseline 默认）
 		b.Run(scaleName(n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				var sb SignalBatch
-				if err := json.Unmarshal(data, &sb); err != nil {
+				if _, err := UnmarshalSignalBatch(data); err != nil {
 					b.Fatal(err)
 				}
 			}

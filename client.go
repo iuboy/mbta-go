@@ -9,7 +9,6 @@ import (
 	"github.com/iuboy/mbta-go/core"
 	ntls "github.com/iuboy/mbta-go/ntls"
 	v1 "github.com/iuboy/mbta-go/v1"
-	v2 "github.com/iuboy/mbta-go/v2"
 )
 
 const stateDisconnected = "disconnected"
@@ -51,7 +50,6 @@ type ClientConfig struct {
 
 	// Version-specific configurations
 	V1Creds   *v1.ClientCredentials
-	V2Creds   *v2.ClientCredentials
 	NTLSCreds *ntls.ClientCredentials
 }
 
@@ -183,7 +181,6 @@ func (c *Client) Close() error {
 
 	c.cfg.Token = ""
 	c.cfg.V1Creds = nil
-	c.cfg.V2Creds = nil
 	c.cfg.NTLSCreds = nil
 
 	if c.client != nil {
@@ -333,14 +330,6 @@ func WithAgent(agentID, hostname, token string) ClientOption {
 func WithV1Credentials(creds v1.ClientCredentials) ClientOption {
 	return func(cc *ClientConfig) error {
 		cc.V1Creds = &creds
-		return nil
-	}
-}
-
-// WithV2Credentials configures GM TLS credentials for V2.
-func WithV2Credentials(gmCreds v2.ClientCredentials) ClientOption {
-	return func(cc *ClientConfig) error {
-		cc.V2Creds = &gmCreds
 		return nil
 	}
 }

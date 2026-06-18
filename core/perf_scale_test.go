@@ -29,12 +29,12 @@ func BenchmarkReplayCache_FullEviction_New(b *testing.B) {
 		b.Run(scaleName(n), func(b *testing.B) {
 			rc := NewReplayCacheWithSize(n)
 			for i := 0; i < n; i++ {
-				rc.SeenOrAdd(Key("a", strconv.Itoa(i)))
+				rc.SeenOrAdd("a", strconv.Itoa(i))
 			}
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				rc.SeenOrAdd(Key("a", fmt.Sprintf("n%d", i)))
+				rc.SeenOrAdd("a", fmt.Sprintf("n%d", i))
 			}
 		})
 	}
@@ -48,16 +48,16 @@ func BenchmarkReplayCache_MixedEviction_New(b *testing.B) {
 		b.Run(scaleName(n), func(b *testing.B) {
 			rc := NewReplayCacheWithSize(n)
 			for i := 0; i < n; i++ {
-				rc.SeenOrAdd(Key("a", strconv.Itoa(i)))
+				rc.SeenOrAdd("a", strconv.Itoa(i))
 			}
 			// 将后半标记为已完成 -> doneList。
 			for i := n / 2; i < n; i++ {
-				rc.Update(Key("a", strconv.Itoa(i)), ReplayAccepted)
+				rc.Update("a", strconv.Itoa(i), ReplayAccepted)
 			}
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				rc.SeenOrAdd(Key("a", fmt.Sprintf("n%d", i)))
+				rc.SeenOrAdd("a", fmt.Sprintf("n%d", i))
 			}
 		})
 	}
@@ -128,15 +128,15 @@ func BenchmarkReplayCache_MixedEviction_Old(b *testing.B) {
 		b.Run(scaleName(n), func(b *testing.B) {
 			rc := newOldReplayCache(n)
 			for i := 0; i < n; i++ {
-				rc.SeenOrAdd(Key("a", strconv.Itoa(i)))
+				rc.SeenOrAdd(replayKey("a", strconv.Itoa(i)))
 			}
 			for i := n / 2; i < n; i++ {
-				rc.Update(Key("a", strconv.Itoa(i)), ReplayAccepted)
+				rc.Update(replayKey("a", strconv.Itoa(i)), ReplayAccepted)
 			}
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				rc.SeenOrAdd(Key("a", fmt.Sprintf("n%d", i)))
+				rc.SeenOrAdd(replayKey("a", fmt.Sprintf("n%d", i)))
 			}
 		})
 	}

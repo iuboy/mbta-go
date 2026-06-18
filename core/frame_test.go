@@ -5,8 +5,6 @@ import (
 	"io"
 	"strings"
 	"testing"
-
-	mbtatest "github.com/iuboy/mbta-go/testing"
 )
 
 func TestWriteFrame(t *testing.T) {
@@ -82,11 +80,21 @@ func TestReadFrame(t *testing.T) {
 			frame:  buildTestFrame(TypeHello, FlagControl, ChannelControl, []byte("hello")),
 			limits: DefaultLimits(),
 			check: func(t *testing.T, f Frame) {
-				mbtatest.AssertEqual(t, f.Header.Version, Version, "version")
-				mbtatest.AssertEqual(t, f.Header.Flags, FlagControl, "flags")
-				mbtatest.AssertEqual(t, f.Header.Type, TypeHello, "type")
-				mbtatest.AssertEqual(t, f.Header.ChannelID, ChannelControl, "channelID")
-				mbtatest.AssertEqual(t, f.Header.Length, uint32(5), "length")
+				if f.Header.Version != Version {
+					t.Errorf("%s: got %v, want %v", "version", f.Header.Version, Version)
+				}
+				if f.Header.Flags != FlagControl {
+					t.Errorf("%s: got %v, want %v", "flags", f.Header.Flags, FlagControl)
+				}
+				if f.Header.Type != TypeHello {
+					t.Errorf("%s: got %v, want %v", "type", f.Header.Type, TypeHello)
+				}
+				if f.Header.ChannelID != ChannelControl {
+					t.Errorf("%s: got %v, want %v", "channelID", f.Header.ChannelID, ChannelControl)
+				}
+				if f.Header.Length != uint32(5) {
+					t.Errorf("%s: got %v, want %v", "length", f.Header.Length, uint32(5))
+				}
 				if !bytes.Equal(f.Payload, []byte("hello")) {
 					t.Errorf("payload = %q, want %q", f.Payload, "hello")
 				}
@@ -97,7 +105,9 @@ func TestReadFrame(t *testing.T) {
 			frame:  buildTestFrame(TypeBatch, FlagData, ChannelData, []byte{}),
 			limits: DefaultLimits(),
 			check: func(t *testing.T, f Frame) {
-				mbtatest.AssertEqual(t, f.Header.Length, uint32(0), "length")
+				if f.Header.Length != uint32(0) {
+					t.Errorf("%s: got %v, want %v", "length", f.Header.Length, uint32(0))
+				}
 			},
 		},
 		{name: "invalid magic", frame: buildTestFrameWithMagic("XXXX", TypeHello, FlagControl, ChannelControl, []byte("t")), limits: DefaultLimits(), wantErr: true, errSubstr: "invalid magic"},
@@ -178,10 +188,14 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			buf := &bytes.Buffer{}
-			mbtatest.AssertNoError(t, Write(buf, Version, tt.typ, tt.flags, tt.channelID, tt.payload), "Write()")
+			if err := Write(buf, Version, tt.typ, tt.flags, tt.channelID, tt.payload); err != nil {
+				t.Errorf("%s: %v", "Write()", err)
+			}
 
 			f, err := Read(bytes.NewReader(buf.Bytes()), DefaultLimits())
-			mbtatest.AssertNoError(t, err, "Read()")
+			if err != nil {
+				t.Errorf("%s: %v", "Read()", err)
+			}
 
 			if f.Header.Type != tt.typ {
 				t.Errorf("Type = %d, want %d", f.Header.Type, tt.typ)
@@ -285,7 +299,9 @@ func TestReadFromPartialStream(t *testing.T) {
 	payload := []byte("test payload data")
 	frameData := buildTestFrame(TypeBatch, FlagData, ChannelData, payload)
 	frame, err := Read(&chunkReader{data: frameData, chunkSize: 3}, DefaultLimits())
-	mbtatest.AssertNoError(t, err, "Read() from chunked stream")
+	if err != nil {
+		t.Errorf("%s: %v", "Read() from chunked stream", err)
+	}
 	if !bytes.Equal(frame.Payload, payload) {
 		t.Errorf("Payload = %q, want %q", frame.Payload, payload)
 	}

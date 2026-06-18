@@ -93,11 +93,41 @@ var (
 )
 
 // SessionKeys 持有已认证会话的密码材料（r2：CipherSuite 统一算法）。
+// 密钥字段 unexport，通过访问器读取；调用方不应修改返回的 slice。
 type SessionKeys struct {
 	KeyID       string
 	CipherSuite corepb.CipherSuite
-	HMACKey     []byte // len = HMACKeyLen(cs)：intl=32 SHA-256, gm=32 SM3
-	AEADKey     []byte // len = AEADKeyLen(cs)：intl=32 AES-256, gm=16 SM4
+	hmacKey     []byte // len = HMACKeyLen(cs)：intl=32 SHA-256, gm=32 SM3
+	aeadKey     []byte // len = AEADKeyLen(cs)：intl=32 AES-256, gm=16 SM4
+}
+
+// HMACKey 返回 HMAC 密钥的只读 view。调用方不应修改返回的 slice。
+func (k *SessionKeys) HMACKey() []byte { return k.hmacKey }
+
+// AEADKey 返回 AEAD 密钥的只读 view。调用方不应修改返回的 slice。
+func (k *SessionKeys) AEADKey() []byte { return k.aeadKey }
+
+// SetAEADKey 设置 AEAD 密钥（用于 AUTH_OK 后从服务端响应更新）。
+func (k *SessionKeys) SetAEADKey(key []byte) { k.aeadKey = key }
+
+// NewSessionKeys 构造 SessionKeys（HMAC 密钥在构造时设置，AEAD 密钥可后续用 SetAEADKey 更新）。
+// 供跨包调用方（如 protocol 包的 client/handler）在收到 AUTH_OK 后从服务端下发字段构造密钥对象。
+func NewSessionKeys(keyID string, cs corepb.CipherSuite, hmacKey []byte) *SessionKeys {
+	return &SessionKeys{
+		KeyID:       keyID,
+		CipherSuite: cs,
+		hmacKey:     hmacKey,
+	}
+}
+
+// Zero 清零密钥材料，用于连接关闭时的安全清理。
+func (k *SessionKeys) Zero() {
+	for i := range k.hmacKey {
+		k.hmacKey[i] = 0
+	}
+	for i := range k.aeadKey {
+		k.aeadKey[i] = 0
+	}
 }
 
 // GenerateSessionKeys 为已认证 agent 生成会话密钥（r2 按 CipherSuite）。
@@ -113,8 +143,8 @@ func GenerateSessionKeys(cs corepb.CipherSuite) (*SessionKeys, error) {
 	return &SessionKeys{
 		KeyID:       NewChunkID().String(),
 		CipherSuite: cs,
-		HMACKey:     hmacKey,
-		AEADKey:     aeadKey,
+		hmacKey:     hmacKey,
+		aeadKey:     aeadKey,
 	}, nil
 }
 

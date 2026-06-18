@@ -2,6 +2,13 @@ package core
 
 import "fmt"
 
+// signal_type 取值（core spec §6.2）。
+const (
+	SignalTypeLog    = "log"
+	SignalTypeMetric = "metric"
+	SignalTypeSpan   = "span"
+)
+
 // SignalBatch 是 BATCH payload 的规范结构，对齐协议文档 §6。
 type SignalBatch struct {
 	SchemaURL string          `json:"schema_url"`
@@ -21,18 +28,18 @@ func (b *SignalBatch) Validate() error {
 		}
 		// 基于 signal_type 的类型特定校验
 		switch s.SignalType {
-		case "metric":
+		case SignalTypeMetric:
 			if s.MetricName == "" {
 				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
 			}
-		case "span":
+		case SignalTypeSpan:
 			if s.Name == "" {
 				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: name is required for span type", i))
 			}
 			if s.TraceID == "" {
 				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: trace_id is required for span type", i))
 			}
-		case "log":
+		case SignalTypeLog:
 			if s.Body == nil {
 				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: body is required for log type", i))
 			}

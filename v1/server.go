@@ -6,7 +6,8 @@ import (
 	"sync"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/protocol"
+	"github.com/iuboy/mbta-go/internal/binding"
+	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
 // ServerConfig holds configuration for an MBTA server.
@@ -17,13 +18,8 @@ type ServerConfig struct {
 	ServerID           string
 	Metrics            *core.MBTAMetrics
 	Sink               core.EventSink // 上层注入的事件投递接口
-	MaxConcurrentConns int            // 并发连接上限，0 = 使用 defaultMaxConcurrentConns (H-3)
+	MaxConcurrentConns int            // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns (H-3)
 }
-
-// defaultMaxConcurrentConns is the concurrent connection cap applied when
-// ServerConfig.MaxConcurrentConns is unset. Bounds memory/goroutine usage
-// against connection-flood DoS. (H-3)
-const defaultMaxConcurrentConns = 10000
 
 // Server accepts and handles MBTA agent connections.
 type Server struct {
@@ -40,14 +36,14 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	maxConns := cfg.MaxConcurrentConns
 	if maxConns <= 0 {
-		maxConns = defaultMaxConcurrentConns
+		maxConns = binding.DefaultMaxConcurrentConns
 	}
 	return &Server{config: cfg, connSem: make(chan struct{}, maxConns)}, nil
 }
 
 // Start begins listening for QUIC connections and runs the accept loop.
 // Blocks until the context is cancelled. Each accepted connection is handled
-// in its own goroutine via ConnectionHandler.HandleConnection.
+// in its own goroutine via CoreHandler.Handle.
 func (s *Server) Start(ctx context.Context) error {
 	l, err := Listen(ctx, s.config.Transport)
 	if err != nil {
@@ -59,51 +55,27 @@ func (s *Server) Start(ctx context.Context) error {
 	slog.Info("MBTA server listening", "addr", l.Addr(), "server_id", s.config.ServerID)
 
 	// ctx 取消时关闭 listener：被 l.Accept(ctx) 阻塞的循环因此解除并退出。
-	// 否则若取消信号到达时循环正卡在 Accept，Start 将延迟退出。
-	// 监听器 Close 幂等，与 Server.Close 并发调用安全（与 ntls 实现对齐）。
 	go func() {
 		<-ctx.Done()
 		_ = l.Close()
 	}()
 
-	// Accept connections until context is cancelled.
-	for {
-		// 并发连接上限 (H-3)：先占一个槽位再 accept，handler 结束时释放。
-		select {
-		case s.connSem <- struct{}{}:
-		case <-ctx.Done():
-			return nil
-		}
-
-		conn, err := s.listener.Accept(ctx)
-		if err != nil {
-			<-s.connSem // accept 失败，归还槽位
-			if ctx.Err() != nil {
-				return nil //nolint:nilerr // ctx 取消属优雅关闭
-			}
-			slog.Warn("accept error", "error", err)
-			continue
-		}
-		go func(conn *Conn) {
-			defer func() { <-s.connSem }()
-			tr, err := newQuicTransport(conn)
-			if err != nil {
-				slog.Error("transport setup", "error", err)
-				_ = conn.CloseWithError(0, "transport")
-				return
-			}
-			h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-				Auth:     s.config.Auth,
-				Policy:   s.config.Policy,
-				Sink:     s.config.Sink,
-				Metrics:  s.config.Metrics,
-				ServerID: s.config.ServerID,
-			})
-			if err := h.Handle(ctx); err != nil {
-				slog.Error("handler error", "error", err)
-			}
-		}(conn)
-	}
+	return binding.AcceptLoop[*Conn](ctx, s.connSem,
+		func(ctx context.Context) (*Conn, error) {
+			return s.listener.Accept(ctx)
+		},
+		func(ctx context.Context, conn *Conn) (protocol.Transport, error) {
+			return newQuicTransport(conn)
+		},
+		func(conn *Conn) { _ = conn.CloseWithError(0, "transport") },
+		binding.HandlerConfig{
+			Auth:     s.config.Auth,
+			Policy:   s.config.Policy,
+			Sink:     s.config.Sink,
+			Metrics:  s.config.Metrics,
+			ServerID: s.config.ServerID,
+		},
+	)
 }
 
 // Addr 返回服务器监听地址（Start 完成监听后有效；启动前返回空串）。

@@ -15,7 +15,8 @@ import (
 	"sync"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/protocol"
+	"github.com/iuboy/mbta-go/internal/binding"
+	"github.com/iuboy/mbta-go/internal/protocol"
 	"github.com/iuboy/pollux-go/cert"
 	"github.com/iuboy/pollux-go/tlcp"
 )
@@ -28,8 +29,6 @@ const ALPNProtocolTLS = "mbta-tls/1"
 
 // FrameVersion is the frame version for MBTA-NTLS (same as v1).
 const FrameVersion = 0x01
-
-const defaultMaxConcurrentConns = 10000
 
 // ServerConfig holds full server configuration for NTLS.
 //
@@ -51,7 +50,7 @@ type ServerConfig struct {
 	Sink               core.EventSink
 	Metrics            *core.MBTAMetrics
 	ServerID           string // 服务端标识，回填 HELLO_ACK；空则 NewServer 自动生成 UUID v7
-	MaxConcurrentConns int    // 并发连接上限，0 = 使用 defaultMaxConcurrentConns
+	MaxConcurrentConns int    // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns (H-3)
 }
 
 // ClientCredentials holds NTLS client credentials（双 SM2 证书，或 TLS1.3 单证书）。
@@ -289,7 +288,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	maxConns := cfg.MaxConcurrentConns
 	if maxConns <= 0 {
-		maxConns = defaultMaxConcurrentConns
+		maxConns = binding.DefaultMaxConcurrentConns
 	}
 	return &Server{config: cfg, connSem: make(chan struct{}, maxConns)}, nil
 }
@@ -314,43 +313,26 @@ func (s *Server) Start(ctx context.Context) error {
 	slog.Info("MBTA-NTLS server listening", "addr", l.Addr().String())
 
 	// ctx 取消时关闭 listener：被 l.Accept() 阻塞的循环因此解除并退出。
-	// 否则若取消信号到达时循环正卡在 Accept（而非上方的 select），Start 将永久不返回。
 	// 监听器 Close 幂等，与 Server.Close 并发调用安全。
 	go func() {
 		<-ctx.Done()
 		_ = l.Close()
 	}()
 
-	for {
-		select {
-		case s.connSem <- struct{}{}:
-		case <-ctx.Done():
-			return nil
-		}
-		conn, err := l.Accept()
-		if err != nil {
-			<-s.connSem
-			if ctx.Err() != nil {
-				return nil //nolint:nilerr // ctx 取消属优雅关闭，accept 错误不应上抛
-			}
-			slog.Warn("accept error", "error", err)
-			continue
-		}
-		go func(conn net.Conn) {
-			defer func() { <-s.connSem }()
-			tr := newTCPTransport(conn)
-			h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-				Auth:     s.config.Auth,
-				Policy:   s.config.Policy,
-				Sink:     s.config.Sink,
-				Metrics:  s.config.Metrics,
-				ServerID: s.config.ServerID,
-			})
-			if err := h.Handle(ctx); err != nil {
-				slog.Error("handler error", "error", err)
-			}
-		}(conn)
-	}
+	return binding.AcceptLoop[net.Conn](ctx, s.connSem,
+		func(ctx context.Context) (net.Conn, error) { return l.Accept() },
+		func(ctx context.Context, conn net.Conn) (protocol.Transport, error) {
+			return newTCPTransport(conn), nil
+		},
+		func(conn net.Conn) { _ = conn.Close() },
+		binding.HandlerConfig{
+			Auth:     s.config.Auth,
+			Policy:   s.config.Policy,
+			Sink:     s.config.Sink,
+			Metrics:  s.config.Metrics,
+			ServerID: s.config.ServerID,
+		},
+	)
 }
 
 func (s *Server) Close() error {

@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/protocol"
+	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
 // tcpTransport 把单条 TCP（TLCP）连接适配为 protocol.Transport（server 端）。
