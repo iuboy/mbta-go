@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,8 +82,10 @@ func NewCoreHandler(tr Transport, cfg HandlerConfig) *CoreHandler {
 	if tr.Multiplexing() == MultiplexTCPSingleConn {
 		sem = maxConcurrentTCPBatches
 	}
-	// Metrics 为 nil 时回退到 NoOpMetrics，handler 无需逐处 nil 检查。
-	if cfg.Metrics == nil {
+	// Metrics 为 nil（含 typed-nil，如 (*MBTAMetrics)(nil) 赋给接口）时回退到
+	// NoOpMetrics，handler 无需逐处 nil 检查。typed-nil 检测必要：(*MBTAMetrics)(nil)
+	// 转 core.Metrics 后 != nil（带类型信息），直接调用会 panic。
+	if isNilMetrics(cfg.Metrics) {
 		cfg.Metrics = core.NoOpMetrics{}
 	}
 	h := &CoreHandler{
@@ -807,4 +810,18 @@ func chunkIDText(chunkID []byte) string {
 		return c.String()
 	}
 	return string(chunkID) // fallback（非 16B 时）
+}
+
+// isNilMetrics 报告 Metrics 接口是否为 nil 或底层值为 typed-nil 指针。
+// 安全处理值类型实现（NoOpMetrics 是 struct，IsNil 不适用）。
+func isNilMetrics(m core.Metrics) bool {
+	if m == nil {
+		return true
+	}
+	v := reflect.ValueOf(m)
+	// 仅对指针/接口/chan/map/slice 类型检查 IsNil；值类型（如 NoOpMetrics）非 nil。
+	if v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		return v.IsNil()
+	}
+	return false
 }
