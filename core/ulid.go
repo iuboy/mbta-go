@@ -18,9 +18,14 @@ import (
 type ChunkID [16]byte
 
 // chunkEntropy 是进程级单调熵源，保证同毫秒内生成的 ChunkID 单调递增不碰撞。
-var chunkEntropy = ulid.Monotonic(rand.Reader, 0)
+//
+// ulid.Monotonic 返回的 *MonotonicEntropy 明确「not safe for concurrent use」
+// （内部 bufio.Reader 非线程安全，并发调用会 panic: slice bounds out of range）。
+// 用 LockedMonotonicReader 包装以提供并发安全——NewChunkID 会在服务端
+// processBatch、handleHello，客户端 SendBatch、heartbeat 等多路径被并发调用。
+var chunkEntropy = &ulid.LockedMonotonicReader{MonotonicReader: ulid.Monotonic(rand.Reader, 0)}
 
-// NewChunkID 生成一个新的 ULID ChunkID。
+// NewChunkID 生成一个新的 ULID ChunkID（并发安全）。
 func NewChunkID() ChunkID {
 	u := ulid.MustNew(ulid.Timestamp(time.Now()), chunkEntropy)
 	return ChunkID(u)

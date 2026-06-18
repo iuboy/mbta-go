@@ -33,6 +33,10 @@ const (
 	challengeNonceLen                 = 16
 )
 
+// CodeEnvelopeAlgoMismatch 是 envelope 算法一致性复核失败时回送的 NACK code。
+// 客户端 envelope 声明的 Codec/Compression/CipherSuite 与服务端协商结果不符时使用。
+const CodeEnvelopeAlgoMismatch = "envelope_algo_mismatch"
+
 // HandlerConfig 是 CoreHandler 的配置（传输无关）。
 type HandlerConfig struct {
 	Auth         core.TokenValidator
@@ -227,7 +231,12 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 
 	h.agentID = msg.GetAgentId()
 	h.sessionID = core.NewChunkID().Bytes()
-	h.challengeNonce = randBytes(challengeNonceLen)
+	nonce, err := randBytes(challengeNonceLen)
+	if err != nil {
+		// 密码学随机源不可用：中断握手，拒绝该连接（不回退弱随机）。
+		return core.WrapError(core.NumAuth, core.CodeAuth, "generate challenge nonce", err)
+	}
+	h.challengeNonce = nonce
 
 	// 0-RTT resumption：从 session ticket 恢复 keys（core spec §11.6）。
 	// 恢复后 earlyData=true，dataLoop 可在 AUTH 前启动处理 0-RTT BATCH。
@@ -591,14 +600,26 @@ func (h *CoreHandler) decodeSignalBatch(batchMsg *corepb.BatchMessage) (*core.Si
 	return sb, true
 }
 
-// verifyEnvelopeAlgo 强制 envelope 使用协商算法。返回 true 表示已发 NACK，调用方中止。
+// verifyEnvelopeAlgo 强制 envelope 使用协商算法（Compression + Codec + CipherSuite）。
+// 任一不一致即拒绝——防止客户端单方面降级或注入未协商算法（defense-in-depth，
+// 即使 HMAC 通过也不允许 wire 字段与权威协商结果不符）。返回 true 表示已发 NACK，调用方中止。
 func (h *CoreHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
 	if h.negotiated == nil {
 		return false
 	}
 	if env.Compression != h.negotiated.Compression {
-		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), "envelope_algo_mismatch",
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
 			"compression not negotiated", false)
+		return true
+	}
+	if env.Codec != h.negotiated.Codec {
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+			"codec not negotiated", false)
+		return true
+	}
+	if env.CipherSuite != h.negotiated.CipherSuite {
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+			"cipher suite not negotiated", false)
 		return true
 	}
 	return false
@@ -718,7 +739,13 @@ func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code, 
 
 // failAuth 发 AUTH_FAIL 并轮换 challengeNonce（每次在线验证用新挑战）。
 func (h *CoreHandler) failAuth(ctx context.Context, code, reason string) {
-	h.challengeNonce = randBytes(challengeNonceLen)
+	// 轮换 nonce；失败时保留旧 nonce（此处已是错误处理路径，最坏情况是下一次
+	// 挑战复用旧值，优于丢弃 AUTH_FAIL 不响应）。AUTH_FAIL 帧仍可发送。
+	if nonce, err := randBytes(challengeNonceLen); err != nil {
+		slog.Warn("rotate challenge nonce failed, keeping previous", "error", err)
+	} else {
+		h.challengeNonce = nonce
+	}
 	fail := &corepb.AuthFailMessage{Code: code, Reason: reason, Retryable: true, ChallengeNonce: h.challengeNonce}
 	p, err := core.Encode(fail)
 	if err != nil {
@@ -769,15 +796,17 @@ func pressureToWindow(pressure core.PressureState) (batches, events int, maxByte
 
 // ===== helpers =====
 
-func randBytes(n int) []byte {
+// randBytes 生成 n 字节密码学随机数。
+//
+// crypto/rand.Read 在现代系统上极少失败，但失败时绝不应回退到可预测的时间戳
+// 派生值——那会产出可猜测的 challenge nonce / session key，破坏 challenge-response
+// 与会话机密性。故失败时直接返回 error，让调用方中断该次握手而非使用弱随机。
+func randBytes(n int) ([]byte, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		// rand.Read 极少失败；fallback 用时间戳扰动，保证非全零。
-		for i := range b {
-			b[i] = byte(time.Now().UnixNano() >> uint(i))
-		}
+		return nil, err
 	}
-	return b
+	return b, nil
 }
 
 // chunkIDText 把 wire chunk_id（ULID 16B）转为文本作 ReplayCache/spool key。

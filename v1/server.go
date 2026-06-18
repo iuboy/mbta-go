@@ -58,6 +58,14 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mu.Unlock()
 	slog.Info("MBTA server listening", "addr", l.Addr(), "server_id", s.config.ServerID)
 
+	// ctx 取消时关闭 listener：被 l.Accept(ctx) 阻塞的循环因此解除并退出。
+	// 否则若取消信号到达时循环正卡在 Accept，Start 将延迟退出。
+	// 监听器 Close 幂等，与 Server.Close 并发调用安全（与 ntls 实现对齐）。
+	go func() {
+		<-ctx.Done()
+		_ = l.Close()
+	}()
+
 	// Accept connections until context is cancelled.
 	for {
 		// 并发连接上限 (H-3)：先占一个槽位再 accept，handler 结束时释放。
