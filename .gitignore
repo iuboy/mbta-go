@@ -32,3 +32,4 @@ Thumbs.db
 /examples/basic_server/basic_server
 
 go.work
+go.work.sum
