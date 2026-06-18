@@ -47,6 +47,8 @@ type ServerConfig struct {
 	V1QUIC v1.QUICServerConfig
 
 	// V2 specific configuration
+	// EXPERIMENTAL: v2 尚未实现（需 GM TLS 库）。EnableV2=true 或配置 V2QUIC 会在
+	// NewServer 时返回「未实现」错误，而非启动一个注定失败的服务。
 	V2QUIC v2.QUICServerConfig
 
 	// NTLS specific configuration

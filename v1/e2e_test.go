@@ -52,7 +52,7 @@ func TestE2E_Quic_SendBatch(t *testing.T) {
 		},
 		Auth: core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
 		Policy: core.Policy{
-			SupportedCapabilities: []string{"codec_json", "cs_intl"},
+			SupportedCapabilities: []string{"codec_proto", "cs_intl"},
 			DefaultCodec:          corepb.Codec_CODEC_JSON,
 			DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 			CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
@@ -78,7 +78,7 @@ func TestE2E_Quic_SendBatch(t *testing.T) {
 		AgentID:      "agent-1",
 		Hostname:     "test-host",
 		Token:        "test-token",
-		Capabilities: []string{"codec_json", "cs_intl"},
+		Capabilities: []string{"codec_proto", "cs_intl"},
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)

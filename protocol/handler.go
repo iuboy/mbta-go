@@ -39,11 +39,11 @@ const CodeEnvelopeAlgoMismatch = "envelope_algo_mismatch"
 
 // HandlerConfig 是 CoreHandler 的配置（传输无关）。
 type HandlerConfig struct {
-	Auth         core.TokenValidator
-	Policy       core.Policy
-	Sink         core.EventSink
-	Metrics      *core.MBTAMetrics
-	ServerID     string
+	Auth     core.TokenValidator
+	Policy   core.Policy
+	Sink     core.EventSink
+	Metrics  core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreHandler）
+	ServerID string
 	SessionStore *core.SessionStore // 0-RTT resumption（可选，nil = 不支持 early_data）
 }
 
@@ -80,6 +80,10 @@ func NewCoreHandler(tr Transport, cfg HandlerConfig) *CoreHandler {
 	sem := maxConcurrentQuicDataFrames
 	if tr.Multiplexing() == MultiplexTCPSingleConn {
 		sem = maxConcurrentTCPBatches
+	}
+	// Metrics 为 nil 时回退到 NoOpMetrics，handler 无需逐处 nil 检查。
+	if cfg.Metrics == nil {
+		cfg.Metrics = core.NoOpMetrics{}
 	}
 	h := &CoreHandler{
 		tr:       tr,
@@ -339,9 +343,7 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	if h.config.Auth != nil {
 		if _, err := h.config.Auth.Validate(token); err != nil {
 			h.failAuth(ctx, "invalid_token", "token validation failed")
-			if h.config.Metrics != nil {
-				h.config.Metrics.AuthFailureTotal.Inc()
-			}
+			h.config.Metrics.AuthFailure().Inc()
 			return core.WrapError(core.NumAuth, core.CodeAuth, "token validation", err)
 		}
 	}
@@ -392,9 +394,7 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	if err := h.sm.Transition(core.ServerStateReady); err != nil {
 		return core.WrapError(core.NumSession, core.CodeSession, "transition READY", err)
 	}
-	if h.config.Metrics != nil {
-		h.config.Metrics.AuthSuccessTotal.Inc()
-	}
+	h.config.Metrics.AuthSuccess().Inc()
 	slog.Info("auth succeeded", "agent", core.SanitizeForLog(h.agentID), "session", string(h.sessionID), "key_id", keys.KeyID)
 	return nil
 }
@@ -450,9 +450,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 		ok, verr := core.VerifyMAC(h.keys.HMACKey, env)
 		if verr != nil || !ok {
 			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "hmac_mismatch", "HMAC verification failed", false)
-			if h.config.Metrics != nil {
-				h.config.Metrics.HMACFailuresTotal.Inc()
-			}
+			h.config.Metrics.HMACFailures().Inc()
 			return
 		}
 	}
@@ -661,9 +659,7 @@ func (h *CoreHandler) routeAndACK(ctx context.Context, dedupKey string, batchMsg
 	}
 
 	h.sendAck(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), batchEvents, ackMode)
-	if h.config.Metrics != nil {
-		h.config.Metrics.BatchesAckedTotal.Inc()
-	}
+	h.config.Metrics.BatchesAcked().Inc()
 }
 
 func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteResult, dedupKey string, ackMode *corepb.AckMode) bool {
@@ -718,9 +714,7 @@ func (h *CoreHandler) sendNack(ctx context.Context, seq uint64, chunkID []byte, 
 	if err := SendControlFrame(ctx, h.tr, core.TypeNack, core.FlagControl, p); err != nil {
 		slog.Warn("write nack failed", "error", err)
 	}
-	if h.config.Metrics != nil {
-		h.config.Metrics.BatchesNackedTotal.Inc()
-	}
+	h.config.Metrics.BatchesNacked().Inc()
 }
 
 func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code, reason string) {
@@ -732,9 +726,7 @@ func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code, 
 	if err := SendControlFrame(ctx, h.tr, core.TypeThrottle, core.FlagControl, p); err != nil {
 		slog.Warn("write throttle failed", "error", err)
 	}
-	if h.config.Metrics != nil {
-		h.config.Metrics.ThrottledTotal.Inc()
-	}
+	h.config.Metrics.Throttled().Inc()
 }
 
 // failAuth 发 AUTH_FAIL 并轮换 challengeNonce（每次在线验证用新挑战）。

@@ -57,15 +57,18 @@ type ServerConfig struct {
 
 // Server implements V2 MBTA server.
 type Server struct {
-	config ServerConfig
+	config ServerConfig //nolint:unused // v2 落地后使用
 }
 
 // NewServer creates a V2 MBTA server.
+//
+// EXPERIMENTAL: v2（QUIC + RFC 8998 GM TLS）尚未实现。当前直接返回错误，
+// 而非返回一个在 Start 时才失败的实例——避免「构造成功、运行失败」的误导。
+// v2 落地需要集成 GM TLS（SM2/SM3/SM4 over QUIC）库，届时此函数将返回真实 Server。
 func NewServer(cfg ServerConfig) (*Server, error) {
-	if cfg.Transport.Address == "" {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "address required")
-	}
-	return &Server{config: cfg}, nil
+	_ = cfg // 配置字段保留以稳定 API，但当前无法消费
+	return nil, core.NewError(core.NumConfig, core.CodeConfig,
+		"v2 server not yet implemented (requires GM TLS library)")
 }
 
 // Start begins listening for QUIC connections with GM TLS.
@@ -86,15 +89,16 @@ type ClientConfig struct {
 
 // Client implements V2 MBTA client.
 type Client struct {
-	config ClientConfig
+	config ClientConfig //nolint:unused // v2 落地后使用
 }
 
 // NewClient creates a V2 MBTA client.
+//
+// EXPERIMENTAL: 同 NewServer，v2 客户端尚未实现，构造即返回错误。
 func NewClient(cfg ClientConfig) (*Client, error) {
-	if cfg.Transport.Server == "" {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "server address required")
-	}
-	return &Client{config: cfg}, nil
+	_ = cfg
+	return nil, core.NewError(core.NumConfig, core.CodeConfig,
+		"v2 client not yet implemented (requires GM TLS library)")
 }
 
 // Connect establishes V2 connection with GM TLS.

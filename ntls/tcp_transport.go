@@ -87,7 +87,7 @@ func (t *tcpTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	_ = ctx
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	return core.Write(t.conn, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
+	return core.Write(t.conn, f.Header.Version, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
 }
 
 // SupportsDatagram：TCP 无不可靠通道。

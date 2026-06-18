@@ -25,7 +25,7 @@ func (c *Client) sendHello() error {
 	if err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal hello", err)
 	}
-	if err := core.Write(c.controlStr, core.TypeHello, core.FlagControl, core.ChannelControl, payload); err != nil {
+	if err := core.Write(c.controlStr, core.Version, core.TypeHello, core.FlagControl, core.ChannelControl, payload); err != nil {
 		return err
 	}
 	if err := c.sm.Transition(core.StateHelloSent); err != nil {
@@ -81,7 +81,7 @@ func (c *Client) sendAuth() error {
 	if err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal auth", err)
 	}
-	if err := core.Write(c.controlStr, core.TypeAuth, core.FlagControl, core.ChannelControl, payload); err != nil {
+	if err := core.Write(c.controlStr, core.Version, core.TypeAuth, core.FlagControl, core.ChannelControl, payload); err != nil {
 		return err
 	}
 	if err := c.sm.Transition(core.StateAuthSent); err != nil {

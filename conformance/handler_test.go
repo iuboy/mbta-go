@@ -19,7 +19,7 @@ func doHandshake(t *testing.T, sink core.EventSink) (*FakeTransport, *core.Sessi
 	t.Helper()
 	tr := NewFakeTransport(false)
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_json", "codec_proto", "comp_zstd", "cs_intl", "durable_ack", "partial_ack"},
+		SupportedCapabilities: []string{"codec_proto", "codec_proto", "comp_zstd", "cs_intl", "durable_ack", "partial_ack"},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
@@ -36,7 +36,7 @@ func doHandshake(t *testing.T, sink core.EventSink) (*FakeTransport, *core.Sessi
 	hello := &corepb.HelloMessage{
 		AgentId:      "agent-1",
 		FrameVersion: 1,
-		Capabilities: []string{"codec_json", "cs_intl"},
+		Capabilities: []string{"codec_proto", "cs_intl"},
 	}
 	hp, err := core.Encode(hello)
 	if err != nil {
@@ -131,7 +131,7 @@ func TestCoreHandler_Delivery(t *testing.T) {
 		SessionID:    []byte("session-1"),
 		Seq:          1,
 		ChunkID:      chunkID,
-		Codec:        corepb.Codec_CODEC_JSON,
+		Codec:        corepb.Codec_CODEC_PROTO,
 		Compression:  corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:  cs,
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
@@ -183,7 +183,7 @@ func TestCoreHandler_ReplayDedup(t *testing.T) {
 		bp, _ := core.Encode(batchMsg)
 		params := core.BuildParams{
 			SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
-			Codec: corepb.Codec_CODEC_JSON, Compression: corepb.Compression_COMPRESSION_NONE,
+			Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 			CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 			MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
 			HMACKey: keys.HMACKey, AEADKey: keys.AEADKey, BatchPayload: bp,
@@ -243,7 +243,7 @@ func TestCoreHandler_Datagram(t *testing.T) {
 		SessionID:    []byte("s"),
 		Seq:          1,
 		ChunkID:      chunkID,
-		Codec:        corepb.Codec_CODEC_JSON,
+		Codec:        corepb.Codec_CODEC_PROTO,
 		Compression:  corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:  cs,
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_LOSSY,
@@ -285,8 +285,8 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 
 	tr := NewFakeTransport(false)
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_json", "cs_intl"},
-		DefaultCodec:          corepb.Codec_CODEC_JSON,
+		SupportedCapabilities: []string{"codec_proto", "cs_intl"},
+		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
@@ -304,7 +304,7 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 	hello := &corepb.HelloMessage{
 		AgentId:       "agent-1",
 		FrameVersion:  1,
-		Capabilities:  []string{"codec_json", "cs_intl"},
+		Capabilities:  []string{"codec_proto", "cs_intl"},
 		SessionTicket: ticket,
 	}
 	hp, _ := core.Encode(hello)
@@ -328,7 +328,7 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 		SessionID:    []byte("s"),
 		Seq:          1,
 		ChunkID:      chunkID,
-		Codec:        corepb.Codec_CODEC_JSON,
+		Codec:        corepb.Codec_CODEC_PROTO,
 		Compression:  corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:  corepb.CipherSuite_CIPHER_SUITE_INTL,
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
@@ -360,8 +360,8 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 func TestCoreHandler_UnknownCapabilityRejected(t *testing.T) {
 	tr := NewFakeTransport(false)
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_json"},
-		DefaultCodec:          corepb.Codec_CODEC_JSON,
+		SupportedCapabilities: []string{"codec_proto"},
+		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
@@ -377,7 +377,7 @@ func TestCoreHandler_UnknownCapabilityRejected(t *testing.T) {
 	hello := &corepb.HelloMessage{
 		AgentId:      "agent-1",
 		FrameVersion: 1,
-		Capabilities: []string{"codec_json", "bogus_cap"},
+		Capabilities: []string{"codec_proto", "bogus_cap"},
 	}
 	hp, _ := core.Encode(hello)
 	tr.ControlIn <- MakeFrame(core.TypeHello, core.FlagControl, core.ChannelControl, hp)
@@ -401,7 +401,7 @@ func TestCoreHandler_HmacTampered(t *testing.T) {
 	bp, _ := core.Encode(batchMsg)
 	params := core.BuildParams{
 		SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
-		Codec: corepb.Codec_CODEC_JSON, Compression: corepb.Compression_COMPRESSION_NONE,
+		Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 		CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
 		HMACKey: keys.HMACKey, AEADKey: keys.AEADKey, BatchPayload: bp,
@@ -434,7 +434,7 @@ func TestCoreHandler_BatchTooManyEvents(t *testing.T) {
 	bp, _ := core.Encode(batchMsg)
 	params := core.BuildParams{
 		SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
-		Codec: corepb.Codec_CODEC_JSON, Compression: corepb.Compression_COMPRESSION_NONE,
+		Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 		CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
 		HMACKey: keys.HMACKey, AEADKey: keys.AEADKey, BatchPayload: bp,
@@ -459,8 +459,8 @@ func TestCoreHandler_BatchTooManyEvents(t *testing.T) {
 func TestCoreHandler_PartialAckCapability(t *testing.T) {
 	tr := NewFakeTransport(false)
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_json", "cs_intl", "partial_ack"},
-		DefaultCodec:          corepb.Codec_CODEC_JSON,
+		SupportedCapabilities: []string{"codec_proto", "cs_intl", "partial_ack"},
+		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
@@ -471,7 +471,7 @@ func TestCoreHandler_PartialAckCapability(t *testing.T) {
 	t.Cleanup(cancel)
 	go func() { _ = h.Handle(ctx) }()
 
-	hello := &corepb.HelloMessage{AgentId: "a", FrameVersion: 1, Capabilities: []string{"codec_json", "cs_intl", "partial_ack"}}
+	hello := &corepb.HelloMessage{AgentId: "a", FrameVersion: 1, Capabilities: []string{"codec_proto", "cs_intl", "partial_ack"}}
 	hp, _ := core.Encode(hello)
 	tr.ControlIn <- MakeFrame(core.TypeHello, core.FlagControl, core.ChannelControl, hp)
 

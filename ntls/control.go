@@ -56,7 +56,7 @@ func (c *Client) readControlLoop(ctx context.Context) {
 	}
 }
 
-// handleAck 处理 ACK：清除 inflight，删除 spool，回调。
+// handleAck 处理 ACK：清除 inflight，回调。
 // chunk_id（wire ULID 16B）转 ULID 文本匹配 pendingAcks key。
 func (c *Client) handleAck(payload []byte) {
 	var ack core.AckMessage
@@ -70,7 +70,6 @@ func (c *Client) handleAck(payload []byte) {
 		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
 			c.inflight.Remove(pb.Events, pb.Bytes)
-			c.deleteSpooled(pb)
 		}
 	}
 
@@ -80,7 +79,7 @@ func (c *Client) handleAck(payload []byte) {
 	slog.Debug("ack received", "seq", ack.GetSeq(), "chunk", chunkID, "count", ack.GetCount(), "mode", ackModeString(ack.GetAckMode()))
 }
 
-// handleNack 处理 NACK：retryable 保留 spool 待重连重发，毒消息丢弃。
+// handleNack 处理 NACK：清除 inflight。
 func (c *Client) handleNack(payload []byte) {
 	var nack core.NackMessage
 	if err := core.Decode(payload, &nack); err != nil {
@@ -93,9 +92,6 @@ func (c *Client) handleNack(payload []byte) {
 		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
 			c.inflight.Remove(pb.Events, pb.Bytes)
-			if !nack.GetRetryable() {
-				c.deleteSpooled(pb)
-			}
 		}
 	}
 
@@ -151,7 +147,7 @@ func ackModeString(m corepb.AckMode) string {
 	return "accepted"
 }
 
-// ulidText 把 wire chunk_id（ULID 16B）转为文本，匹配 pendingAcks/spool key。
+// ulidText 把 wire chunk_id（ULID 16B）转为文本，匹配 pendingAcks key。
 func ulidText(chunkID []byte) string {
 	if c, err := core.ChunkIDFromBytes(chunkID); err == nil {
 		return c.String()

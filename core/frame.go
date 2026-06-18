@@ -18,6 +18,20 @@ const (
 
 var magicBytes = []byte(Magic)
 
+// versionAllowed 报告帧头 Version 是否在白名单内。
+// supported 为空时回退到默认仅接受 core.Version（向后兼容）。
+func versionAllowed(v byte, supported []byte) bool {
+	if len(supported) == 0 {
+		return v == Version
+	}
+	for _, s := range supported {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // Header 表示帧头的定长前缀（8 字节，不含 varint length）。
 // 帧格式：8B 定长前缀 + varint Length + Payload。
 // 无帧层 CRC——完整性由传输层 AEAD（TLS 1.3 / TLCP）+
@@ -70,7 +84,11 @@ func DefaultLimits() Limits {
 
 // Write 编码并写入单个 MBTA 帧。
 // 帧格式：8B 定长前缀 + varint Length + Payload。
-func Write(w io.Writer, typ uint8, flags byte, channelID uint8, payload []byte) error {
+//
+// version 写入帧头 Version 字段（offset 4）。各 binding 传入其 FrameVersion 常量：
+// v1/ntls 传 core.Version(0x01)，v2 传 0x02。这样 wire 层真正反映协议版本，
+// 为 v2 落地扫清障碍（此前 Version 被硬编码为常量，v2 帧无法生成）。
+func Write(w io.Writer, version byte, typ uint8, flags byte, channelID uint8, payload []byte) error {
 	if err := ValidateFlags(flags); err != nil {
 		return err
 	}
@@ -83,7 +101,7 @@ func Write(w io.Writer, typ uint8, flags byte, channelID uint8, payload []byte) 
 
 	var hdr [FixedHeaderSz]byte
 	copy(hdr[0:4], magicBytes)
-	hdr[4] = Version
+	hdr[4] = version
 	hdr[5] = flags
 	hdr[6] = typ
 	hdr[7] = channelID
@@ -106,7 +124,14 @@ func Write(w io.Writer, typ uint8, flags byte, channelID uint8, payload []byte) 
 }
 
 // Read 读取并校验单个 MBTA 帧。
-func Read(r io.Reader, lim Limits) (Frame, error) {
+//
+// supportedVersions 是本端接受的帧版本白名单：
+//   - 为空（默认）：仅接受 core.Version(0x01)，保持向后兼容；
+//   - 非空：校验帧头 Version ∈ supportedVersions，否则报错。
+//
+// 各 binding 按自身支持的版本传入：v1/ntls 不传或传 core.Version；
+// v2 传 core.Version 与 0x02（同时兼容 v1）。这样读取端能拒绝不支持的版本而非误解析。
+func Read(r io.Reader, lim Limits, supportedVersions ...byte) (Frame, error) {
 	var hdr [FixedHeaderSz]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return Frame{}, WrapError(NumProtocol, CodeProtocol, "read header", err)
@@ -115,7 +140,7 @@ func Read(r io.Reader, lim Limits) (Frame, error) {
 	if string(hdr[0:4]) != Magic {
 		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("invalid magic %q", hdr[0:4]))
 	}
-	if hdr[4] != Version {
+	if !versionAllowed(hdr[4], supportedVersions) {
 		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("unsupported version 0x%02x", hdr[4]))
 	}
 	flags := hdr[5]

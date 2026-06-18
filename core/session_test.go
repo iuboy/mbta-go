@@ -74,7 +74,7 @@ func equalStringSlices(a, b []string) bool {
 // TestValidateHelloForVersion tests the ValidateHelloForVersion function.
 func TestNegotiate(t *testing.T) {
 	policy := Policy{
-		SupportedCapabilities: []string{"codec_proto", "codec_cbor", "comp_zstd", "comp_lz4", "cs_intl", "cs_gm", "durable_ack", "partial_ack"},
+		SupportedCapabilities: []string{"codec_proto", "comp_zstd", "comp_lz4", "cs_intl", "cs_gm", "durable_ack", "partial_ack"},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_ZSTD,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,

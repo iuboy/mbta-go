@@ -76,7 +76,6 @@ type ClientConfig struct {
 	Hostname     string
 	Token        string
 	Capabilities []string // 客户端能力（HELLO 携带，与服务端协商）
-	SpoolDir     string   // 持久化 spool 目录（空=禁用 spool，无可靠投递）
 }
 
 // --- TLCP 配置构建 ---

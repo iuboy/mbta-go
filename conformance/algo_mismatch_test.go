@@ -53,9 +53,11 @@ func buildMismatchedEnvelope(t *testing.T, keys *core.SessionKeys, cs corepb.Cip
 // 回归 P1 修复：原先 verifyEnvelopeAlgo 只校验 Compression，codec 可被任意注入。
 func TestCoreHandler_AlgoMismatch_Codec(t *testing.T) {
 	tr, keys, cs := doHandshake(t, nil)
-	// 协商结果 codec=JSON（见 doHandshake cap），注入 CODEC_PROTO。
+	// 协商结果 codec=PROTO（capability 仅含 codec_proto），注入 CODEC_JSON（未协商）。
+	// Build 用 JSON 计算 HMAC（合法 MAC），故 HMAC 通过，到 algo 复核层
+	// 因 env.Codec != 协商 codec 被拒——这正是 verifyEnvelopeAlgo 补齐 codec 校验要拦截的场景。
 	ep := buildMismatchedEnvelope(t, keys, cs,
-		corepb.Codec_CODEC_PROTO, cs, corepb.Compression_COMPRESSION_NONE)
+		corepb.Codec_CODEC_JSON, cs, corepb.Compression_COMPRESSION_NONE)
 	tr.DataIn <- MakeFrame(core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, ep)
 
 	resp := ReadFrame(t, tr.Sent)
@@ -66,8 +68,6 @@ func TestCoreHandler_AlgoMismatch_Codec(t *testing.T) {
 	if err := core.Decode(resp.Payload, &n); err != nil {
 		t.Fatalf("decode nack: %v", err)
 	}
-	// Build 用篡改后的 codec 计算 HMAC（合法 MAC），故 HMAC 通过，到 algo 复核层
-	// 因 env.Codec != 协商 codec 被拒——这正是 verifyEnvelopeAlgo 补齐 codec 校验要拦截的场景。
 	if n.GetCode() != protocol.CodeEnvelopeAlgoMismatch {
 		t.Errorf("nack code = %q, want %s", n.GetCode(), protocol.CodeEnvelopeAlgoMismatch)
 	}
@@ -83,7 +83,7 @@ func TestCoreHandler_AlgoMismatch_CipherSuite(t *testing.T) {
 	tr, keys, cs := doHandshake(t, nil)
 	// 协商 INTL，注入 GM（HMAC/AEAD 仍用 INTL 密钥，仅 envelope 字段造假）。
 	ep := buildMismatchedEnvelope(t, keys, cs,
-		corepb.Codec_CODEC_JSON, corepb.CipherSuite_CIPHER_SUITE_GM, corepb.Compression_COMPRESSION_NONE)
+		corepb.Codec_CODEC_PROTO, corepb.CipherSuite_CIPHER_SUITE_GM, corepb.Compression_COMPRESSION_NONE)
 	tr.DataIn <- MakeFrame(core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, ep)
 
 	resp := ReadFrame(t, tr.Sent)
@@ -104,7 +104,7 @@ func TestCoreHandler_AlgoMismatch_CipherSuite(t *testing.T) {
 func TestCoreHandler_AlgoMismatch_Compression(t *testing.T) {
 	tr, keys, cs := doHandshake(t, nil)
 	ep := buildMismatchedEnvelope(t, keys, cs,
-		corepb.Codec_CODEC_JSON, cs, corepb.Compression_COMPRESSION_ZSTD)
+		corepb.Codec_CODEC_PROTO, cs, corepb.Compression_COMPRESSION_ZSTD)
 	tr.DataIn <- MakeFrame(core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, ep)
 
 	resp := ReadFrame(t, tr.Sent)

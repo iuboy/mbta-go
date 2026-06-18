@@ -20,7 +20,10 @@ var stableCapabilities = map[string]bool{
 	"more_follows": true, "coalesce_control": true,
 	// E.4 数据与算法
 	"comp_zstd": true, "comp_lz4": true, "comp_gzip": true,
-	"codec_proto": true, "codec_cbor": true, "codec_json": true,
+	// 仅 codec_proto：当前实现只支持 proto 编码（signal_codec.go 无条件 proto.Marshal）。
+	// codec_cbor/codec_json 的枚举值在 wire 层保留（前向兼容），但不再作为可协商
+	// capability 暴露——避免「协商成功却无法解码」的互操作 bug。
+	"codec_proto": true,
 	"cs_intl": true, "cs_gm": true, "histogram_exponential": true,
 }
 

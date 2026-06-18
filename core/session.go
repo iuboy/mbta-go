@@ -289,16 +289,15 @@ func Negotiate(clientCaps []string, policy Policy) (NegotiateResult, error) {
 	}, nil
 }
 
-// pickCodec 从选定 capability 推导 codec（优先 proto > cbor > json），否则默认。
+// pickCodec 从选定 capability 推导 codec。
+//
+// 当前仅支持 proto（唯一实现的 codec，见 signal_codec.go）。即便 def 传入
+// CODEC_JSON/CODEC_JSON 也忽略——协商层面已从 capability 移除 codec_cbor/codec_json，
+// 此函数只可能命中 codec_proto 或返回 def。def 通常为 CODEC_PROTO。
 func pickCodec(selected []string, def corepb.Codec) corepb.Codec {
 	set := toSet(selected)
-	switch {
-	case set["codec_proto"]:
+	if set["codec_proto"] {
 		return corepb.Codec_CODEC_PROTO
-	case set["codec_cbor"]:
-		return corepb.Codec_CODEC_CBOR
-	case set["codec_json"]:
-		return corepb.Codec_CODEC_JSON
 	}
 	return def
 }

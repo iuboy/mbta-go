@@ -104,7 +104,7 @@ func (t *quicTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	_ = ctx
 	t.controlMu.Lock()
 	defer t.controlMu.Unlock()
-	return core.Write(t.controlStr, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
+	return core.Write(t.controlStr, f.Header.Version, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
 }
 
 // SupportsDatagram 报告是否支持 QUIC DATAGRAM（需 EnableDatagrams）。

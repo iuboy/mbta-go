@@ -33,7 +33,7 @@ func TestWriteFrame(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			buf := &bytes.Buffer{}
-			err := Write(buf, tt.typ, tt.flags, tt.channelID, tt.payload)
+			err := Write(buf, Version, tt.typ, tt.flags, tt.channelID, tt.payload)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("Write() expected error containing %q, got nil", tt.errSubstr)
@@ -178,7 +178,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			buf := &bytes.Buffer{}
-			mbtatest.AssertNoError(t, Write(buf, tt.typ, tt.flags, tt.channelID, tt.payload), "Write()")
+			mbtatest.AssertNoError(t, Write(buf, Version, tt.typ, tt.flags, tt.channelID, tt.payload), "Write()")
 
 			f, err := Read(bytes.NewReader(buf.Bytes()), DefaultLimits())
 			mbtatest.AssertNoError(t, err, "Read()")
@@ -288,6 +288,53 @@ func TestReadFromPartialStream(t *testing.T) {
 	mbtatest.AssertNoError(t, err, "Read() from chunked stream")
 	if !bytes.Equal(frame.Payload, payload) {
 		t.Errorf("Payload = %q, want %q", frame.Payload, payload)
+	}
+}
+
+// TestReadMultiVersion 验证帧层多版本支持：
+//   - 默认 Read（无 supportedVersions）仅接受 0x01，拒绝 0x02；
+//   - Read 带白名单 [0x01, 0x02] 同时接受 v1/v2 帧；
+//   - Write 用传入 version 写入帧头，wire 层真正反映协议版本。
+//
+// 回归：此前 Version 硬编码为常量，v2 帧无法生成也无法解析。
+func TestReadMultiVersion(t *testing.T) {
+	const v2 = byte(0x02)
+	payload := []byte("multi-version payload")
+
+	// v2 帧由 Write(version=0x02) 生成
+	buf := &bytes.Buffer{}
+	if err := Write(buf, v2, TypeBatch, FlagData, ChannelData, payload); err != nil {
+		t.Fatalf("Write v2: %v", err)
+	}
+	if buf.Bytes()[4] != v2 {
+		t.Fatalf("frame version byte = 0x%02x, want 0x%02x", buf.Bytes()[4], v2)
+	}
+
+	// 默认 Read（仅 0x01）：拒绝 v2 帧
+	_, err := Read(bytes.NewReader(buf.Bytes()), DefaultLimits())
+	if err == nil {
+		t.Fatal("default Read should reject v2 frame")
+	}
+
+	// Read 带白名单 [0x01, 0x02]：接受 v2 帧
+	f, err := Read(bytes.NewReader(buf.Bytes()), DefaultLimits(), Version, v2)
+	if err != nil {
+		t.Fatalf("Read with [0x01,0x02] whitelist: %v", err)
+	}
+	if f.Header.Version != v2 {
+		t.Errorf("frame version = 0x%02x, want 0x%02x", f.Header.Version, v2)
+	}
+	if !bytes.Equal(f.Payload, payload) {
+		t.Errorf("payload mismatch: got %q, want %q", f.Payload, payload)
+	}
+
+	// v1 帧仍被默认 Read 接受（向后兼容）
+	v1Buf := &bytes.Buffer{}
+	if err := Write(v1Buf, Version, TypeBatch, FlagData, ChannelData, payload); err != nil {
+		t.Fatalf("Write v1: %v", err)
+	}
+	if _, err := Read(bytes.NewReader(v1Buf.Bytes()), DefaultLimits()); err != nil {
+		t.Fatalf("default Read should accept v1 frame: %v", err)
 	}
 }
 

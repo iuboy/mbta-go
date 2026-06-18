@@ -49,7 +49,7 @@ func TestMetricsFields(t *testing.T) {
 		{
 			name: "ConnectionsActive",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.ConnectionsActive == nil {
+				if m.ConnectionsActiveGauge == nil {
 					t.Error("ConnectionsActive should not be nil")
 				}
 			},
@@ -103,22 +103,6 @@ func TestMetricsFields(t *testing.T) {
 			},
 		},
 		{
-			name: "SpoolRecords",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.SpoolRecords == nil {
-					t.Error("SpoolRecords should not be nil")
-				}
-			},
-		},
-		{
-			name: "SpoolBytes",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.SpoolBytes == nil {
-					t.Error("SpoolBytes should not be nil")
-				}
-			},
-		},
-		{
 			name: "ReplayCacheHitsTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
 				if m.ReplayCacheHitsTotal == nil {
@@ -145,7 +129,7 @@ func TestMetricsFields(t *testing.T) {
 		{
 			name: "WindowCurrentBatches",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.WindowCurrentBatches == nil {
+				if m.WindowCurrentBatchesGauge == nil {
 					t.Error("WindowCurrentBatches should not be nil")
 				}
 			},
@@ -153,7 +137,7 @@ func TestMetricsFields(t *testing.T) {
 		{
 			name: "WindowCurrentEvents",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.WindowCurrentEvents == nil {
+				if m.WindowCurrentEventsGauge == nil {
 					t.Error("WindowCurrentEvents should not be nil")
 				}
 			},
@@ -161,7 +145,7 @@ func TestMetricsFields(t *testing.T) {
 		{
 			name: "WindowCurrentBytes",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.WindowCurrentBytes == nil {
+				if m.WindowCurrentBytesGauge == nil {
 					t.Error("WindowCurrentBytes should not be nil")
 				}
 			},
@@ -219,14 +203,13 @@ func TestMetricsCount(t *testing.T) {
 	}
 
 	// Expected metrics count (based on MBTAMetrics struct)
-	// 23 metrics: ConnectionsActive, AuthSuccessTotal, AuthFailureTotal,
+	// 20 metrics: ConnectionsActive, AuthSuccessTotal, AuthFailureTotal,
 	// BatchesSentTotal, BatchesAckedTotal, BatchesNackedTotal, ThrottledTotal,
-	// PartialAckTotal, SpoolRecords, SpoolBytes, ReplayCacheHitsTotal,
+	// PartialAckTotal, ReplayCacheHitsTotal, ReplayCacheEvictionsTotal,
 	// HMACFailuresTotal, DecryptFailuresTotal, WindowCurrentBatches,
 	// WindowCurrentEvents, WindowCurrentBytes, ThrottleSecondsTotal,
-	// BatchLatencySeconds, BatchSizeEvents, BatchSizeBytes, ConnectionDuration,
-	// SpoolFlushErrors, SpoolSizeLimitHit
-	expectedCount := 23
+	// BatchLatencySeconds, BatchSizeEvents, BatchSizeBytes, ConnectionDuration
+	expectedCount := 20
 	if len(metricFamilies) != expectedCount {
 		t.Errorf("Expected %d metrics, got %d", expectedCount, len(metricFamilies))
 	}
@@ -240,12 +223,10 @@ func TestMetricsMetricTypes(t *testing.T) {
 	// Test that Gauges and Counters are properly typed
 	// This is a compile-time check, but we can verify non-nil
 	t.Run("Gauge metrics exist", func(t *testing.T) {
-		if metrics.ConnectionsActive == nil ||
-			metrics.SpoolRecords == nil ||
-			metrics.SpoolBytes == nil ||
-			metrics.WindowCurrentBatches == nil ||
-			metrics.WindowCurrentEvents == nil ||
-			metrics.WindowCurrentBytes == nil {
+		if metrics.ConnectionsActiveGauge == nil ||
+			metrics.WindowCurrentBatchesGauge == nil ||
+			metrics.WindowCurrentEventsGauge == nil ||
+			metrics.WindowCurrentBytesGauge == nil {
 			t.Error("One or more Gauge metrics are nil")
 		}
 	})
@@ -264,4 +245,38 @@ func TestMetricsMetricTypes(t *testing.T) {
 			t.Error("One or more Counter metrics are nil")
 		}
 	})
+}
+
+// TestNoOpMetrics 验证 NoOpMetrics 满足 Metrics 接口且零 panic。
+func TestNoOpMetrics(t *testing.T) {
+	var m Metrics = NoOpMetrics{}
+	// 调用所有方法，确认不 panic（no-op 应安全吞掉所有调用）。
+	m.ConnectionsActive().Set(1)
+	m.ConnectionsActive().Inc()
+	m.ConnectionsActive().Dec()
+	m.AuthSuccess().Inc()
+	m.AuthFailure().Inc()
+	m.BatchesSent().Add(1)
+	m.BatchesAcked().Inc()
+	m.BatchesNacked().Inc()
+	m.Throttled().Inc()
+	m.PartialAck().Inc()
+	m.ReplayCacheHits().Inc()
+	m.ReplayCacheEvictions().Inc()
+	m.HMACFailures().Inc()
+	m.DecryptFailures().Inc()
+	m.WindowCurrentBatches().Set(1)
+	m.WindowCurrentEvents().Set(1)
+	m.WindowCurrentBytes().Set(1)
+	m.ThrottleSeconds().Add(1)
+	m.BatchLatency().Observe(0.1)
+	m.BatchSizeEvents().Observe(10)
+	m.BatchSizeBytes().Observe(100)
+	m.ConnectionDuration().Observe(60)
+}
+
+// TestMBTAMetrics_ImplementsMetrics 验证 *MBTAMetrics 满足 Metrics 接口
+// （编译期断言已在 metrics.go 底部，此处为运行期可观测的显式检查）。
+func TestMBTAMetrics_ImplementsMetrics(t *testing.T) {
+	var _ Metrics = New(prometheus.NewRegistry())
 }

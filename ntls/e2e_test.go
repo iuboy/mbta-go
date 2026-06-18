@@ -49,7 +49,7 @@ func TestE2E_NTLS_SendBatch(t *testing.T) {
 		EncKeyFile:   "../testdata/ntls/sm2_enc_key.pem",
 		Auth:         core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
 		Policy: core.Policy{
-			SupportedCapabilities: []string{"codec_json", "cs_gm"},
+			SupportedCapabilities: []string{"codec_proto", "cs_gm"},
 			DefaultCodec:          corepb.Codec_CODEC_JSON,
 			DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 			CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_GM,
@@ -77,7 +77,7 @@ func TestE2E_NTLS_SendBatch(t *testing.T) {
 		},
 		AgentID:      "agent-1",
 		Token:        "test-token",
-		Capabilities: []string{"codec_json", "cs_gm"},
+		Capabilities: []string{"codec_proto", "cs_gm"},
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -117,7 +117,7 @@ func TestE2E_MBTATLS_SendBatch(t *testing.T) {
 		KeyFile:  "../testdata/certificates/server.key",
 		Auth:     core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
 		Policy: core.Policy{
-			SupportedCapabilities: []string{"codec_json", "cs_intl"},
+			SupportedCapabilities: []string{"codec_proto", "cs_intl"},
 			DefaultCodec:          corepb.Codec_CODEC_JSON,
 			DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 			CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
@@ -142,7 +142,7 @@ func TestE2E_MBTATLS_SendBatch(t *testing.T) {
 		},
 		AgentID:      "agent-1",
 		Token:        "test-token",
-		Capabilities: []string{"codec_json", "cs_intl"},
+		Capabilities: []string{"codec_proto", "cs_intl"},
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
