@@ -1,0 +1,11 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_DIRECTORY_MATCH   # proto 扁平放 proto/ 根，不强制 mbta/v1/ 目录
+breaking:
+  use:
+    - FILE                       # 检测字段号/enum 的不兼容变更

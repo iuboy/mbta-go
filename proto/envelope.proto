@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package mbta.v1;
+
+option go_package = "github.com/iuboy/mbta-go/corepb;mbta";
+
+// SecureEnvelope 是压缩、加密、认证的唯一承载点（core spec §5）。
+// payload/mac/nonce 为原生 bytes（去 base64）。HMAC 签名输入为
+// proto.MarshalOptions{Deterministic:true} 对 mac 清空后的 envelope（§5.3）。
+// 本 message 内禁止 map 字段，以保证 HMAC 跨实现确定性。
+message SecureEnvelope {
+  uint32 envelope_version = 1;
+  EnvelopeMsgType message_type = 2;
+  bytes session_id = 3;
+  bytes key_id = 4;
+  uint64 seq = 5;            // 仅 reliable BATCH
+  bytes chunk_id = 6;        // ULID 16B（仅 reliable BATCH；datagram 可选）
+  int64 created_at_unix_ms = 7;
+  Codec codec = 8;
+  Compression compression = 9;
+  CipherSuite cipher_suite = 10;   // 替代散装 hmac_algo/encryption（§8.2）
+  DeliveryMode delivery_mode = 11;
+  bytes nonce = 12;          // 显式 nonce，同密钥下禁止复用
+  bytes payload = 13;        // 加密/压缩后载荷
+  bytes mac = 14;            // HMAC 输出
+}
+
+enum EnvelopeMsgType {
+  ENVELOPE_MSG_TYPE_UNSPECIFIED = 0;
+  ENVELOPE_MSG_TYPE_BATCH = 1;
+  ENVELOPE_MSG_TYPE_DATAGRAM = 2;
+}
+
+enum Codec {
+  CODEC_UNSPECIFIED = 0;
+  CODEC_PROTO = 1;   // baseline 默认
+  CODEC_CBOR = 2;    // constrained
+  CODEC_JSON = 3;    // 仅调试
+}
+
+enum Compression {
+  COMPRESSION_UNSPECIFIED = 0;
+  COMPRESSION_ZSTD = 1;   // baseline 默认
+  COMPRESSION_LZ4 = 2;    // constrained / 低延迟
+  COMPRESSION_NONE = 3;
+  COMPRESSION_GZIP = 4;   // legacy
+}
+
+enum CipherSuite {
+  CIPHER_SUITE_UNSPECIFIED = 0;
+  CIPHER_SUITE_INTL = 1;   // SHA-256 + AES-256-GCM + ECDSA/Ed25519
+  CIPHER_SUITE_GM = 2;     // SM3 + SM4-GCM + SM2
+}
+
+enum DeliveryMode {
+  DELIVERY_MODE_UNSPECIFIED = 0;
+  DELIVERY_MODE_RELIABLE = 1;   // BATCH，at-least-once / effectively-once
+  DELIVERY_MODE_LOSSY = 2;      // DATAGRAM，at-most-once（§11.4）
+}

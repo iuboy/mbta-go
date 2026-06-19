@@ -1,0 +1,55 @@
+package core
+
+import (
+	"fmt"
+	"strings"
+)
+
+// MaxSignalFieldLen 是 SignalRecord 单个字符串字段的最大字节长度。取值保守
+// （远小于 maxEventBytes 256KB），用于在协议入口拒绝异常长输入，兼顾日志注入
+// 防护与内存放大抑制。
+const MaxSignalFieldLen = 4096
+
+// hasControlChars 报告 s 是否含非法控制字符。允许 \t \n \r 三种常见空白
+// （status_message 等字段可能合法地含多行文本）。
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// validateTextField 校验单个字符串字段的长度与控制字符。仅对非空字段调用；
+// 返回的 error 已包含字段名，便于定位。
+func validateTextField(name, val string) error {
+	if len(val) > MaxSignalFieldLen {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("%s exceeds maximum length %d", name, MaxSignalFieldLen))
+	}
+	if hasControlChars(val) {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("%s contains control characters", name))
+	}
+	return nil
+}
+
+// SanitizeForLog 清洗用于日志输出的网络来源字符串：截断超长值，把所有 C0 控制字符
+// （0x00-0x1F）和 DEL（0x7F）替换为空格。用于 slog 打印 reason 等不可信字段，
+// 防御日志注入（换行伪造日志行、ANSI 转义终端注入、null 截断等）。
+//
+// 注意：\n \r 也被替换——防御换行注入。slog 自身已对结构化值做转义，
+// 但当日志被转发到 syslog/journald/ELK 等外部系统时，中间层可能丢失转义。
+// SanitizeForLog 提供 defense-in-depth。
+func SanitizeForLog(s string) string {
+	if len(s) > MaxSignalFieldLen {
+		s = s[:MaxSignalFieldLen]
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+}

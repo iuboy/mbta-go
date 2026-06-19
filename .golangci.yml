@@ -1,0 +1,88 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    # 默认启用
+    - gosec
+    - goconst
+    - staticcheck
+    - errcheck
+    - unused
+    - ineffassign
+    - typecheck
+
+    # 代码质量
+    - revive
+    - gocritic
+    - gocognit
+    - maintidx
+    - godox
+    - unconvert
+    - prealloc
+    - predeclared
+
+    # 正确性 / 安全
+    - errname
+    - exhaustive
+    - nilerr
+    - sloglint
+    - noctx
+
+    # 代码风格
+    - misspell
+    - whitespace
+
+linters-settings:
+  gocognit:
+    min-complexity: 30
+
+  revive:
+    rules:
+      - name: exported
+      - name: unhandled-error
+
+  gocritic:
+    enabled-checks:
+      - hugeParam
+      - rangeExprCopy
+      - rangeValCopy
+
+  exhaustive:
+    default-signifies-exhaustive: true
+
+  sloglint:
+    no-mixed-args: true
+
+issues:
+  exclude-rules:
+    # SA5011: staticcheck doesn't track t.Fatal termination in tests
+    - linters: [staticcheck]
+      text: "SA5011"
+      path: _test\.go
+    # G115: integer overflow int→int32/uint32 — values bounded by protocol limits
+    - linters: [gosec]
+      text: "G115"
+    # G402: TLS InsecureSkipVerify — used in examples and tests
+    - linters: [gosec]
+      text: "G402"
+      path: (examples|v1/transport\.go|ntls/transport\.go|_test\.go)
+    # G104: error not checked — best-effort cleanup in defer/close paths
+    - linters: [gosec]
+      text: "G104"
+    # G304: file path from variable — validated by callers
+    - linters: [gosec]
+      text: "G304"
+    # G404: weak random number generator in test files
+    - linters: [gosec]
+      text: "G404"
+      path: _test\.go
+    # test files: relax rules
+    - linters: [gocognit, maintidx, gocritic, revive]
+      path: _test\.go
+    # examples: relax rules
+    - linters: [errcheck, revive]
+      path: examples/
+    # hugeParam: existing API contract, changing to pointer is a breaking change
+    - linters: [gocritic]
+      text: "hugeParam"

@@ -1,0 +1,35 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test / coverage
+*.out
+*.test
+coverage.html
+
+# Dependency
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Spool data (runtime)
+*.spool/
+
+# Examples binaries
+/examples/basic_client/basic_client
+/examples/basic_server/basic_server
+
+go.work
+go.work.sum
