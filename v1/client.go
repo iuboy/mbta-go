@@ -21,6 +21,7 @@ type ClientConfig struct {
 	Capabilities []string         // negotiated capabilities (e.g. gzip, hmac-sha256)
 	PickStrategy string           // stream selection strategy: "single" or "hash"
 	StreamCount  int              // hash 模式下打开的数据流数量（<=0 用 defaultStreamCount）
+	Metrics      core.Metrics     // 可选：客户端可观测性指标（nil=NoOp）
 }
 
 // Client is an MBTA agent that connects to a server and sends event batches.
@@ -31,12 +32,12 @@ type ClientConfig struct {
 // 可靠投递语义：仅在内存追踪已发送未 ACK 的 batch。进程崩溃/重连后未 ACK 的
 // batch 会丢失——持久化与重发由调用方负责。
 type Client struct {
-	core      *protocol.CoreClient
-	cfg       ClientConfig
-	conn      *Conn
+	core       *protocol.CoreClient
+	cfg        ClientConfig
+	conn       *Conn
 	controlStr *quic.Stream
-	picker    StreamPicker
-	mu        sync.Mutex // 保护 conn/controlStr/picker 的读写
+	picker     StreamPicker
+	mu         sync.Mutex // 保护 conn/controlStr/picker 的读写
 }
 
 // v1ClientTransport 实现 protocol.ClientTransport，封装 QUIC 多流传输。
@@ -120,6 +121,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		DefaultCodec:       corepb.Codec_CODEC_PROTO,
 		DefaultCipherSuite: corepb.CipherSuite_CIPHER_SUITE_INTL,
 		DefaultCompression: corepb.Compression_COMPRESSION_ZSTD,
+		Metrics:            cfg.Metrics,
 	})
 	cc.SetReadControlLoop(cc.ReadControlLoop)
 	cc.SetHeartbeatLoop(cc.HeartbeatLoop)

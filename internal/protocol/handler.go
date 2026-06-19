@@ -34,11 +34,11 @@ const CodeEnvelopeAlgoMismatch = "envelope_algo_mismatch"
 
 // HandlerConfig 是 CoreHandler 的配置（传输无关）。
 type HandlerConfig struct {
-	Auth     core.TokenValidator
-	Policy   core.Policy
-	Sink     core.EventSink
-	Metrics  core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreHandler）
-	ServerID string
+	Auth         core.TokenValidator
+	Policy       core.Policy
+	Sink         core.EventSink
+	Metrics      core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreHandler）
+	ServerID     string
 	SessionStore *core.SessionStore // 0-RTT resumption（可选，nil = 不支持 early_data）
 }
 
@@ -92,6 +92,7 @@ func NewCoreHandler(tr Transport, cfg HandlerConfig) *CoreHandler {
 		batchSem: make(chan struct{}, sem),
 	}
 	h.lastPressure.Store(core.PressureNormal)
+	h.replay.SetMetrics(cfg.Metrics)
 	return h
 }
 

@@ -63,6 +63,7 @@ type ReplayCache struct {
 	maxSize        int
 	processingList *list.List // Processing 条目，FIFO（最早插入在队首）
 	doneList       *list.List // 已完成条目，FIFO（最早完成在队首），淘汰优先取此
+	metrics        Metrics    // 可选：驱逐计数上报（nil=不上报）
 }
 
 const defaultReplayMaxSize = 50000
@@ -91,6 +92,9 @@ func replayKey(agentID, chunkID string) string {
 	return agentID + "\x00" + chunkID
 }
 
+// SetMetrics 注入可观测性接口，用于上报缓存驱逐次数。可选；nil 表示不上报。
+func (rc *ReplayCache) SetMetrics(m Metrics) { rc.metrics = m }
+
 // SeenOrAdd checks if a (agentID, chunkID) pair has been seen. Returns the entry if so.
 // If not seen, creates a new Processing entry and returns nil.
 //
@@ -106,12 +110,14 @@ func (rc *ReplayCache) SeenOrAdd(agentID, chunkID string) *ReplayEntry {
 	}
 
 	// 容量满时淘汰：优先已完成条目，O(1)。
+	var evicted int
 	for len(rc.entries) >= rc.maxSize {
 		if rc.doneList.Len() > 0 {
 			el := rc.doneList.Front()
 			n := el.Value.(*replayNode)
 			rc.doneList.Remove(el)
 			delete(rc.entries, n.key)
+			evicted++
 			continue
 		}
 		// 全部为 Processing：驱逐最早的 Processing 条目。
@@ -123,11 +129,15 @@ func (rc *ReplayCache) SeenOrAdd(agentID, chunkID string) *ReplayEntry {
 		n := el.Value.(*replayNode)
 		rc.processingList.Remove(el)
 		delete(rc.entries, n.key)
+		evicted++
 		slog.Warn("replay cache evicted processing entry",
 			"evicted_key", n.key,
 			"cache_size", len(rc.entries),
 			"max_size", rc.maxSize,
 		)
+	}
+	if evicted > 0 && rc.metrics != nil {
+		rc.metrics.ReplayCacheEvictions().Add(float64(evicted))
 	}
 
 	n := &replayNode{key: key, entry: ReplayEntry{Status: ReplayProcessing}}

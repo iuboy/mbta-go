@@ -79,6 +79,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		DefaultCodec:       corepb.Codec_CODEC_PROTO,
 		DefaultCipherSuite: corepb.CipherSuite_CIPHER_SUITE_GM,
 		DefaultCompression: corepb.Compression_COMPRESSION_ZSTD,
+		Metrics:            cfg.Metrics,
 	})
 	// ntls 单连接无 SetAuthed 门禁，onAuthed 留空。
 	cc.SetReadControlLoop(cc.ReadControlLoop)

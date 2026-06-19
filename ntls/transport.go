@@ -74,7 +74,8 @@ type ClientConfig struct {
 	AgentID      string
 	Hostname     string
 	Token        string
-	Capabilities []string // 客户端能力（HELLO 携带，与服务端协商）
+	Capabilities []string     // 客户端能力（HELLO 携带，与服务端协商）
+	Metrics      core.Metrics // 可选：客户端可观测性指标（nil=NoOp）
 }
 
 // --- TLCP 配置构建 ---

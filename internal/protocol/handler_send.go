@@ -47,6 +47,7 @@ func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code, 
 		slog.Warn("write throttle failed", "error", err)
 	}
 	h.config.Metrics.Throttled().Inc()
+	h.config.Metrics.ThrottleSeconds().Add(float64(retryDelayMs) / 1000)
 }
 
 // failAuth 发 AUTH_FAIL 并轮换 challengeNonce（每次在线验证用新挑战）。

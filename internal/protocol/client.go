@@ -50,6 +50,10 @@ type CoreClientConfig struct {
 	DefaultCodec       corepb.Codec       // 通常 CODEC_CODEC_PROTO
 	DefaultCipherSuite corepb.CipherSuite // intl / gm，跟随 binding
 	DefaultCompression corepb.Compression // 通常 COMPRESSION_ZSTD
+
+	// Metrics 可选的可观测性接口（nil 回退 NoOpMetrics）。客户端侧指标
+	// （BatchesSent/BatchLatency）由此上报。
+	Metrics core.Metrics
 }
 
 // ackTask 是排队等待执行的用户 ACK/NACK 回调。
@@ -72,9 +76,10 @@ const ackQueueSize = 1024
 // 可靠投递语义：CoreClient 仅在内存追踪已发送未 ACK 的 batch（pendingAcks/inflight）。
 // 进程崩溃/重连后未 ACK 的 batch 会丢失——持久化与重发由调用方负责。
 type CoreClient struct {
-	tr  ClientTransport
-	cfg CoreClientConfig
-	sm  *core.StateMachine
+	tr      ClientTransport
+	cfg     CoreClientConfig
+	metrics core.Metrics
+	sm      *core.StateMachine
 
 	// 协商结果与密钥（握手后填充）
 	negotiated     *core.NegotiateResult
@@ -122,9 +127,9 @@ type CoreClient struct {
 	connErr   error         // closeOnce.Do 内捕获，作为 Close() 返回值
 
 	// 可注入钩子（binding 提供）：
-	onAuthed        func(context.Context)         // AUTH_OK 后调用（v1: SetAuthed）；nil=no-op
-	heartbeatLoopFn func(context.Context)         // 心跳循环（PING 写依赖 transport）；nil=不启心跳
-	readControlFn   func(context.Context)         // readControlLoop（control 帧分发依赖 binding handle*）
+	onAuthed        func(context.Context) // AUTH_OK 后调用（v1: SetAuthed）；nil=no-op
+	heartbeatLoopFn func(context.Context) // 心跳循环（PING 写依赖 transport）；nil=不启心跳
+	readControlFn   func(context.Context) // readControlLoop（control 帧分发依赖 binding handle*）
 }
 
 // pendingBatch 记录一个待 ACK 的 batch 元信息。
@@ -138,16 +143,22 @@ type pendingBatch struct {
 
 // NewCoreClient 创建共享协议核心。tr 由各 binding 提供。
 func NewCoreClient(tr ClientTransport, cfg CoreClientConfig) *CoreClient {
+	// Metrics 为 nil（含 typed-nil，如 (*MBTAMetrics)(nil) 赋给接口）时回退到
+	// NoOpMetrics，客户端无需逐处 nil 检查。与 NewCoreHandler 对称。
+	if isNilMetrics(cfg.Metrics) {
+		cfg.Metrics = core.NoOpMetrics{}
+	}
 	return &CoreClient{
-		tr:        tr,
-		cfg:       cfg,
-		sm:        core.NewStateMachine(),
-		seq:       core.NewSeqGenerator(),
-		inflight:  &core.Inflight{},
-		window:    core.NewWindow(100, 10000, 16*1024*1024),
-		throttle:  &core.ThrottleState{},
+		tr:         tr,
+		cfg:        cfg,
+		metrics:    cfg.Metrics,
+		sm:         core.NewStateMachine(),
+		seq:        core.NewSeqGenerator(),
+		inflight:   &core.Inflight{},
+		window:     core.NewWindow(100, 10000, 16*1024*1024),
+		throttle:   &core.ThrottleState{},
 		ackTimeout: 5 * time.Minute,
-		drainCh:   make(chan struct{}, 1),
+		drainCh:    make(chan struct{}, 1),
 	}
 }
 

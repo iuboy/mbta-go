@@ -52,6 +52,7 @@ func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatc
 		return "", writeErr
 	}
 
+	c.metrics.BatchesSent().Inc()
 	slog.Debug("batch sent", "seq", seq, "chunk", chunkID.String(), "events", batchEvents)
 	return chunkID.String(), nil
 }

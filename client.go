@@ -51,6 +51,9 @@ type ClientConfig struct {
 	// Version-specific configurations
 	V1Creds   *v1.ClientCredentials
 	NTLSCreds *ntls.ClientCredentials
+
+	// Metrics 可选的可观测性接口（nil=NoOp）。客户端侧指标（BatchesSent/BatchLatency）。
+	Metrics *core.MBTAMetrics
 }
 
 // NewClient creates a single-version MBTA client.
@@ -232,6 +235,7 @@ func (c *Client) initV1Client() (versionedClient, error) {
 		AgentID:  c.cfg.AgentID,
 		Hostname: c.cfg.Hostname,
 		Token:    c.cfg.Token,
+		Metrics:  c.cfg.Metrics,
 	}
 
 	client, err := v1.NewClient(cfg)
@@ -257,6 +261,7 @@ func (c *Client) initNTLSClient() (versionedClient, error) {
 		AgentID:     c.cfg.AgentID,
 		Hostname:    c.cfg.Hostname,
 		Token:       c.cfg.Token,
+		Metrics:     c.cfg.Metrics,
 	}
 	client, err := ntls.NewClient(cfg)
 	if err != nil {
@@ -338,6 +343,15 @@ func WithV1Credentials(creds v1.ClientCredentials) ClientOption {
 func WithClientNTLS(cfg ntls.ClientCredentials) ClientOption {
 	return func(cc *ClientConfig) error {
 		cc.NTLSCreds = &cfg
+		return nil
+	}
+}
+
+// WithClientMetrics configures the metrics collector for client-side observability
+// (BatchesSent/BatchLatency). Optional; nil uses a no-op collector.
+func WithClientMetrics(metrics *core.MBTAMetrics) ClientOption {
+	return func(cc *ClientConfig) error {
+		cc.Metrics = metrics
 		return nil
 	}
 }

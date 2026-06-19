@@ -48,6 +48,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	batchPayload, err := core.Open(env, aeadKey)
 	if err != nil {
 		slog.Debug("envelope open failed", "error", err)
+		h.config.Metrics.DecryptFailures().Inc()
 		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "envelope_open_error", "envelope could not be opened", true)
 		return
 	}
@@ -86,6 +87,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 
 	// Replay 去重。
 	if existing := h.replay.SeenOrAdd(h.agentID, chunkIDText); existing != nil {
+		h.config.Metrics.ReplayCacheHits().Inc()
 		h.inflight.Remove(batchEvents, batchBytes)
 		ackMode := corepb.AckMode_ACK_MODE_ACCEPTED
 		if existing.Status == core.ReplayDurable {
@@ -120,6 +122,7 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 	batchPayload, err := core.Open(env, aeadKey)
 	if err != nil {
 		slog.Debug("datagram open failed", "error", err)
+		h.config.Metrics.DecryptFailures().Inc()
 		return
 	}
 	var batchMsg corepb.DatagramMessage

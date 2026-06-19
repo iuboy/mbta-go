@@ -75,6 +75,7 @@ func (c *CoreClient) handleAck(payload []byte) {
 		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
 			c.inflight.Remove(pb.Events, pb.Bytes)
+			c.metrics.BatchLatency().Observe(time.Since(pb.SentAt).Seconds())
 		}
 	}
 
