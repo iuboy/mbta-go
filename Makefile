@@ -25,7 +25,7 @@ test:
 
 ## test-conf: Run conformance tests only (FakeTransport protocol verification)
 test-conf:
-	$(GOCMD) test $(GOFLAGS) -race ./conformance/
+	$(GOCMD) test $(GOFLAGS) -race ./internal/conformance/
 
 ## test-int: Run integration/e2e tests (requires certificates + ports)
 test-int:

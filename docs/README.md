@@ -55,7 +55,7 @@
 | `internal/binding` | ✅ v1 + ntls 共享握手编排 | — |
 | `v1` (QUIC) | ✅ quicTransport + server + client r2 + 0-RTT data（early_data） | ✅ QUIC e2e（握手+SendBatch+sink） |
 | `ntls` (TCP+TLCP/TLS1.3) | ✅ tcpTransport + server + client r2 + mbta-tls/1（TLSMode 分支） | ✅ TLCP e2e + mbta-tls/1 TLS1.3 e2e |
-| `conformance` | ✅ codec 协商 + algo_mismatch + handler + early_data | ✅ |
+| `internal/conformance` | ✅ codec 协商 + algo_mismatch + handler + early_data（FakeTransport，传输无关） | ✅ |
 
 ### 待后续
 - 持久化 spool（跨进程崩溃的 at-least-once；当前为内存 pendingAcks，见 [performance-optimization.md](./performance-optimization.md) §七）
