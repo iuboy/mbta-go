@@ -44,7 +44,7 @@ func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatc
 	batchBytes := int64(len(batchPayload))
 
 	// --- 锁外：Build envelope（gzip+HMAC）+ marshal env + 网络写 ---
-	if writeErr := c.buildAndSend(ctx, seq, chunkID, tag, source, batchPayload); writeErr != nil {
+	if writeErr := c.buildAndSend(ctx, seq, chunkID, batchPayload); writeErr != nil {
 		c.inflight.Remove(batchEvents, batchBytes)
 		if _, ok := c.pendingAcks.LoadAndDelete(chunkID.String()); ok {
 			c.pendingCount.Add(-1)
@@ -95,8 +95,6 @@ func (c *CoreClient) reserveInflight(tag, source string, batchJSON []byte, batch
 	return seq, chunkID, batchPayload, nil
 }
 
-// buildAndSend 在锁外完成 envelope 构建（gzip+HMAC）、envelope marshal 与网络写。
-// BATCH 写经 c.tr.WriteFrame（v1 走 picker 多流，ntls 走单连接），由 binding 实现。
 // codecForMarshal 返回当前应使用的 SignalBatch 编码 codec：优先协商结果，
 // 否则回退到 binding 注入的 cfg.DefaultCodec。
 func (c *CoreClient) codecForMarshal() corepb.Codec {
@@ -108,7 +106,7 @@ func (c *CoreClient) codecForMarshal() corepb.Codec {
 
 // buildAndSend 在锁外完成 envelope 构建（gzip+HMAC）、envelope marshal 与网络写。
 // BATCH 写经 c.tr.WriteFrame（v1 走 picker 多流，ntls 走单连接），由 binding 实现。
-func (c *CoreClient) buildAndSend(ctx context.Context, seq uint64, chunkID core.ChunkID, tag, source string, batchPayload []byte) error {
+func (c *CoreClient) buildAndSend(ctx context.Context, seq uint64, chunkID core.ChunkID, batchPayload []byte) error {
 	cs := c.cfg.DefaultCipherSuite
 	codec := c.cfg.DefaultCodec
 	comp := c.cfg.DefaultCompression

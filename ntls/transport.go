@@ -320,7 +320,7 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = l.Close()
 	}()
 
-	return binding.AcceptLoop[net.Conn](ctx, s.connSem,
+	return binding.AcceptLoop(ctx, s.connSem,
 		func(ctx context.Context) (net.Conn, error) { return l.Accept() },
 		func(ctx context.Context, conn net.Conn) (protocol.Transport, error) {
 			return newTCPTransport(conn), nil
