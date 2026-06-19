@@ -53,12 +53,3 @@ func ChunkIDFromBytes(b []byte) (ChunkID, error) {
 	copy(c[:], b)
 	return c, nil
 }
-
-// ChunkIDFromString 从 ULID 文本（26 字符）解析。
-func ChunkIDFromString(s string) (ChunkID, error) {
-	u, err := ulid.Parse(s)
-	if err != nil {
-		return ChunkID{}, err
-	}
-	return ChunkID(u), nil
-}

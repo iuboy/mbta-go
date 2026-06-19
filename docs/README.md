@@ -60,4 +60,3 @@
 ### 待后续
 - 持久化 spool（跨进程崩溃的 at-least-once；当前为内存 pendingAcks，见 [performance-optimization.md](./performance-optimization.md) §七）
 - mbta-quic-binding.md（QUIC binding 规范文档）
-- 旧 `types.go` legacy 字符串常量清理（r2 用 corepb enum + capability registry）

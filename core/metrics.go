@@ -63,7 +63,7 @@ type Metrics interface {
 	ThrottleSeconds() Counter
 
 	// 关键 SLI 直方图
-	BatchLatency() Histogram   // SendBatch → ACK latency
+	BatchLatency() Histogram    // SendBatch → ACK latency
 	BatchSizeEvents() Histogram // events per batch distribution
 	BatchSizeBytes() Histogram  // bytes per batch distribution
 	ConnectionDuration() Histogram
@@ -280,10 +280,10 @@ func (noopCounter) Add(float64) {}
 
 type noopGauge struct{}
 
-func (noopGauge) Set(float64)  {}
-func (noopGauge) Inc()         {}
-func (noopGauge) Dec()         {}
-func (noopGauge) Add(float64)  {}
+func (noopGauge) Set(float64) {}
+func (noopGauge) Inc()        {}
+func (noopGauge) Dec()        {}
+func (noopGauge) Add(float64) {}
 
 type noopHistogram struct{}
 

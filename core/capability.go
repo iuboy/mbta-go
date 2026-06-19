@@ -63,19 +63,6 @@ func FilterUnknownStable(advertised []string) []string {
 	return unknown
 }
 
-// IntersectStable 返回 advertised 中本端也支持（已注册 stable）的 capability，
-// 用于 HELLO_ACK 选定公共子集（自动降级，core spec §12.1）。
-// experimental capability 始终不入选（不计入一致性）。
-func IntersectStable(advertised []string) []string {
-	var sel []string
-	for _, c := range advertised {
-		if IsStableCapability(c) {
-			sel = append(sel, c)
-		}
-	}
-	return sel
-}
-
 // Policy 控制 server 接受的 capability 与默认算法（r2 capability-driven）。
 // 默认 CipherSuite 跟随传输 binding 合规语境（core spec §8.3）。
 type Policy struct {

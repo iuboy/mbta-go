@@ -285,6 +285,17 @@ func (c *Conn) CloseWithError(code quic.ApplicationErrorCode, reason string) err
 
 // Dial establishes a QUIC connection to an MBTA server.
 func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
+	return dial(ctx, cfg, false)
+}
+
+// DialEarly establishes a 0-RTT QUIC connection for session resumption (core spec §11.6).
+// Requires ClientSessionCache populated from a previous Dial (TLS session ticket).
+func DialEarly(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
+	return dial(ctx, cfg, true)
+}
+
+// dial 建立到 MBTA server 的 QUIC 连接；early=true 走 0-RTT 恢复路径（core spec §11.6）。
+func dial(ctx context.Context, cfg QUICClientConfig, early bool) (*Conn, error) {
 	tlsCfg, err := buildClientTLS(cfg.Credentials)
 	if err != nil {
 		return nil, err
@@ -308,60 +319,25 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 	if err != nil {
 		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "resolve address", err)
 	}
-
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen UDP", err)
 	}
 
-	qc, err := quic.Dial(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
+	var (
+		qc  *quic.Conn
+		msg string
+	)
+	if early {
+		qc, err = quic.DialEarly(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
+		msg = "dial early (0-RTT)"
+	} else {
+		qc, err = quic.Dial(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
+		msg = "dial QUIC"
+	}
 	if err != nil {
-		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to listen error
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial QUIC", err)
-	}
-
-	cs := qc.ConnectionState().TLS
-	return &Conn{
-		QC:         qc,
-		RemoteAddr: qc.RemoteAddr(),
-		TLSState:   cs,
-	}, nil
-}
-
-// DialEarly establishes a 0-RTT QUIC connection for session resumption (core spec §11.6).
-// Requires ClientSessionCache populated from a previous Dial (TLS session ticket).
-func DialEarly(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
-	tlsCfg, err := buildClientTLS(cfg.Credentials)
-	if err != nil {
-		return nil, err
-	}
-
-	idleTimeout := cfg.IdleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = defaultIdleTimeout
-	}
-	quicCfg := &quic.Config{
-		MaxIdleTimeout:                 idleTimeout,
-		KeepAlivePeriod:                idleTimeout / 3,
-		InitialStreamReceiveWindow:     initialStreamWnd,
-		InitialConnectionReceiveWindow: initialConnectionWnd,
-		MaxStreamReceiveWindow:         maxStreamWnd,
-		MaxConnectionReceiveWindow:     maxConnectionWnd,
-	}
-
-	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Server)
-	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "resolve address", err)
-	}
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen UDP", err)
-	}
-
-	qc, err := quic.DialEarly(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
-	if err != nil {
-		_ = udpConn.Close() //nolint:errcheck
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial early (0-RTT)", err)
+		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to dial error
+		return nil, core.WrapError(core.NumTransport, core.CodeTransport, msg, err)
 	}
 
 	cs := qc.ConnectionState().TLS

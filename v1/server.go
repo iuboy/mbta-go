@@ -60,7 +60,7 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = l.Close()
 	}()
 
-	return binding.AcceptLoop[*Conn](ctx, s.connSem,
+	return binding.AcceptLoop(ctx, s.connSem,
 		func(ctx context.Context) (*Conn, error) {
 			return s.listener.Accept(ctx)
 		},

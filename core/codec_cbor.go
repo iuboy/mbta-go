@@ -1,8 +1,8 @@
 package core
 
 import (
-	corepb "github.com/iuboy/mbta-go/corepb"
 	"github.com/fxamacker/cbor/v2"
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
 // cborCodec 以 CBOR（RFC 8949）编解码 SignalBatch（core spec §6.3 constrained 场景）。
