@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"io"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -12,7 +11,7 @@ import (
 func init() {
 	// 压测期间 ReplayCache 的 Processing 淘汰会打 slog.Warn；规模级下百万次日志会
 	// 严重拖慢并污染输出。统一丢弃日志，保证压测只度量算法本身。
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	slog.SetDefault(slog.New(slog.DiscardHandler))
 }
 
 // 本文件做规模级压测（1万 / 10万 / 百万），重点验证本次优化的两个 O(n)→O(1) 退化点：

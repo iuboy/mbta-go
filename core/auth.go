@@ -161,6 +161,6 @@ func ComputeChallengeResponse(token, nonce string, cs corepb.CipherSuite) []byte
 	} else {
 		h = hmac.New(sha256.New, []byte(token))
 	}
-	h.Write([]byte(nonce))
+	_, _ = h.Write([]byte(nonce)) // hash.Hash.Write 永不返回错误 // #nosec G104 -- hash.Hash.Write 永不返回错误
 	return h.Sum(nil)
 }

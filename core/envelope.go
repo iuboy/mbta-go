@@ -177,7 +177,7 @@ func canonicalMAC(cs corepb.CipherSuite, hmacKey []byte, env *SecureEnvelope) ([
 	if err != nil {
 		return nil, WrapError(NumEnvelope, CodeEnvelope, "canonical marshal", err)
 	}
-	h.Write(wire)
+	_, _ = h.Write(wire) // hash.Hash.Write 永不返回错误
 	return h.Sum(nil), nil
 }
 
@@ -218,7 +218,7 @@ func compress(c corepb.Compression, src []byte) ([]byte, error) {
 		w := gzipWriterPool.Get().(*gzip.Writer)
 		w.Reset(&buf)
 		if _, err := w.Write(src); err != nil {
-			w.Close()
+			_ = w.Close() // best-effort cleanup；返回的 write error 优先
 			gzipWriterPool.Put(w)
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip compress", err)
 		}

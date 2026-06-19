@@ -234,7 +234,7 @@ func Dial(ctx context.Context, cfg *ClientConfig) (net.Conn, error) {
 				ch <- result{nil, err}
 				return
 			}
-			c, err := tls.Dial("tcp", cfg.Server, tc)
+			c, err := (&tls.Dialer{Config: tc}).DialContext(ctx, "tcp", cfg.Server)
 			ch <- result{c, err}
 			return
 		}
