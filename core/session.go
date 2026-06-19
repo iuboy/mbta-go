@@ -31,6 +31,13 @@ const (
 	StateClosed
 )
 
+// state 字符串常量：State 与 ServerState 的 String() 共用，避免重复字面量。
+const (
+	stateStrReady    = "READY"
+	stateStrDraining = "DRAINING"
+	stateStrClosed   = "CLOSED"
+)
+
 func (s State) String() string {
 	switch s {
 	case StateDisconnected:
@@ -46,11 +53,11 @@ func (s State) String() string {
 	case StateAuthSent:
 		return "AUTH_SENT"
 	case StateReady:
-		return "READY"
+		return stateStrReady
 	case StateDraining:
-		return "DRAINING"
+		return stateStrDraining
 	case StateClosed:
-		return "CLOSED"
+		return stateStrClosed
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", s)
 	}
@@ -100,11 +107,11 @@ func (s ServerState) String() string {
 	case ServerStateAuthWait:
 		return "AUTH_WAIT"
 	case ServerStateReady:
-		return "READY"
+		return stateStrReady
 	case ServerStateDraining:
-		return "DRAINING"
+		return stateStrDraining
 	case ServerStateClosed:
-		return "CLOSED"
+		return stateStrClosed
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", s)
 	}
