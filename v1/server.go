@@ -16,8 +16,9 @@ type ServerConfig struct {
 	Policy             core.Policy
 	ServerID           string
 	Metrics            *core.MBTAMetrics
-	Sink               core.EventSink // 上层注入的事件投递接口
-	MaxConcurrentConns int            // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns
+	Sink               core.EventSink          // 上层注入的事件投递接口
+	RedirectChecker    core.RedirectChecker    // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选）
+	MaxConcurrentConns int                     // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns
 }
 
 // Server accepts and handles MBTA agent connections.
@@ -34,11 +35,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.ServerID = core.NewChunkID().String()
 	}
 	hcfg := binding.HandlerConfig{
-		Auth:     cfg.Auth,
-		Policy:   cfg.Policy,
-		Sink:     cfg.Sink,
-		Metrics:  cfg.Metrics,
-		ServerID: cfg.ServerID,
+		Auth:            cfg.Auth,
+		Policy:          cfg.Policy,
+		Sink:            cfg.Sink,
+		Metrics:         cfg.Metrics,
+		ServerID:        cfg.ServerID,
+		RedirectChecker: cfg.RedirectChecker,
 	}
 	return &Server{
 		Server: binding.NewServer[*Listener, *Conn](cfg.MaxConcurrentConns, hcfg),

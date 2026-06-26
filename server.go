@@ -35,10 +35,11 @@ type ServerConfig struct {
 	EnableNTLS bool
 
 	// Shared configuration (all versions)
-	Auth    core.TokenValidator
-	Policy  core.Policy
-	Sink    core.EventSink
-	Metrics *core.MBTAMetrics
+	Auth            core.TokenValidator
+	Policy          core.Policy
+	Sink            core.EventSink
+	Metrics         *core.MBTAMetrics
+	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
 
 	// V1 specific configuration
 	V1QUIC v1.QUICServerConfig
@@ -153,11 +154,12 @@ func (s *Server) Close() error {
 // initV1Server initializes the V1 server.
 func (s *Server) initV1Server() error {
 	cfg := v1.ServerConfig{
-		Transport: s.cfg.V1QUIC,
-		Auth:      s.cfg.Auth,
-		Policy:    s.cfg.Policy,
-		Sink:      s.cfg.Sink,
-		Metrics:   s.cfg.Metrics,
+		Transport:       s.cfg.V1QUIC,
+		Auth:            s.cfg.Auth,
+		Policy:          s.cfg.Policy,
+		Sink:            s.cfg.Sink,
+		Metrics:         s.cfg.Metrics,
+		RedirectChecker: s.cfg.RedirectChecker,
 	}
 
 	v1srv, err := v1.NewServer(cfg)
@@ -175,6 +177,7 @@ func (s *Server) initNTLSServer() error {
 	cfg.Policy = s.cfg.Policy
 	cfg.Sink = s.cfg.Sink
 	cfg.Metrics = s.cfg.Metrics
+	cfg.RedirectChecker = s.cfg.RedirectChecker
 
 	server, err := ntls.NewServer(cfg)
 	if err != nil {
@@ -242,6 +245,17 @@ func WithEventSink(sink core.EventSink) ServerOption {
 func WithMetrics(metrics *core.MBTAMetrics) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.Metrics = metrics
+		return nil
+	}
+}
+
+// WithRedirectChecker sets the HA redirect checker. After a client authenticates,
+// the server calls the checker; if it returns ok=true (this replica is a follower,
+// not the leader) the server sends a TypeRedirect frame and closes the connection,
+// steering the client to the elected leader. Nil (default) disables redirect.
+func WithRedirectChecker(checker core.RedirectChecker) ServerOption {
+	return func(sc *ServerConfig) error {
+		sc.RedirectChecker = checker
 		return nil
 	}
 }

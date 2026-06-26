@@ -34,12 +34,13 @@ const CodeEnvelopeAlgoMismatch = "envelope_algo_mismatch"
 
 // HandlerConfig 是 CoreHandler 的配置（传输无关）。
 type HandlerConfig struct {
-	Auth         core.TokenValidator
-	Policy       core.Policy
-	Sink         core.EventSink
-	Metrics      core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreHandler）
-	ServerID     string
-	SessionStore *core.SessionStore // 0-RTT resumption（可选，nil = 不支持 early_data）
+	Auth            core.TokenValidator
+	Policy          core.Policy
+	Sink            core.EventSink
+	Metrics         core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreHandler）
+	ServerID        string
+	SessionStore    *core.SessionStore  // 0-RTT resumption（可选，nil = 不支持 early_data）
+	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
 }
 
 // CoreHandler 是 server 端协议状态机核心，仅依赖 Transport 接口，

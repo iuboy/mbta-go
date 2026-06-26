@@ -2,6 +2,7 @@ package binding
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/iuboy/mbta-go/core"
@@ -10,11 +11,12 @@ import (
 
 // HandlerConfig 是 binding 层共享的 handler 配置，各 binding 从自己的 ServerConfig 构造。
 type HandlerConfig struct {
-	Auth     core.TokenValidator
-	Policy   core.Policy
-	Sink     core.EventSink
-	Metrics  *core.MBTAMetrics
-	ServerID string
+	Auth            core.TokenValidator
+	Policy          core.Policy
+	Sink            core.EventSink
+	Metrics         *core.MBTAMetrics
+	ServerID        string
+	RedirectChecker core.RedirectChecker
 }
 
 // AcceptLoop 是泛型 accept 循环骨架，消除 v1/ntls 的 ~50 行重复。
@@ -60,14 +62,21 @@ func AcceptLoop[C any](
 				return
 			}
 			h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-				Auth:     hcfg.Auth,
-				Policy:   hcfg.Policy,
-				Sink:     hcfg.Sink,
-				Metrics:  hcfg.Metrics,
-				ServerID: hcfg.ServerID,
+				Auth:            hcfg.Auth,
+				Policy:          hcfg.Policy,
+				Sink:            hcfg.Sink,
+				Metrics:         hcfg.Metrics,
+				ServerID:        hcfg.ServerID,
+				RedirectChecker: hcfg.RedirectChecker,
 			})
 			if err := h.Handle(ctx); err != nil {
-				slog.Error("handler error", "error", err)
+				// ErrRedirected is normal HA flow (follower steered a client to
+				// the leader), not a handler error — suppress the noisy log.
+				if errors.Is(err, core.ErrRedirected) {
+					slog.Debug("connection redirected to leader")
+				} else {
+					slog.Error("handler error", "error", err)
+				}
 			}
 		}(conn)
 	}
