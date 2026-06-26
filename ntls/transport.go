@@ -8,15 +8,14 @@ package ntls
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
+	"errors"
 	"log/slog"
 	"net"
-	"os"
-	"sync"
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/binding"
 	"github.com/iuboy/mbta-go/internal/protocol"
+	"github.com/iuboy/mbta-go/internal/tlshelper"
 	"github.com/iuboy/pollux-go/cert"
 	"github.com/iuboy/pollux-go/tlcp"
 )
@@ -130,7 +129,7 @@ func buildClientTLCP(cfg *ClientCredentials) (*tlcp.Config, error) {
 
 // buildServerTLS13 构建 TLS 1.3 server 配置（国际单证书）。
 func buildServerTLS13(cfg *ServerConfig) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	cert, err := tlshelper.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load TLS1.3 cert/key", err)
 	}
@@ -139,17 +138,11 @@ func buildServerTLS13(cfg *ServerConfig) (*tls.Config, error) {
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{ALPNProtocolTLS},
 	}
-	if cfg.CAFile != "" {
-		pool := x509.NewCertPool()
-		caData, err := os.ReadFile(cfg.CAFile)
-		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "read CA file", err)
-		}
-		if !pool.AppendCertsFromPEM(caData) {
-			return nil, core.NewError(core.NumTLS, core.CodeTLS, "failed to append CA")
-		}
+	if pool, err := tlshelper.LoadCertPool(cfg.CAFile); err == nil {
 		tc.ClientCAs = pool
 		tc.ClientAuth = tls.RequireAndVerifyClientCert
+	} else if !errors.Is(err, tlshelper.ErrNoCAFile) {
+		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load server CA", err)
 	}
 	return tc, nil
 }
@@ -166,19 +159,13 @@ func buildClientTLS13(cfg *ClientCredentials) (*tls.Config, error) {
 		InsecureSkipVerify: cfg.InsecureSkipVerify,
 		ClientSessionCache: tls.NewLRUClientSessionCache(8), // TLS 1.3 session resumption（降低 resumption 握手开销）
 	}
-	if cfg.CAFile != "" {
-		pool := x509.NewCertPool()
-		caData, err := os.ReadFile(cfg.CAFile)
-		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "read CA file", err)
-		}
-		if !pool.AppendCertsFromPEM(caData) {
-			return nil, core.NewError(core.NumTLS, core.CodeTLS, "failed to append CA")
-		}
+	if pool, err := tlshelper.LoadCertPool(cfg.CAFile); err == nil {
 		tc.RootCAs = pool
+	} else if !errors.Is(err, tlshelper.ErrNoCAFile) {
+		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client CA", err)
 	}
 	if cfg.CertFile != "" && cfg.KeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		cert, err := tlshelper.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
 			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client cert/key", err)
 		}
@@ -265,10 +252,8 @@ func Dial(ctx context.Context, cfg *ClientConfig) (net.Conn, error) {
 // --- Server ---
 
 type Server struct {
-	config   ServerConfig
-	mu       sync.Mutex
-	listener *Listener
-	connSem  chan struct{}
+	*binding.Server[*Listener, net.Conn]
+	config ServerConfig
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -287,62 +272,36 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.ServerID == "" {
 		cfg.ServerID = core.NewChunkID().String()
 	}
-	maxConns := cfg.MaxConcurrentConns
-	if maxConns <= 0 {
-		maxConns = binding.DefaultMaxConcurrentConns
+	hcfg := binding.HandlerConfig{
+		Auth:     cfg.Auth,
+		Policy:   cfg.Policy,
+		Sink:     cfg.Sink,
+		Metrics:  cfg.Metrics,
+		ServerID: cfg.ServerID,
 	}
-	return &Server{config: cfg, connSem: make(chan struct{}, maxConns)}, nil
+	return &Server{
+		Server: binding.NewServer[*Listener, net.Conn](cfg.MaxConcurrentConns, hcfg),
+		config: cfg,
+	}, nil
 }
 
 func (s *Server) Addr() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.listener == nil {
-		return ""
-	}
-	return s.listener.Addr().String()
+	return s.Server.Addr(func(l *Listener) net.Addr { return l.Addr() })
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	l, err := Listen(&s.config)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.listener = l
-	s.mu.Unlock()
-	slog.Info("MBTA-NTLS server listening", "addr", l.Addr().String())
-
-	// ctx 取消时关闭 listener：被 l.Accept() 阻塞的循环因此解除并退出。
-	// 监听器 Close 幂等，与 Server.Close 并发调用安全。
-	go func() {
-		<-ctx.Done()
-		_ = l.Close()
-	}()
-
-	return binding.AcceptLoop(ctx, s.connSem,
-		func(ctx context.Context) (net.Conn, error) { return l.Accept() },
-		func(ctx context.Context, conn net.Conn) (protocol.Transport, error) {
-			return newTCPTransport(conn), nil
-		},
-		func(conn net.Conn) { _ = conn.Close() },
-		binding.HandlerConfig{
-			Auth:     s.config.Auth,
-			Policy:   s.config.Policy,
-			Sink:     s.config.Sink,
-			Metrics:  s.config.Metrics,
-			ServerID: s.config.ServerID,
-		},
-	)
+	return s.Run(ctx, binding.RunSpec[*Listener, net.Conn]{
+		Listen:        func(ctx context.Context) (*Listener, error) { return Listen(&s.config) },
+		Accept:        func(ctx context.Context, l *Listener) (net.Conn, error) { return l.Accept() },
+		NewTransport:  func(ctx context.Context, c net.Conn) (protocol.Transport, error) { return newTCPTransport(c), nil },
+		CloseConn:     func(c net.Conn) { _ = c.Close() },
+		AddrOf:        func(l *Listener) net.Addr { return l.Addr() },
+		CloseListener: func(l *Listener) error { return l.Close() },
+	})
 }
 
 func (s *Server) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.listener != nil {
-		return s.listener.Close()
-	}
-	return nil
+	return s.Server.Close(func(l *Listener) error { return l.Close() })
 }
 
 // --- Client（完整类型定义与方法在 client.go）---

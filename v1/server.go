@@ -2,8 +2,7 @@ package v1
 
 import (
 	"context"
-	"log/slog"
-	"sync"
+	"net"
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/binding"
@@ -18,15 +17,15 @@ type ServerConfig struct {
 	ServerID           string
 	Metrics            *core.MBTAMetrics
 	Sink               core.EventSink // 上层注入的事件投递接口
-	MaxConcurrentConns int            // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns (H-3)
+	MaxConcurrentConns int            // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns
 }
 
 // Server accepts and handles MBTA agent connections.
+// 内嵌 binding.Server（消除与 ntls 的服务端外壳重复，对称客户端 Phase 2），
+// 自身仅保留 QUIC 专属的 Start/Addr/Close 入口。
 type Server struct {
-	config   ServerConfig
-	mu       sync.Mutex
-	listener *Listener
-	connSem  chan struct{} // 并发连接上限信号量 (H-3)
+	*binding.Server[*Listener, *Conn]
+	config ServerConfig
 }
 
 // NewServer creates a new MBTA server.
@@ -34,66 +33,45 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.ServerID == "" {
 		cfg.ServerID = core.NewChunkID().String()
 	}
-	maxConns := cfg.MaxConcurrentConns
-	if maxConns <= 0 {
-		maxConns = binding.DefaultMaxConcurrentConns
+	hcfg := binding.HandlerConfig{
+		Auth:     cfg.Auth,
+		Policy:   cfg.Policy,
+		Sink:     cfg.Sink,
+		Metrics:  cfg.Metrics,
+		ServerID: cfg.ServerID,
 	}
-	return &Server{config: cfg, connSem: make(chan struct{}, maxConns)}, nil
+	return &Server{
+		Server: binding.NewServer[*Listener, *Conn](cfg.MaxConcurrentConns, hcfg),
+		config: cfg,
+	}, nil
 }
 
 // Start begins listening for QUIC connections and runs the accept loop.
 // Blocks until the context is cancelled. Each accepted connection is handled
 // in its own goroutine via CoreHandler.Handle.
 func (s *Server) Start(ctx context.Context) error {
-	l, err := Listen(ctx, s.config.Transport)
-	if err != nil {
-		return core.WrapError(core.NumTransport, core.CodeTransport, "listen", err)
-	}
-	s.mu.Lock()
-	s.listener = l
-	s.mu.Unlock()
-	slog.Info("MBTA server listening", "addr", l.Addr(), "server_id", s.config.ServerID)
-
-	// ctx 取消时关闭 listener：被 l.Accept(ctx) 阻塞的循环因此解除并退出。
-	go func() {
-		<-ctx.Done()
-		_ = l.Close()
-	}()
-
-	return binding.AcceptLoop(ctx, s.connSem,
-		func(ctx context.Context) (*Conn, error) {
-			return s.listener.Accept(ctx)
+	return s.Run(ctx, binding.RunSpec[*Listener, *Conn]{
+		Listen: func(ctx context.Context) (*Listener, error) {
+			l, err := Listen(ctx, s.config.Transport)
+			if err != nil {
+				return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen", err)
+			}
+			return l, nil
 		},
-		func(ctx context.Context, conn *Conn) (protocol.Transport, error) {
-			return newQuicTransport(conn)
-		},
-		func(conn *Conn) { _ = conn.CloseWithError(0, "transport") },
-		binding.HandlerConfig{
-			Auth:     s.config.Auth,
-			Policy:   s.config.Policy,
-			Sink:     s.config.Sink,
-			Metrics:  s.config.Metrics,
-			ServerID: s.config.ServerID,
-		},
-	)
+		Accept:        func(ctx context.Context, l *Listener) (*Conn, error) { return l.Accept(ctx) },
+		NewTransport:  func(ctx context.Context, c *Conn) (protocol.Transport, error) { return newQuicTransport(c) },
+		CloseConn:     func(c *Conn) { _ = c.CloseWithError(0, "transport") },
+		AddrOf:        func(l *Listener) net.Addr { return l.Addr() },
+		CloseListener: func(l *Listener) error { return l.Close() },
+	})
 }
 
 // Addr 返回服务器监听地址（Start 完成监听后有效；启动前返回空串）。
 func (s *Server) Addr() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.listener == nil {
-		return ""
-	}
-	return s.listener.Addr().String()
+	return s.Server.Addr(func(l *Listener) net.Addr { return l.Addr() })
 }
 
 // Close shuts down the server.
 func (s *Server) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.listener != nil {
-		return s.listener.Close()
-	}
-	return nil
+	return s.Server.Close(func(l *Listener) error { return l.Close() })
 }

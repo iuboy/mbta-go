@@ -117,9 +117,9 @@ const (
 
 // Error 是 MBTA 库的标准错误类型，携带数字错误码和字符串错误码。
 type Error struct {
-	NumCode int    // 数字错误码，用于程序快速匹配（switch、map）
+	NumCode int    // 数字错误码，用于程序快速匹配
 	Code    string // 字符串错误码，用于日志和线缆传输
-	Message string // 人类可读描述
+	Message string // 描述
 	Err     error  // 可选的被包装错误
 }
 

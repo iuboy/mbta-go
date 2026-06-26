@@ -54,7 +54,6 @@ func FlowClassOf(flags byte) byte { return (flags & FlagFlowClassMask) >> FlagFl
 
 // Stream roles.
 // r2 capability 标识与算法枚举由 corepb（proto enum）与 core/capability.go（registry）承载，
-// 旧字符串常量已移除（避免与 corepb enum 混淆）。
 const (
 	StreamRoleControl = "control"
 	StreamRoleData    = "data"

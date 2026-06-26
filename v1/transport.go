@@ -3,15 +3,15 @@ package v1
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
+	"errors"
 	"log/slog"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
+	"github.com/iuboy/mbta-go/internal/tlshelper"
 	"github.com/quic-go/quic-go"
 )
 
@@ -75,7 +75,7 @@ func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 		return nil, core.NewError(core.NumCredential, core.CodeCredential, "server credentials required")
 	}
 
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	cert, err := tlshelper.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load server cert/key", err)
 	}
@@ -86,16 +86,10 @@ func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 		NextProtos:   []string{ALPNProtocol},
 	}
 
-	if cfg.CAFile != "" {
-		pool := x509.NewCertPool()
-		caData, err := os.ReadFile(cfg.CAFile)
-		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "read CA file", err)
-		}
-		if !pool.AppendCertsFromPEM(caData) {
-			return nil, core.NewError(core.NumTLS, core.CodeTLS, "failed to append CA certificates")
-		}
+	if pool, err := tlshelper.LoadCertPool(cfg.CAFile); err == nil {
 		tlsCfg.ClientCAs = pool
+	} else if !errors.Is(err, tlshelper.ErrNoCAFile) {
+		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load server CA", err)
 	}
 
 	switch cfg.ClientAuth {
@@ -127,20 +121,14 @@ func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 		slog.Warn("TLS certificate verification is DISABLED - do not use in production")
 	}
 
-	if cfg.CAFile != "" {
-		pool := x509.NewCertPool()
-		caData, err := os.ReadFile(cfg.CAFile)
-		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "read CA file", err)
-		}
-		if !pool.AppendCertsFromPEM(caData) {
-			return nil, core.NewError(core.NumTLS, core.CodeTLS, "failed to append CA certificates")
-		}
+	if pool, err := tlshelper.LoadCertPool(cfg.CAFile); err == nil {
 		tlsCfg.RootCAs = pool
+	} else if !errors.Is(err, tlshelper.ErrNoCAFile) {
+		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client CA", err)
 	}
 
 	if cfg.CertFile != "" && cfg.KeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		cert, err := tlshelper.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
 			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client cert/key", err)
 		}
