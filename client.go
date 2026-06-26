@@ -28,6 +28,11 @@ type Client struct {
 // ACKHandler is called when the server acknowledges a batch.
 type ACKHandler func(chunkID, ackMode string)
 
+// RedirectHandler is called when the server sends a TypeRedirect frame
+// (S→C cluster redirect to the HA leader). The payload is application-defined
+// (e.g. JSON {leaderAddr, leaderId}).
+type RedirectHandler func(payload []byte)
+
 // versionedClient wraps version-specific clients with a common interface.
 type versionedClient interface {
 	Connect(ctx context.Context) error
@@ -35,6 +40,7 @@ type versionedClient interface {
 	Close() error
 	State() string
 	SetACKHandler(handler ACKHandler)
+	SetRedirectHandler(handler RedirectHandler)
 }
 
 // ClientConfig holds the client configuration.
@@ -214,6 +220,18 @@ func (c *Client) SetACKHandler(handler ACKHandler) {
 	}
 }
 
+// SetRedirectHandler registers a callback for TypeRedirect notifications
+// (S→C cluster redirect to the HA leader). The handler receives the raw frame
+// payload for the application to decode.
+func (c *Client) SetRedirectHandler(handler RedirectHandler) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.client != nil {
+		c.client.SetRedirectHandler(handler)
+	}
+}
+
 // ActiveVersion returns the configured protocol version.
 func (c *Client) ActiveVersion() string {
 	c.mu.RLock()
@@ -283,6 +301,9 @@ func (w *v1ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch
 func (w *v1ClientWrapper) Close() error                     { return w.client.Close() }
 func (w *v1ClientWrapper) State() string                    { return w.client.State().String() }
 func (w *v1ClientWrapper) SetACKHandler(handler ACKHandler) { w.client.SetACKHandler(handler) }
+func (w *v1ClientWrapper) SetRedirectHandler(handler RedirectHandler) {
+	w.client.SetRedirectHandler(handler)
+}
 
 type ntlsClientWrapper struct {
 	client *ntls.Client
@@ -295,6 +316,9 @@ func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBat
 func (w *ntlsClientWrapper) Close() error                     { return w.client.Close() }
 func (w *ntlsClientWrapper) State() string                    { return w.client.State().String() }
 func (w *ntlsClientWrapper) SetACKHandler(handler ACKHandler) { w.client.SetACKHandler(handler) }
+func (w *ntlsClientWrapper) SetRedirectHandler(handler RedirectHandler) {
+	w.client.SetRedirectHandler(handler)
+}
 
 // 注：v2ClientWrapper 仍待 v2（QUIC + RFC 8998 国密）落地后按 v1ClientWrapper 模式重建。
 

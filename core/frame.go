@@ -56,7 +56,7 @@ var knownTypes = map[uint8]bool{
 	TypeAck: true, TypeNack: true, TypePartialAck: true,
 	TypeWindow: true, TypeThrottle: true,
 	TypePing: true, TypePong: true,
-	TypeClose: true, TypeError: true,
+	TypeClose: true, TypeError: true, TypeRedirect: true,
 }
 
 // ValidateFlags 校验 flags 的位组合合法性（core spec §3.1）。

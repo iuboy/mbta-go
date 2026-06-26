@@ -20,8 +20,9 @@ const (
 
 	TypePing  uint8 = 13 // bidirectional health check
 	TypePong  uint8 = 14 // bidirectional health check response
-	TypeClose uint8 = 15 // bidirectional graceful close
-	TypeError uint8 = 16 // bidirectional protocol error
+	TypeClose    uint8 = 15 // bidirectional graceful close
+	TypeError    uint8 = 16 // bidirectional protocol error
+	TypeRedirect uint8 = 17 // S→C cluster redirect: guide client to the leader (§4.17)
 )
 
 // 帧头 ChannelID 约定（core spec §10.1 / §3）。

@@ -217,6 +217,12 @@ func (c *Client) SetACKHandler(h func(chunkID, ackMode string)) {
 	c.core.SetACKHandler(h)
 }
 
+// SetRedirectHandler registers a callback invoked when the server sends a
+// TypeRedirect frame (S→C cluster redirect to the HA leader).
+func (c *Client) SetRedirectHandler(h func(payload []byte)) {
+	c.core.SetRedirectHandler(h)
+}
+
 // Close sends a CLOSE frame, drains pending ACKs, and shuts down.
 func (c *Client) Close() error {
 	return c.core.Close()

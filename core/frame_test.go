@@ -401,3 +401,30 @@ func TestVarintRejectsNonCanonical(t *testing.T) {
 		t.Error("readVarint should reject non-canonical encoding")
 	}
 }
+
+// TestFrameTypeRedirect verifies the HA cluster-redirect control frame
+// (TypeRedirect=17) round-trips through Write/Read with the control-channel
+// conventions used by a follower replica redirecting an agent to the leader.
+func TestFrameTypeRedirect(t *testing.T) {
+	var buf bytes.Buffer
+	payload := []byte(`{"leaderAddr":"10.0.0.1:8443","leaderId":"pod-abc"}`)
+	if err := Write(&buf, Version, TypeRedirect, FlagControl, ChannelControl, payload); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Read(&buf, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Header.Type != TypeRedirect {
+		t.Errorf("type = %d, want %d", f.Header.Type, TypeRedirect)
+	}
+	if f.Header.Flags != FlagControl {
+		t.Errorf("flags = %x, want %x (FlagControl)", f.Header.Flags, FlagControl)
+	}
+	if f.Header.ChannelID != ChannelControl {
+		t.Errorf("channel = %d, want %d (ChannelControl)", f.Header.ChannelID, ChannelControl)
+	}
+	if string(f.Payload) != string(payload) {
+		t.Errorf("payload round-trip failed")
+	}
+}
