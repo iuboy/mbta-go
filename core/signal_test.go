@@ -59,7 +59,7 @@ func TestSignalBatchValidate(t *testing.T) {
 				Signals: []*SignalRecord{
 					{SignalType: "log", Body: "msg"},
 					{SignalType: "metric", MetricName: "req_total"},
-					{SignalType: "span", Name: "GET /api", TraceID: "t1"},
+					{SignalType: "span", Name: "GET /api", TraceID: "0123456789abcdef0123456789abcdef"},
 				},
 			},
 			wantErr: false,
@@ -205,9 +205,9 @@ func TestSignalRecordFields(t *testing.T) {
 	t.Run("span signal", func(t *testing.T) {
 		sig := &SignalRecord{
 			SignalType:      "span",
-			TraceID:         "trace-123",
-			SpanID:          "span-456",
-			ParentSpanID:    "parent-789",
+			TraceID:         "0123456789abcdef0123456789abcdef",
+			SpanID:          "0123456789abcdef",
+			ParentSpanID:    "fedcba9876543210",
 			Name:            "HTTP GET /api/users",
 			Kind:            "client",
 			StartTimeUnixMs: 1234567890,
@@ -339,7 +339,7 @@ func TestSignalBatchWithMultipleSignals(t *testing.T) {
 		Signals: []*SignalRecord{
 			{SignalType: "log", EventID: "evt-1", Body: "msg1"},
 			{SignalType: "metric", EventID: "evt-2", MetricName: "m1"},
-			{SignalType: "span", EventID: "evt-3", Name: "s1", TraceID: "t1"},
+			{SignalType: "span", EventID: "evt-3", Name: "s1", TraceID: "0123456789abcdef0123456789abcdef"},
 			{SignalType: "log", EventID: "evt-4", Body: "msg4"},
 		},
 	}
@@ -374,18 +374,18 @@ func TestSignalRecordTimestamps(t *testing.T) {
 func TestSignalRecordTraceContext(t *testing.T) {
 	sig := &SignalRecord{
 		SignalType:   "span",
-		TraceID:      "trace-123",
-		SpanID:       "span-456",
-		ParentSpanID: "parent-789",
+		TraceID:      "0123456789abcdef0123456789abcdef",
+		SpanID:       "0123456789abcdef",
+		ParentSpanID: "fedcba9876543210",
 	}
 
-	if sig.TraceID != "trace-123" {
-		t.Errorf("TraceID = %q, want 'trace-123'", sig.TraceID)
+	if sig.TraceID != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("TraceID = %q, want '0123456789abcdef0123456789abcdef'", sig.TraceID)
 	}
-	if sig.SpanID != "span-456" {
-		t.Errorf("SpanID = %q, want 'span-456'", sig.SpanID)
+	if sig.SpanID != "0123456789abcdef" {
+		t.Errorf("SpanID = %q, want '0123456789abcdef'", sig.SpanID)
 	}
-	if sig.ParentSpanID != "parent-789" {
-		t.Errorf("ParentSpanID = %q, want 'parent-789'", sig.ParentSpanID)
+	if sig.ParentSpanID != "fedcba9876543210" {
+		t.Errorf("ParentSpanID = %q, want 'fedcba9876543210'", sig.ParentSpanID)
 	}
 }

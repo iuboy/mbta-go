@@ -258,6 +258,16 @@ Server 侧 MUST 能无损映射到 OTLP（Logs / Metrics / Traces / **Profiles**
 
 **profile signal：** 携带采样类型（cpu / heap / mutex / goroutine 等）、profile 字节载荷，以及与 trace/log/metric 的**双向关联字段**（`profile_id`、`trace_id`、`span_id`、`log_record_ref`），对齐 OTel Profiles 跨信号关联目标。
 
+**trace 上下文格式约束（§6.2.1）：** `trace_id`、`span_id`、`parent_span_id` 是跨信号 + 跨进程 trace 关联的键。为支撑 `signal_type="span"` 无损映射 OTLP Traces Span（附录 B）并使下游（Jaeger/Tempo）能重建 trace 树，这三个字段（非空时）MUST 满足 W3C/OTel ID 格式：
+
+| 字段 | 非空时格式 | 长度 | 备注 |
+| --- | --- | --- | --- |
+| `trace_id`   | 小写 hex | 恰好 32 字符（16 字节） | 全零值非法 |
+| `span_id`    | 小写 hex | 恰好 16 字符（8 字节） | 全零值非法 |
+| `parent_span_id` | 小写 hex | 恰好 16 字符（8 字节） | 全零值非法 |
+
+大写 hex、带连字符的 UUID、base64、其他编码均**拒绝**（协议入口 Validate 校验）。空值表示"该 signal 不参与 trace 关联"（如无归属的 host 级指标），合法。`signal_type="span"` 时 `trace_id` 必填（见 §6.2 span 校验），其余 signal type 可选。
+
 ### 6.3 Codec 枚举（wire 值）
 
 | Codec    | 取值    | 适用                                                       |

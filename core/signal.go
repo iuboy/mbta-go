@@ -68,6 +68,19 @@ func (b *SignalBatch) Validate() error {
 				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
 			}
 		}
+
+		// trace 上下文 ID 格式约束（spec §6.2.1）：非空时必须是 W3C/OTel 格式
+		// （小写 hex + 正确长度 + 非全零），支撑 signal_type="span" 无损映射 OTLP。
+		// 空值合法（表示不参与 trace 关联）。
+		if err := validateHexID("trace_id", s.TraceID, 16); err != nil {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+		}
+		if err := validateHexID("span_id", s.SpanID, 8); err != nil {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+		}
+		if err := validateHexID("parent_span_id", s.ParentSpanID, 8); err != nil {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+		}
 	}
 	return nil
 }

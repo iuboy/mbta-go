@@ -90,3 +90,42 @@ func TestSignalBatchValidate_FieldLimits(t *testing.T) {
 		}
 	})
 }
+
+// TestValidateHexID 验证 trace/span ID 的 W3C/OTel 格式约束（spec §6.2.1）：
+// 非空时必须是指定长度的小写 hex + 非全零。这是 signal_type="span" 无损映射
+// OTLP Traces Span 的正确性保证。
+func TestValidateHexID(t *testing.T) {
+	validTraceID := "0123456789abcdef0123456789abcdef" // 32 hex (16 bytes)
+	validSpanID := "0123456789abcdef"                   // 16 hex (8 bytes)
+
+	tests := []struct {
+		name      string
+		field     string
+		val       string
+		wantBytes int
+		wantErr   bool
+	}{
+		{"empty trace_id ok (no trace participation)", "trace_id", "", 16, false},
+		{"valid trace_id", "trace_id", validTraceID, 16, false},
+		{"valid span_id", "span_id", validSpanID, 8, false},
+		{"trace_id wrong length (too short)", "trace_id", "0123", 16, true},
+		{"trace_id wrong length (too long)", "trace_id", validTraceID + "ab", 16, true},
+		{"span_id wrong length", "span_id", "0123", 8, true},
+		{"trace_id uppercase hex rejected", "trace_id", "0123456789ABCDEF0123456789ABCDEF", 16, true},
+		{"trace_id non-hex rejected", "trace_id", "ghij56789abcdef0123456789abcdef", 16, true},
+		{"trace_id all-zeros rejected", "trace_id", "00000000000000000000000000000000", 16, true},
+		{"span_id all-zeros rejected", "span_id", "0000000000000000", 8, true},
+		{"hyphenated uuid rejected (W3C incompat)", "trace_id", "0190a1b2-3c4d-7e8f-9012-3456789abcde", 16, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateHexID(tt.field, tt.val, tt.wantBytes)
+			if tt.wantErr && err == nil {
+				t.Errorf("validateHexID(%q) expected error, got nil", tt.val)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("validateHexID(%q) unexpected error: %v", tt.val, err)
+			}
+		})
+	}
+}
