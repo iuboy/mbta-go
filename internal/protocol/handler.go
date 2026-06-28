@@ -39,7 +39,7 @@ type HandlerConfig struct {
 	Sink            core.EventSink
 	Metrics         core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreHandler）
 	ServerID        string
-	SessionStore    *core.SessionStore  // 0-RTT resumption（可选，nil = 不支持 early_data）
+	SessionStore    *core.SessionStore   // 0-RTT resumption（可选，nil = 不支持 early_data）
 	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
 }
 

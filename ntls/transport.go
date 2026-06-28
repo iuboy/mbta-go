@@ -50,7 +50,7 @@ type ServerConfig struct {
 	Metrics            *core.MBTAMetrics
 	RedirectChecker    core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选）
 	ServerID           string               // 服务端标识，回填 HELLO_ACK；空则 NewServer 自动生成 UUID v7
-	MaxConcurrentConns int    // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns (H-3)
+	MaxConcurrentConns int                  // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns (H-3)
 }
 
 // ClientCredentials holds NTLS client credentials（双 SM2 证书，或 TLS1.3 单证书）。

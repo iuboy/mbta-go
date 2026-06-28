@@ -96,7 +96,7 @@ func TestSignalBatchValidate_FieldLimits(t *testing.T) {
 // OTLP Traces Span 的正确性保证。
 func TestValidateHexID(t *testing.T) {
 	validTraceID := "0123456789abcdef0123456789abcdef" // 32 hex (16 bytes)
-	validSpanID := "0123456789abcdef"                   // 16 hex (8 bytes)
+	validSpanID := "0123456789abcdef"                  // 16 hex (8 bytes)
 
 	tests := []struct {
 		name      string
