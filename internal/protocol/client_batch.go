@@ -17,9 +17,27 @@ import (
 //
 // 锁粒度：sendMu 仅保护「window 检查 + 取 seq/chunkID + inflight/pending 登记」，
 // 重的 CPU 工作（marshal/Build/网络写）全部在锁外，使多调用方可跨 batch 并行利用多核。
-func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string) (string, error) {
+//
+// opts 携带 per-call 发送选项（如 core.WithTraceContext）；不传则行为与旧版一致。
+func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
 	if signalBatch == nil {
 		return "", core.NewError(core.NumBatch, core.CodeBatch, "batch must not be nil")
+	}
+
+	sc := core.ApplySendOptions(opts)
+
+	// --- 锁外：trace 上下文门控与前置校验 ---
+	// cap 门控：携带 TraceContext 必须已协商 w3c_trace_context，否则显式报错（不静默丢弃，
+	// 与协议「未协商 stable capability 不允许静默吞掉」惯例一致）。negotiated==nil 时
+	// IsCapabilitySelected 返回 false → 报错（保守正确：握手前不应发送）。
+	if sc.TraceContext != nil {
+		if !c.negotiated.IsCapabilitySelected(core.CapW3CTraceContext) {
+			return "", core.NewError(core.NumBatch, core.CodeBatch,
+				"trace_context requires negotiated w3c_trace_context capability")
+		}
+		if err := core.ValidateBatchTraceContext(sc.TraceContext); err != nil {
+			return "", err
+		}
 	}
 
 	// --- 锁外：无状态前置检查 + marshal SignalBatch ---
@@ -37,7 +55,7 @@ func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatc
 	batchEvents := len(signalBatch.Signals)
 
 	// --- 锁内：取 seq/chunkID、窗口检查、inflight/pending 登记 ---
-	seq, chunkID, batchPayload, err := c.reserveInflight(tag, source, batchJSON, batchEvents)
+	seq, chunkID, batchPayload, err := c.reserveInflight(tag, source, batchJSON, batchEvents, sc.TraceContext)
 	if err != nil {
 		return "", err
 	}
@@ -59,7 +77,10 @@ func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatc
 
 // reserveInflight 在 sendMu 保护下原子完成：取 seq/chunkID、构造 BatchMessage proto、
 // 窗口检查、inflight/pending 登记。
-func (c *CoreClient) reserveInflight(tag, source string, batchJSON []byte, batchEvents int) (uint64, core.ChunkID, []byte, error) {
+//
+// traceContext 为可选的 batch 级 W3C trace 上下文；非 nil 时设到 BatchMessage.TraceContext
+// （field 7），nil 时不设（与旧版 wire 一致）。调用前已通过 cap 门控与合法性校验。
+func (c *CoreClient) reserveInflight(tag, source string, batchJSON []byte, batchEvents int, traceContext *corepb.TraceContext) (uint64, core.ChunkID, []byte, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
@@ -71,6 +92,9 @@ func (c *CoreClient) reserveInflight(tag, source string, batchJSON []byte, batch
 		batchMsg.EventsCount = int32(batchEvents)
 	}
 	batchMsg.Batch = batchJSON
+	if traceContext != nil {
+		batchMsg.TraceContext = traceContext
+	}
 	batchPayload, err := core.Encode(batchMsg)
 	if err != nil {
 		return 0, core.ChunkID{}, nil, core.WrapError(core.NumBatch, core.CodeBatch, "encode batch message", err)

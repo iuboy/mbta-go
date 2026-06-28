@@ -15,6 +15,10 @@ const (
 	CapPrefixDeprecated   = "dep-"
 )
 
+// CapW3CTraceContext 是 batch/stream 级 W3C trace 上下文协议承载 capability（spec §6.2.2）。
+// 客户端发送门控（CoreClient.SendBatch）与服务端校验共享此常量，避免散落 magic string。
+const CapW3CTraceContext = "w3c_trace_context"
+
 // stableCapabilities 是已注册的 stable capability 全集（core spec 附录 C）。
 // 值标 stable 后语义冻结（§1.4）。
 var stableCapabilities = map[string]bool{

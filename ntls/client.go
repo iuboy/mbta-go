@@ -117,9 +117,9 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // SendBatch 通过 MBTA-NTLS 协议发送一个 SignalBatch。
-// 委托给 CoreClient.SendBatch。
-func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string) (string, error) {
-	return c.core.SendBatch(ctx, signalBatch, tag, source)
+// 委托给 CoreClient.SendBatch。opts 携带 per-call 发送选项（如 core.WithTraceContext）。
+func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
+	return c.core.SendBatch(ctx, signalBatch, tag, source, opts...)
 }
 
 // SetACKHandler 注册服务端 ACK 回调。

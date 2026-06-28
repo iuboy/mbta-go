@@ -70,6 +70,15 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "batch_validation", "batch failed validation", false)
 		return
 	}
+	// batch 级 W3C trace 上下文校验（capability w3c_trace_context，spec §6.2.2）。
+	// 客户端发送前已校验，此处 defense-in-depth：拒绝绕过 SDK 直接构造的非法 trace。
+	if tc := batchMsg.GetTraceContext(); tc != nil {
+		if err := core.ValidateBatchTraceContext(tc); err != nil {
+			slog.Debug("batch trace_context invalid", "error", err)
+			h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "batch_trace_context", "invalid batch trace context", false)
+			return
+		}
+	}
 
 	// chunk_id dedup key（ULID 文本）。
 	chunkIDText := chunkIDText(batchMsg.GetChunkId())
@@ -219,6 +228,14 @@ func (h *CoreHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
 // routeAndACK 路由 batch 到 sink 并发送 ACK（core spec §11）。
 func (h *CoreHandler) routeAndACK(ctx context.Context, agentID, chunkID string, batchMsg *corepb.BatchMessage, signalBatch *core.SignalBatch, batchEvents int, batchBytes int64) {
 	defer h.inflight.Remove(batchEvents, batchBytes)
+
+	// 旁路通知 batch 级 trace 上下文（不改变路由/ACK 逻辑）。仅当 sink 实现
+	// BatchTraceSink 且该 batch 携带 TraceContext 时触发；现有 sink 实现零影响。
+	if tc := batchMsg.GetTraceContext(); tc != nil {
+		if ts, ok := h.config.Sink.(core.BatchTraceSink); ok {
+			ts.OnBatchTraceContext(ctx, agentID, tc) // *corepb.TraceContext 即 *core.TraceContext（类型别名）
+		}
+	}
 
 	ackMode := corepb.AckMode_ACK_MODE_ACCEPTED
 

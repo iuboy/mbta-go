@@ -494,3 +494,113 @@ func makeSignalBatch(body string) []byte {
 	data, _ := core.MarshalSignalBatch(sb)
 	return data
 }
+
+// validBatchTraceContext 返回合法 batch 级 TraceContext（供服务端 BATCH 构造复用）。
+func validBatchTraceContext() *corepb.TraceContext {
+	return &corepb.TraceContext{
+		TraceId:    "0123456789abcdef0123456789abcdef",
+		SpanId:     "0123456789abcdef",
+		TraceFlags: 0x01,
+	}
+}
+
+// buildBatchEnvelope 构造一个可靠 BATCH envelope（带可选 trace_context），注入 DataIn。
+func buildBatchEnvelope(t *testing.T, tr *FakeTransport, keys *core.SessionKeys, cs corepb.CipherSuite,
+	chunkID core.ChunkID, tc *corepb.TraceContext) {
+	t.Helper()
+	batchMsg := &corepb.BatchMessage{
+		Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 1,
+		Batch:        makeSignalBatch("hi"),
+		TraceContext: tc,
+	}
+	bp, err := core.Encode(batchMsg)
+	if err != nil {
+		t.Fatalf("encode batch message: %v", err)
+	}
+	params := core.BuildParams{
+		SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
+		Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
+		CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
+		MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
+		HMACKey: keys.HMACKey(), AEADKey: keys.AEADKey(), BatchPayload: bp,
+	}
+	env, err := core.Build(params)
+	if err != nil {
+		t.Fatalf("build envelope: %v", err)
+	}
+	ep, err := core.Encode(env)
+	if err != nil {
+		t.Fatalf("encode envelope: %v", err)
+	}
+	tr.DataIn <- MakeFrame(core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, ep)
+}
+
+// TestCoreHandler_BatchTraceContext_Accepted 验证带合法 trace_context 的 BATCH → ACK。
+func TestCoreHandler_BatchTraceContext_Accepted(t *testing.T) {
+	tr, keys, cs := doHandshake(t, nil)
+	buildBatchEnvelope(t, tr, keys, cs, core.NewChunkID(), validBatchTraceContext())
+
+	resp := ReadFrame(t, tr.Sent)
+	if resp.Header.Type != core.TypeAck {
+		var n core.NackMessage
+		_ = core.Decode(resp.Payload, &n)
+		t.Fatalf("expected ACK, got type %d (nack code=%s reason=%s)", resp.Header.Type, n.GetCode(), n.GetReason())
+	}
+}
+
+// TestCoreHandler_BatchTraceContext_Rejected 验证非法 trace_context（全零 trace_id）→
+// NACK batch_trace_context。
+func TestCoreHandler_BatchTraceContext_Rejected(t *testing.T) {
+	tr, keys, cs := doHandshake(t, nil)
+	bad := validBatchTraceContext()
+	bad.TraceId = "00000000000000000000000000000000"
+	buildBatchEnvelope(t, tr, keys, cs, core.NewChunkID(), bad)
+
+	resp := ReadFrame(t, tr.Sent)
+	if resp.Header.Type != core.TypeNack {
+		t.Fatalf("expected NACK for invalid trace_context, got type %d", resp.Header.Type)
+	}
+	var nack core.NackMessage
+	_ = core.Decode(resp.Payload, &nack)
+	if nack.GetCode() != "batch_trace_context" {
+		t.Errorf("nack code = %q, want batch_trace_context", nack.GetCode())
+	}
+}
+
+// traceSink 实现 EventSink + BatchTraceSink，记录透传的 batch 级 trace 上下文。
+type traceSink struct {
+	lastTC *core.TraceContext
+	got    atomic.Bool
+}
+
+func (s *traceSink) OnSignalBatch(_ context.Context, _ string, _ *core.SignalBatch) error {
+	return nil
+}
+func (s *traceSink) OnPressure(_ string) core.PressureState { return core.PressureNormal }
+func (s *traceSink) OnBatchTraceContext(_ context.Context, _ string, tc *core.TraceContext) {
+	s.lastTC = tc
+	s.got.Store(true)
+}
+
+// TestCoreHandler_BatchTraceContext_SinkExposed 验证实现 BatchTraceSink 的 sink
+// 收到 batch 级 trace 上下文旁路通知，且内容正确。
+func TestCoreHandler_BatchTraceContext_SinkExposed(t *testing.T) {
+	sink := &traceSink{}
+	tr, keys, cs := doHandshake(t, sink)
+	want := validBatchTraceContext()
+	buildBatchEnvelope(t, tr, keys, cs, core.NewChunkID(), want)
+
+	// 先读到 ACK（routeAndACK 先发 ACK 再 sink 通知，或顺序不定，两者都等）。
+	_ = ReadFrame(t, tr.Sent)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !sink.got.Load() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !sink.got.Load() {
+		t.Fatal("BatchTraceSink.OnBatchTraceContext not invoked")
+	}
+	if sink.lastTC == nil || sink.lastTC.GetTraceId() != want.GetTraceId() {
+		t.Errorf("sink trace_id = %v, want %q", sink.lastTC, want.GetTraceId())
+	}
+}

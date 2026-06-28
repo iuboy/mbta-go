@@ -66,6 +66,18 @@ type RawEventSink interface {
 	OnRawBatch(ctx context.Context, agentID string, eventsCount int, batchData []byte) (*RouteResult, error)
 }
 
+// BatchTraceSink 扩展 EventSink，透传 batch 级 W3C trace 上下文（capability
+// w3c_trace_context，spec §6.2.2）。顺项目「渐进 interface 扩展」范式（EventSink →
+// DurableEventSink → RawEventSink）：不实现的 sink 不受影响，原路由路径不变。
+//
+// 这是旁路通知——不替代 OnSignalBatch/OnRawBatch 的路由语义，仅让上层有机会在
+// batch 维度继承 trace 关联（如注入到下游 OTel context）。tc 为 nil 表示该 batch
+// 未携带 batch 级 trace。
+type BatchTraceSink interface {
+	EventSink
+	OnBatchTraceContext(ctx context.Context, agentID string, tc *TraceContext)
+}
+
 // Inflight tracks bytes, events, and batches that are in-flight (sent but not yet ACKed).
 // 三个标量用 atomic 计数，避免高频数据流（服务端 64 stream × N 连接）下的互斥锁竞争。
 type Inflight struct {
