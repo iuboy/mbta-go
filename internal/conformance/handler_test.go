@@ -601,6 +601,91 @@ func TestCoreHandler_BatchTraceContext_SinkExposed(t *testing.T) {
 		t.Fatal("BatchTraceSink.OnBatchTraceContext not invoked")
 	}
 	if sink.lastTC == nil || sink.lastTC.GetTraceId() != want.GetTraceId() {
-		t.Errorf("sink trace_id = %v, want %q", sink.lastTC, want.GetTraceId())
+		t.Errorf("trace_id = %v, want %q", sink.lastTC, want.GetTraceId())
+	}
+}
+
+// captureSink 实现 EventSink（非 RawEventSink，强制走完整解码路径），捕获投递的 SignalBatch。
+type captureSink struct {
+	got   atomic.Bool
+	batch *core.SignalBatch
+}
+
+func (s *captureSink) OnSignalBatch(_ context.Context, _ string, sb *core.SignalBatch) error {
+	s.batch = sb
+	s.got.Store(true)
+	return nil
+}
+func (s *captureSink) OnPressure(_ string) core.PressureState { return core.PressureNormal }
+
+// TestCoreHandler_MixedTraceBatch 验证 FIFO 混装场景：同一 batch 含多个不同 trace_id
+// 的 span（多进程链），不设 batch 级 TraceContext，per-signal trace 字段在 proto 编解码
+// 往返后完整保留。这是 batch 级 TraceContext 不适用时的正确用法（方案 A）。
+func TestCoreHandler_MixedTraceBatch(t *testing.T) {
+	sink := &captureSink{}
+	tr, keys, cs := doHandshake(t, sink)
+
+	// 两个 span 分属不同 trace_id（模拟 FIFO 混装多进程链）。
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{
+		{SignalType: "span", Name: "proc-A", TraceID: "11111111111111111111111111111111", SpanID: "aaaaaaaaaaaaaaaa"},
+		{SignalType: "span", Name: "proc-B", TraceID: "22222222222222222222222222222222", SpanID: "bbbbbbbbbbbbbbbb"},
+	}}
+	batchBytes, err := core.MarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, sb)
+	if err != nil {
+		t.Fatalf("marshal signal batch: %v", err)
+	}
+	chunkID := core.NewChunkID()
+	batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 2, Batch: batchBytes}
+	bp, err := core.Encode(batchMsg)
+	if err != nil {
+		t.Fatalf("encode batch message: %v", err)
+	}
+	params := core.BuildParams{
+		SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
+		Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
+		CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
+		MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
+		HMACKey: keys.HMACKey(), AEADKey: keys.AEADKey(), BatchPayload: bp,
+	}
+	env, err := core.Build(params)
+	if err != nil {
+		t.Fatalf("build envelope: %v", err)
+	}
+	envPayload, err := core.Encode(env)
+	if err != nil {
+		t.Fatalf("encode envelope: %v", err)
+	}
+	tr.DataIn <- MakeFrame(core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, envPayload)
+
+	// 校验通过 → ACK（混装合法，不应因多 trace 被 NACK）。
+	resp := ReadFrame(t, tr.Sent)
+	if resp.Header.Type != core.TypeAck {
+		var n core.NackMessage
+		_ = core.Decode(resp.Payload, &n)
+		t.Fatalf("expected ACK for mixed-trace batch, got type %d (nack code=%s)", resp.Header.Type, n.GetCode())
+	}
+
+	// 等待 sink 收到完整解码的 SignalBatch。
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !sink.got.Load() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !sink.got.Load() {
+		t.Fatal("sink not invoked for mixed-trace batch")
+	}
+
+	// 断言：两个 signal 的 per-signal trace 字段在 proto 往返后完整保留且互不相同。
+	got := sink.batch.Signals
+	if len(got) != 2 {
+		t.Fatalf("signals = %d, want 2", len(got))
+	}
+	if got[0].TraceID == got[1].TraceID {
+		t.Errorf("trace_id not distinct across mixed signals: both %q", got[0].TraceID)
+	}
+	if got[0].TraceID != "11111111111111111111111111111111" || got[0].SpanID != "aaaaaaaaaaaaaaaa" {
+		t.Errorf("signal[0] trace = (%q,%q), want preserved", got[0].TraceID, got[0].SpanID)
+	}
+	if got[1].TraceID != "22222222222222222222222222222222" || got[1].SpanID != "bbbbbbbbbbbbbbbb" {
+		t.Errorf("signal[1] trace = (%q,%q), want preserved", got[1].TraceID, got[1].SpanID)
 	}
 }
