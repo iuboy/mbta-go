@@ -208,8 +208,10 @@ func (c *Client) openDataStreams(ctx context.Context) (StreamPicker, error) {
 }
 
 // SendBatch sends a SignalBatch through the MBTA protocol.
-func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string) (string, error) {
-	return c.core.SendBatch(ctx, signalBatch, tag, source)
+//
+// opts 携带 per-call 发送选项（如 core.WithTraceContext），透传给协议核心。
+func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
+	return c.core.SendBatch(ctx, signalBatch, tag, source, opts...)
 }
 
 // SetACKHandler registers a callback invoked when the server acknowledges a batch.

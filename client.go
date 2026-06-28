@@ -36,7 +36,7 @@ type RedirectHandler func(payload []byte)
 // versionedClient wraps version-specific clients with a common interface.
 type versionedClient interface {
 	Connect(ctx context.Context) error
-	SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error)
+	SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error)
 	Close() error
 	State() string
 	SetACKHandler(handler ACKHandler)
@@ -171,7 +171,9 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // SendBatch sends a batch using the active connection.
-func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
+//
+// opts 携带 per-call 发送选项（如 WithTraceContext），不传则与旧行为完全一致。
+func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
 	c.mu.RLock()
 	client := c.client
 	c.mu.RUnlock()
@@ -180,7 +182,7 @@ func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, so
 		return "", core.NewError(core.NumSession, core.CodeSession, "not connected (call Connect first)")
 	}
 
-	return client.SendBatch(ctx, batch, tag, source)
+	return client.SendBatch(ctx, batch, tag, source, opts...)
 }
 
 // Close closes the client and releases all resources.
@@ -295,8 +297,8 @@ type v1ClientWrapper struct {
 }
 
 func (w *v1ClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
-func (w *v1ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
-	return w.client.SendBatch(ctx, batch, tag, source)
+func (w *v1ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
+	return w.client.SendBatch(ctx, batch, tag, source, opts...)
 }
 func (w *v1ClientWrapper) Close() error                     { return w.client.Close() }
 func (w *v1ClientWrapper) State() string                    { return w.client.State().String() }
@@ -310,8 +312,8 @@ type ntlsClientWrapper struct {
 }
 
 func (w *ntlsClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
-func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string) (string, error) {
-	return w.client.SendBatch(ctx, batch, tag, source)
+func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
+	return w.client.SendBatch(ctx, batch, tag, source, opts...)
 }
 func (w *ntlsClientWrapper) Close() error                     { return w.client.Close() }
 func (w *ntlsClientWrapper) State() string                    { return w.client.State().String() }

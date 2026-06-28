@@ -105,6 +105,47 @@ func validateTraceState(entries []*TraceStateEntry) error {
 	return nil
 }
 
+// ValidateBatchTraceContext 校验 batch 级 W3C trace 上下文（spec §6.2.2，capability
+// w3c_trace_context）。客户端发送前置与服务端解码后共用。
+//
+// 与 validateSignalTraceContext 的关键区别：batch 级 TraceContext 一旦显式提供，
+// trace_id/span_id 必须非空——它是整批共享的继承点，没有「空=不参与」的退化语义
+// （不参与则不应携带 TraceContext）。parent_span_id 仍可选。
+func ValidateBatchTraceContext(tc *TraceContext) error {
+	if tc == nil {
+		return nil
+	}
+	const (
+		fieldTCID     = "trace_context.trace_id"
+		fieldTCSpan   = "trace_context.span_id"
+		fieldTCParent = "trace_context.parent_span_id"
+	)
+	if tc.TraceId == "" {
+		return NewError(NumValidation, CodeValidation, fieldTCID+" must not be empty")
+	}
+	if tc.SpanId == "" {
+		return NewError(NumValidation, CodeValidation, fieldTCSpan+" must not be empty")
+	}
+	if err := validateHexID(fieldTCID, tc.TraceId, 16); err != nil {
+		return err
+	}
+	if err := validateHexID(fieldTCSpan, tc.SpanId, 8); err != nil {
+		return err
+	}
+	if err := validateHexID(fieldTCParent, tc.ParentSpanId, 8); err != nil {
+		return err
+	}
+	// trace-flags 是 W3C traceparent 的 1 字节字段（仅低 8 位有效）。
+	if tc.TraceFlags > 0xff {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("trace_context.trace_flags exceeds 8-bit W3C range (0x%x)", tc.TraceFlags))
+	}
+	if err := validateTraceState(tc.TraceState); err != nil {
+		return err
+	}
+	return nil
+}
+
 // SanitizeForLog 清洗用于日志输出的网络来源字符串：截断超长值，把所有 C0 控制字符
 // （0x00-0x1F）和 DEL（0x7F）替换为空格。用于 slog 打印 reason 等不可信字段，
 // 防御日志注入（换行伪造日志行、ANSI 转义终端注入、null 截断等）。
