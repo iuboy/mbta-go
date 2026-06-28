@@ -55,86 +55,128 @@ type SignalBatch struct {
 	Signals   []*SignalRecord `json:"signals"`
 }
 
+// signal wire 字段名常量：用于校验报错与 trace ID 格式校验，避免重复 magic string
+// （goconst）。这些是协议线路字段名，与 JSON tag 取值一致，发布后不可改（§1.4）。
+const (
+	fieldTraceID      = "trace_id"
+	fieldSpanID       = "span_id"
+	fieldParentSpanID = "parent_span_id"
+)
+
 // Validate 校验 SignalBatch 必填字段。
 func (b *SignalBatch) Validate() error {
 	if len(b.Signals) == 0 {
 		return NewError(NumValidation, CodeValidation, "signals must not be empty")
 	}
 	for i, s := range b.Signals {
-		if s.SignalType == "" {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: signal_type is required", i))
+		if err := validateSignal(i, s); err != nil {
+			return err
 		}
-		// signal_type 必须在 §6.2 闭合枚举内（拦截 "metric" 等历史/非法值）。
-		if !validSignalTypes[s.SignalType] {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("signal[%d]: invalid signal_type %q", i, s.SignalType))
-		}
-		// 基于 signal_type 的类型特定校验
-		switch s.SignalType {
-		case SignalTypeGauge, SignalTypeCounter, SignalTypeHistogram, SignalTypeSummary:
-			if s.MetricName == "" {
-				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
-			}
-		case SignalTypeSpan:
-			if s.Name == "" {
-				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: name is required for span type", i))
-			}
-			if s.TraceID == "" {
-				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: trace_id is required for span type", i))
-			}
-		case SignalTypeLog:
-			if s.Body == nil {
-				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: body is required for log type", i))
-			}
-		}
+	}
+	return nil
+}
 
-		// 字段长度与控制字符约束 (L-2)：在协议入口拒绝异常长输入与日志注入面。
-		// 仅校验非空字段；Body/Attributes 等结构化字段不在此处递归校验。
-		for _, f := range []struct{ name, val string }{
-			{"signal_type", s.SignalType},
-			{"event_id", s.EventID},
-			{"trace_id", s.TraceID},
-			{"span_id", s.SpanID},
-			{"parent_span_id", s.ParentSpanID},
-			{"metric_name", s.MetricName},
-			{"unit", s.Unit},
-			{"name", s.Name},
-			{"kind", s.Kind},
-			{"status_code", s.StatusCode},
-			{"status_message", s.StatusMessage},
-			{"severity_text", s.SeverityText},
-		} {
-			if f.val == "" {
-				continue
-			}
-			if err := validateTextField(f.name, f.val); err != nil {
-				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
-			}
-		}
+// validateSignal 校验单个 SignalRecord：signal_type 合法性、类型特定必填、字段长度与
+// trace 上下文约束。拆分自 Validate 以控制认知复杂度。
+func validateSignal(i int, s *SignalRecord) error {
+	if err := validateSignalType(i, s); err != nil {
+		return err
+	}
+	if err := validateSignalFieldLengths(i, s); err != nil {
+		return err
+	}
+	return validateSignalTraceContext(i, s)
+}
 
-		// trace 上下文 ID 格式约束（spec §6.2.1）：非空时必须是 W3C/OTel 格式
-		// （小写 hex + 正确长度 + 非全零），支撑 signal_type="span" 无损映射 OTLP。
-		// 空值合法（表示不参与 trace 关联）。
-		if err := validateHexID("trace_id", s.TraceID, 16); err != nil {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+// validateSignalType 校验 signal_type 必填、闭合枚举（§6.2，拦截 "metric" 等历史/非法值）
+// 以及各 signal_type 的类型特定必填字段。
+func validateSignalType(i int, s *SignalRecord) error {
+	if s.SignalType == "" {
+		return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: signal_type is required", i))
+	}
+	if !validSignalTypes[s.SignalType] {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("signal[%d]: invalid signal_type %q", i, s.SignalType))
+	}
+	switch s.SignalType {
+	case SignalTypeGauge, SignalTypeCounter, SignalTypeHistogram, SignalTypeSummary:
+		if s.MetricName == "" {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
 		}
-		if err := validateHexID("span_id", s.SpanID, 8); err != nil {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+	case SignalTypeSpan:
+		if s.Name == "" {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: name is required for span type", i))
 		}
-		if err := validateHexID("parent_span_id", s.ParentSpanID, 8); err != nil {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+		if s.TraceID == "" {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: trace_id is required for span type", i))
 		}
+	case SignalTypeLog:
+		if s.Body == nil {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: body is required for log type", i))
+		}
+	}
+	return nil
+}
 
-		// W3C Trace Context（capability w3c_trace_context，§6.2.2）：
-		// trace-flags 是 W3C traceparent 的 1 字节字段（仅低 8 位有效）；
-		// tracestate 为有序键值对（≤ 32 成员）。详见 validation.validateTraceState。
-		if s.TraceFlags > 0xff {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("signal[%d]: trace_flags exceeds 8-bit W3C range (0x%x)", i, s.TraceFlags))
+// signalTextFields 返回参与长度/控制字符校验（L-2）的字段名与值。Body/Attributes 等
+// 结构化字段不在此处递归校验。
+func signalTextFields(s *SignalRecord) []struct{ name, val string } {
+	return []struct{ name, val string }{
+		{"signal_type", s.SignalType},
+		{"event_id", s.EventID},
+		{fieldTraceID, s.TraceID},
+		{fieldSpanID, s.SpanID},
+		{fieldParentSpanID, s.ParentSpanID},
+		{"metric_name", s.MetricName},
+		{"unit", s.Unit},
+		{"name", s.Name},
+		{"kind", s.Kind},
+		{"status_code", s.StatusCode},
+		{"status_message", s.StatusMessage},
+		{"severity_text", s.SeverityText},
+	}
+}
+
+// validateSignalFieldLengths 校验非空字符串字段的长度与控制字符约束（L-2）：
+// 在协议入口拒绝异常长输入与日志注入面。
+func validateSignalFieldLengths(i int, s *SignalRecord) error {
+	for _, f := range signalTextFields(s) {
+		if f.val == "" {
+			continue
 		}
-		if err := validateTraceState(s.TraceState); err != nil {
+		if err := validateTextField(f.name, f.val); err != nil {
 			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
 		}
+	}
+	return nil
+}
+
+// validateSignalTraceContext 校验 W3C trace 上下文（spec §6.2.1/§6.2.2）：
+// trace_id/span_id/parent_span_id 的 hex 格式、trace-flags 的 8 位范围、
+// tracestate 成员约束。空 trace ID 合法（表示该 signal 不参与 trace 关联）。
+func validateSignalTraceContext(i int, s *SignalRecord) error {
+	hexIDs := []struct {
+		name      string
+		val       string
+		wantBytes int
+	}{
+		{fieldTraceID, s.TraceID, 16},
+		{fieldSpanID, s.SpanID, 8},
+		{fieldParentSpanID, s.ParentSpanID, 8},
+	}
+	for _, id := range hexIDs {
+		if err := validateHexID(id.name, id.val, id.wantBytes); err != nil {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+		}
+	}
+	// trace-flags 是 W3C traceparent 的 1 字节字段（仅低 8 位有效）。
+	if s.TraceFlags > 0xff {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("signal[%d]: trace_flags exceeds 8-bit W3C range (0x%x)", i, s.TraceFlags))
+	}
+	// tracestate 为有序键值对（≤ 32 成员）。详见 validation.validateTraceState。
+	if err := validateTraceState(s.TraceState); err != nil {
+		return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
 	}
 	return nil
 }
@@ -182,7 +224,7 @@ type SignalRecord struct {
 	// trace_state 承载 W3C tracestate（有序键值对）。
 	// 这两个字段与 trace_id/span_id/parent_span_id 一起构成完整的 W3C traceparent 语义，
 	// 使外部请求携带的 traceparent 能在协议层无损承载，而非退化塞入 attributes。
-	TraceFlags uint32            `json:"trace_flags,omitempty"`
+	TraceFlags uint32             `json:"trace_flags,omitempty"`
 	TraceState []*TraceStateEntry `json:"trace_state,omitempty"`
 	// Histogram / Profile 载荷（core spec §6.2）。
 	// exp_histogram 用于 signal_type=histogram 且 aggregation=exponential；

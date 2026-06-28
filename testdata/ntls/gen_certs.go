@@ -6,6 +6,7 @@
 // 自签名双证书会回 bad certificate。故先生成自签名 SM2 CA，再由 CA 签发两张终端证书：
 //   - 签名证书：KeyUsage = digitalSignature
 //   - 加密证书：KeyUsage = keyEncipherment | dataEncipherment
+//
 // 满足 pollux-go ValidateTLCPCertificate（dualcert.go）与 gotlcp 握手校验。
 //
 // 运行：go run testdata/ntls/gen_certs.go

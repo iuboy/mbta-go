@@ -18,8 +18,8 @@ const (
 	TypeWindow   uint8 = 11 // S→C flow-control window
 	TypeThrottle uint8 = 12 // S→C explicit backoff
 
-	TypePing  uint8 = 13 // bidirectional health check
-	TypePong  uint8 = 14 // bidirectional health check response
+	TypePing     uint8 = 13 // bidirectional health check
+	TypePong     uint8 = 14 // bidirectional health check response
 	TypeClose    uint8 = 15 // bidirectional graceful close
 	TypeError    uint8 = 16 // bidirectional protocol error
 	TypeRedirect uint8 = 17 // S→C cluster redirect: guide client to the leader (§4.17)
