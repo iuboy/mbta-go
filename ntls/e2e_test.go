@@ -47,6 +47,7 @@ func TestE2E_NTLS_SendBatch(t *testing.T) {
 		SignKeyFile:  "../testdata/ntls/sm2_sign_key.pem",
 		EncCertFile:  "../testdata/ntls/sm2_enc_cert.pem",
 		EncKeyFile:   "../testdata/ntls/sm2_enc_key.pem",
+		CAFile:       "../testdata/ntls/sm2_ca.pem",
 		Auth:         core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
 		Policy: core.Policy{
 			SupportedCapabilities: []string{"codec_proto", "cs_gm"},
@@ -69,11 +70,11 @@ func TestE2E_NTLS_SendBatch(t *testing.T) {
 	client, err := NewClient(ClientConfig{
 		Server: addr,
 		Credentials: &ClientCredentials{
-			SignCertFile:       "../testdata/ntls/sm2_sign_cert.pem",
-			SignKeyFile:        "../testdata/ntls/sm2_sign_key.pem",
-			EncCertFile:        "../testdata/ntls/sm2_enc_cert.pem",
-			EncKeyFile:         "../testdata/ntls/sm2_enc_key.pem",
-			InsecureSkipVerify: true,
+			SignCertFile: "../testdata/ntls/sm2_sign_cert.pem",
+			SignKeyFile:  "../testdata/ntls/sm2_sign_key.pem",
+			EncCertFile:  "../testdata/ntls/sm2_enc_cert.pem",
+			EncKeyFile:   "../testdata/ntls/sm2_enc_key.pem",
+			CAFile:       "../testdata/ntls/sm2_ca.pem",
 		},
 		AgentID:      "agent-1",
 		Token:        "test-token",

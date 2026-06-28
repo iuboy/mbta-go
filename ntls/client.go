@@ -127,6 +127,11 @@ func (c *Client) SetACKHandler(h func(chunkID, ackMode string)) {
 	c.core.SetACKHandler(h)
 }
 
+// SetRedirectHandler 注册服务端 TypeRedirect（S→C 集群重定向到 leader）回调。
+func (c *Client) SetRedirectHandler(h func(payload []byte)) {
+	c.core.SetRedirectHandler(h)
+}
+
 // Close 优雅关闭：发 CLOSE 帧、drain pending ACK、关闭连接。
 func (c *Client) Close() error {
 	return c.core.Close()

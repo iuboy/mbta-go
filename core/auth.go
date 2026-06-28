@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -29,6 +30,28 @@ type AgentIdentity struct {
 
 // ErrInvalidToken is returned when token validation fails.
 var ErrInvalidToken = NewError(NumAuth, CodeAuth, "invalid token")
+
+// RedirectInfo carries the leader's reachable address, returned by a
+// RedirectChecker when this replica is NOT the HA leader and the just-authed
+// client should be redirected.
+type RedirectInfo struct {
+	LeaderAddr string // leader's externally-reachable address (host:port)
+	LeaderID   string // leader's instance ID (for logging/diagnostics)
+}
+
+// RedirectChecker is an optional callback invoked by the server after AUTH_OK,
+// right before the session enters READY. If it returns ok=true the server
+// sends a TypeRedirect frame with leaderAddr/leaderID and closes the
+// connection, steering the client to the elected leader (HA §4.17).
+//
+// A nil RedirectChecker means this server does not participate in HA redirect
+// (single-replica deployment or strict mode where only the leader listens).
+type RedirectChecker func(ctx context.Context) (RedirectInfo, bool)
+
+// ErrRedirected is returned internally after sending a TypeRedirect frame to
+// signal that the handler should stop and close the connection (not a real
+// error — the client will reconnect to the leader).
+var ErrRedirected = NewError(NumSession, CodeSession, "client redirected to leader")
 
 // TokenResolver resolves a long-term token by agent identifier. Servers whose
 // Auth implementation also satisfies this interface can suppress plaintext

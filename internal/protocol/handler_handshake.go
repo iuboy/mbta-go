@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -37,7 +38,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	// 恢复后 earlyData=true，dataLoop 可在 AUTH 前启动处理 0-RTT BATCH。
 	if ticket := msg.GetSessionTicket(); len(ticket) > 0 && h.config.SessionStore != nil {
 		if state, ok := h.config.SessionStore.Get(ticket); ok {
-			h.keys = state.Keys
+			h.keys.Store(state.Keys)
 			h.agentID = state.AgentID
 			h.earlyData = true
 			slog.Info("0-RTT resumption: keys restored from ticket", "agent", core.SanitizeForLog(h.agentID))
@@ -148,7 +149,7 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 		h.sendAuthFail(ctx, "internal_error", "key generation failed", true)
 		return core.WrapError(core.NumConfig, core.CodeConfig, "session key generation", err)
 	}
-	h.keys = keys
+	h.keys.Store(keys)
 	h.expiresAt.Store(time.Now().Add(core.DefaultSessionTTL).Unix())
 
 	okMsg := &corepb.AuthOKMessage{
@@ -187,6 +188,28 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	}
 	h.config.Metrics.AuthSuccess().Inc()
 	slog.Info("auth succeeded", "agent", core.SanitizeForLog(h.agentID), "session", string(h.sessionID), "key_id", keys.KeyID)
+
+	// HA cluster redirect (§4.17): if this replica is a follower (not the
+	// elected leader), steer the client to the leader before data flows. Done
+	// after AUTH_OK so the client has a valid session context to interpret the
+	// redirect, and before any BATCH is processed so no data is lost on the
+	// doomed connection. A nil RedirectChecker disables this (single-replica).
+	if h.config.RedirectChecker != nil {
+		info, redirect := h.config.RedirectChecker(ctx)
+		if redirect {
+			// JSON payload keeps the redirect format application-defined (avoids a
+			// proto round-trip); the agent decodes {"leaderAddr","leaderId"}.
+			payload, _ := json.Marshal(map[string]string{
+				"leaderAddr": info.LeaderAddr,
+				"leaderId":   info.LeaderID,
+			})
+			if err := SendControlFrame(ctx, h.tr, core.TypeRedirect, core.FlagControl, payload); err != nil {
+				slog.Warn("send redirect frame failed", "error", err)
+			}
+			slog.Info("redirected client to leader", "agent", core.SanitizeForLog(h.agentID), "leader", info.LeaderAddr)
+			return core.ErrRedirected
+		}
+	}
 	return nil
 }
 

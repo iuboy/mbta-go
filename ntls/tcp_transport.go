@@ -23,6 +23,7 @@ type tcpTransport struct {
 
 	controlCh chan core.Frame // control 帧（ChannelControl）
 	dataCh    chan core.Frame // data 帧（BATCH/DATAGRAM）
+	done      chan struct{}   // Close 时关闭，唤醒阻塞在 channel 发送的 readLoop
 
 	closeMu sync.Mutex
 	closed  bool
@@ -34,12 +35,16 @@ func newTCPTransport(conn net.Conn) *tcpTransport {
 		conn:      conn,
 		controlCh: make(chan core.Frame, 16),
 		dataCh:    make(chan core.Frame, 64),
+		done:      make(chan struct{}),
 	}
 	go t.readLoop()
 	return t
 }
 
 // readLoop 单连接读帧 → 按 ChannelID 分发。
+// 发送经 select+done：若某一通道的消费者先退出（半死状态），readLoop 不会永久阻塞
+// 在该通道的发送上——Close 关闭 done（同时关 conn 让 core.Read 返回 err）即可唤醒退出，
+// 避免 goroutine 泄漏（tcp-binding §3.3 半开连接处理）。
 func (t *tcpTransport) readLoop() {
 	for {
 		f, err := core.Read(t.conn, core.DefaultLimits())
@@ -48,10 +53,14 @@ func (t *tcpTransport) readLoop() {
 			close(t.dataCh)
 			return
 		}
+		ch := t.dataCh
 		if f.Header.ChannelID == core.ChannelControl {
-			t.controlCh <- f
-		} else {
-			t.dataCh <- f
+			ch = t.controlCh
+		}
+		select {
+		case ch <- f:
+		case <-t.done:
+			return
 		}
 	}
 }
@@ -113,5 +122,6 @@ func (t *tcpTransport) Close() error {
 		return nil
 	}
 	t.closed = true
+	close(t.done) // 唤醒可能阻塞在 channel 发送的 readLoop
 	return t.conn.Close()
 }

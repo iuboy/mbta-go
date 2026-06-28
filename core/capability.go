@@ -26,12 +26,14 @@ var stableCapabilities = map[string]bool{
 	// C.3 帧与编码
 	"more_follows": true, "coalesce_control": true,
 	// C.4 数据与算法
-	"comp_zstd": true, "comp_lz4": true, "comp_gzip": true,
+	"comp_zstd": true, "comp_lz4": true, "comp_gzip": true, "comp_none": true,
 	// 三种 codec 均已实现（codec_proto/cbor/json 见 core/codec_*.go + SignalCodec 注册表），
 	// 三者均作为可协商 stable capability（spec 附录 C.4）。
 	// pickCodec 按优先级 proto > cbor > json 选定，proto 是默认值。
 	"codec_proto": true, "codec_cbor": true, "codec_json": true,
 	"cs_intl": true, "cs_gm": true, "histogram_exponential": true,
+	// Trace 传播（spec §6.2.2）
+	"w3c_trace_context": true, // batch/stream 级 W3C traceparent/tracestate 协议级承载
 }
 
 // IsStableCapability 报告是否为已注册的 stable capability。

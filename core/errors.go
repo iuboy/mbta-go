@@ -21,9 +21,11 @@ const (
 
 	// 协议/会话 (3000-3099)
 	NumHandshake = 3000 // 握手失败
-	NumAuth      = 3001 // 认证失败
-	NumSession   = 3002 // 会话状态错误
-	NumProtocol  = 3003 // 协议违规（非法帧类型、非法状态转换）
+	// NumAuth 认证失败。语义属"安全"类，但状态机上紧随握手（HELLO→AUTH），故归协议段；
+	// spec §13 的安全段 (8000-8099) 预留给传输层安全（TLS/TLCP 握手失败等）。
+	NumAuth     = 3001 // 认证失败
+	NumSession  = 3002 // 会话状态错误
+	NumProtocol = 3003 // 协议违规（非法帧类型、非法状态转换）
 
 	// 数据/业务 (4000-4099)
 	NumBatch      = 4000 // 批次处理失败
@@ -117,9 +119,9 @@ const (
 
 // Error 是 MBTA 库的标准错误类型，携带数字错误码和字符串错误码。
 type Error struct {
-	NumCode int    // 数字错误码，用于程序快速匹配（switch、map）
+	NumCode int    // 数字错误码，用于程序快速匹配
 	Code    string // 字符串错误码，用于日志和线缆传输
-	Message string // 人类可读描述
+	Message string // 描述
 	Err     error  // 可选的被包装错误
 }
 

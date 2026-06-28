@@ -58,6 +58,8 @@ func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 					return
 				}
 			}
+		case core.TypeRedirect:
+			c.dispatchRedirect(f.Payload)
 		}
 	}
 }

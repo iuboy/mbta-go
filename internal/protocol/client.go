@@ -105,6 +105,9 @@ type CoreClient struct {
 	// ackHandler 在收到 ACK 时回调，接收 (chunkID, ackMode)。
 	ackHandler atomic.Pointer[func(chunkID, ackMode string)]
 
+	// redirectHandler 在收到 TypeRedirect 时回调，接收原始 payload（应用层解码）。
+	redirectHandler atomic.Pointer[func(payload []byte)]
+
 	ackTimeout        time.Duration // max time to wait for ACK (default 5 min)
 	heartbeatInterval time.Duration // PING 发送间隔（从 HELLO_ACK 获取，默认 30s）
 

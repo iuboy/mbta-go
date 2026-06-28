@@ -34,12 +34,13 @@ const CodeEnvelopeAlgoMismatch = "envelope_algo_mismatch"
 
 // HandlerConfig 是 CoreHandler 的配置（传输无关）。
 type HandlerConfig struct {
-	Auth         core.TokenValidator
-	Policy       core.Policy
-	Sink         core.EventSink
-	Metrics      core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreHandler）
-	ServerID     string
-	SessionStore *core.SessionStore // 0-RTT resumption（可选，nil = 不支持 early_data）
+	Auth            core.TokenValidator
+	Policy          core.Policy
+	Sink            core.EventSink
+	Metrics         core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreHandler）
+	ServerID        string
+	SessionStore    *core.SessionStore  // 0-RTT resumption（可选，nil = 不支持 early_data）
+	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
 }
 
 // CoreHandler 是 server 端协议状态机核心，仅依赖 Transport 接口，
@@ -51,7 +52,7 @@ type CoreHandler struct {
 
 	sm         *core.ServerMachine
 	negotiated *core.NegotiateResult
-	keys       *core.SessionKeys
+	keys       atomic.Pointer[core.SessionKeys] // 0-RTT：controlLoop(handleAuth) 与 dataLoop(processBatch) 并发读写
 	replay     *core.ReplayCache
 	window     *core.Window
 	inflight   *core.Inflight
@@ -64,6 +65,7 @@ type CoreHandler struct {
 	closeTimeout   time.Duration // 优雅关闭 drain 超时（从 CloseMessage.close_timeout_ms 协商，默认 5s）
 	earlyData      bool          // 0-RTT resumption：HELLO 恢复 keys 后置位，dataLoop early 启动
 	lastPressure   atomic.Value
+	pressureMu     sync.Mutex // 保护 lastPressure 的"比较-更新-下发"序列（§9.2 避免同值重复 WINDOW）
 
 	dataOnce sync.Once
 	dataWG   sync.WaitGroup // 跟踪 data frame 处理 goroutine
@@ -121,9 +123,9 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 }
 
 func (h *CoreHandler) cleanup() {
-	if h.keys != nil {
-		h.keys.Zero()
-		h.keys = nil
+	if k := h.keys.Load(); k != nil {
+		k.Zero()
+		h.keys.Store(nil)
 	}
 }
 

@@ -90,6 +90,17 @@ func toProtoSignalRecord(s *SignalRecord) *corepb.SignalRecord {
 			pb.MetricFields[k] = v
 		}
 	}
+	// W3C Trace Context（capability w3c_trace_context，§6.2.2）。
+	pb.TraceFlags = s.TraceFlags
+	if len(s.TraceState) > 0 {
+		pb.TraceState = make([]*corepb.TraceStateEntry, len(s.TraceState))
+		for i, e := range s.TraceState {
+			pb.TraceState[i] = &corepb.TraceStateEntry{Key: e.Key, Value: e.Value}
+		}
+	}
+	// Histogram exponential / Profile 载荷（§6.2，附录 B）。
+	pb.ExpHistogram = s.ExpHistogram
+	pb.Profile = s.Profile
 	return pb
 }
 
@@ -144,6 +155,17 @@ func fromProtoSignalRecord(s *corepb.SignalRecord) *SignalRecord {
 			r.MetricFields[k] = v
 		}
 	}
+	// W3C Trace Context（capability w3c_trace_context，§6.2.2）。
+	r.TraceFlags = s.GetTraceFlags()
+	if ts := s.GetTraceState(); len(ts) > 0 {
+		r.TraceState = make([]*TraceStateEntry, len(ts))
+		for i, e := range ts {
+			r.TraceState[i] = &TraceStateEntry{Key: e.GetKey(), Value: e.GetValue()}
+		}
+	}
+	// Histogram exponential / Profile 载荷（§6.2，附录 B）。
+	r.ExpHistogram = s.GetExpHistogram()
+	r.Profile = s.GetProfile()
 	return r
 }
 

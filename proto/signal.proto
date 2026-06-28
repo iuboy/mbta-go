@@ -56,6 +56,25 @@ message ProfilePayload {
   string log_record_ref = 6;
 }
 
+// W3C Trace Context tracestate 成员（有序键值对，§6.2.2 / W3C Trace Context）。
+// tracestate 是有序列表（最多 32 成员），不可用 map（map 不保序）。
+message TraceStateEntry {
+  string key = 1;   // W3C key（vendor-allocated，≤ 256 字符）
+  string value = 2; // W3C value（≤ 256 字符）
+}
+
+// Batch/stream 级 W3C trace 上下文继承点（§6.2.2，capability w3c_trace_context）。
+// 同一 trace 的多个 signal 共享一份上下文，偏离时才在 SignalRecord 单独写
+// trace 字段（与逐信号冗余优化合并）。外部请求携带 traceparent/tracestate 进入
+// mbta 边界时由此协议级承载，而非逐 signal 塞 Attributes（保留 W3C 语义）。
+message TraceContext {
+  string trace_id = 1;                      // 32 位小写 hex（16B），非全零
+  string span_id = 2;                       // 16 位小写 hex（8B），非全零
+  string parent_span_id = 3;                // 16 位小写 hex（8B），可选
+  uint32 trace_flags = 4;                   // W3C trace-flags（采样位等，低 8 位有效）
+  repeated TraceStateEntry trace_state = 5; // W3C tracestate，有序
+}
+
 // 统一信号外壳。signal_type 必填；log MUST 用 "log"。
 message SignalRecord {
   string signal_type = 1;
@@ -82,4 +101,6 @@ message SignalRecord {
   string status_message = 22;
   ExponentialHistogram exp_histogram = 23;  // signal_type=histogram 且 aggregation=exponential
   ProfilePayload profile = 24;              // signal_type=profile
+  uint32 trace_flags = 25;                  // W3C traceparent trace-flags（capability w3c_trace_context）
+  repeated TraceStateEntry trace_state = 26; // W3C tracestate（有序，w3c_trace_context）
 }

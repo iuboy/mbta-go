@@ -584,8 +584,9 @@ type BatchMessage struct {
 	ChunkId       []byte                 `protobuf:"bytes,2,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"` // ULID 16B
 	Tag           string                 `protobuf:"bytes,3,opt,name=tag,proto3" json:"tag,omitempty"`
 	Source        string                 `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
-	EventsCount   int32                  `protobuf:"varint,5,opt,name=events_count,json=eventsCount,proto3" json:"events_count,omitempty"` // 供 RawEventSink 快速路径
-	Batch         []byte                 `protobuf:"bytes,6,opt,name=batch,proto3" json:"batch,omitempty"`                                 // SignalBatch 编码字节
+	EventsCount   int32                  `protobuf:"varint,5,opt,name=events_count,json=eventsCount,proto3" json:"events_count,omitempty"`   // 供 RawEventSink 快速路径
+	Batch         []byte                 `protobuf:"bytes,6,opt,name=batch,proto3" json:"batch,omitempty"`                                   // SignalBatch 编码字节
+	TraceContext  *TraceContext          `protobuf:"bytes,7,opt,name=trace_context,json=traceContext,proto3" json:"trace_context,omitempty"` // batch 级 W3C trace 上下文继承（capability w3c_trace_context）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -658,6 +659,13 @@ func (x *BatchMessage) GetEventsCount() int32 {
 func (x *BatchMessage) GetBatch() []byte {
 	if x != nil {
 		return x.Batch
+	}
+	return nil
+}
+
+func (x *BatchMessage) GetTraceContext() *TraceContext {
+	if x != nil {
+		return x.TraceContext
 	}
 	return nil
 }
@@ -1430,7 +1438,7 @@ var File_control_proto protoreflect.FileDescriptor
 
 const file_control_proto_rawDesc = "" +
 	"\n" +
-	"\rcontrol.proto\x12\ambta.v1\x1a\x0eenvelope.proto\"\xcb\x03\n" +
+	"\rcontrol.proto\x12\ambta.v1\x1a\x0eenvelope.proto\x1a\fsignal.proto\"\xcb\x03\n" +
 	"\fHelloMessage\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x1f\n" +
@@ -1489,14 +1497,15 @@ const file_control_proto_rawDesc = "" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\x1c\n" +
 	"\tretryable\x18\x03 \x01(\bR\tretryable\x12'\n" +
-	"\x0fchallenge_nonce\x18\x04 \x01(\fR\x0echallengeNonce\"\x9e\x01\n" +
+	"\x0fchallenge_nonce\x18\x04 \x01(\fR\x0echallengeNonce\"\xda\x01\n" +
 	"\fBatchMessage\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bchunk_id\x18\x02 \x01(\fR\achunkId\x12\x10\n" +
 	"\x03tag\x18\x03 \x01(\tR\x03tag\x12\x16\n" +
 	"\x06source\x18\x04 \x01(\tR\x06source\x12!\n" +
 	"\fevents_count\x18\x05 \x01(\x05R\veventsCount\x12\x14\n" +
-	"\x05batch\x18\x06 \x01(\fR\x05batch\"w\n" +
+	"\x05batch\x18\x06 \x01(\fR\x05batch\x12:\n" +
+	"\rtrace_context\x18\a \x01(\v2\x15.mbta.v1.TraceContextR\ftraceContext\"w\n" +
 	"\x0fDatagramMessage\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bchunk_id\x18\x02 \x01(\fR\achunkId\x12\x14\n" +
@@ -1600,6 +1609,7 @@ var file_control_proto_goTypes = []any{
 	(Codec)(0),                // 18: mbta.v1.Codec
 	(Compression)(0),          // 19: mbta.v1.Compression
 	(CipherSuite)(0),          // 20: mbta.v1.CipherSuite
+	(*TraceContext)(nil),      // 21: mbta.v1.TraceContext
 }
 var file_control_proto_depIdxs = []int32{
 	18, // 0: mbta.v1.HelloAckMessage.codec:type_name -> mbta.v1.Codec
@@ -1607,14 +1617,15 @@ var file_control_proto_depIdxs = []int32{
 	20, // 2: mbta.v1.HelloAckMessage.cipher_suite:type_name -> mbta.v1.CipherSuite
 	12, // 3: mbta.v1.HelloAckMessage.initial_window:type_name -> mbta.v1.WindowMessage
 	20, // 4: mbta.v1.AuthOKMessage.cipher_suite:type_name -> mbta.v1.CipherSuite
-	0,  // 5: mbta.v1.AckMessage.ack_mode:type_name -> mbta.v1.AckMode
-	0,  // 6: mbta.v1.PartialAckMessage.ack_mode:type_name -> mbta.v1.AckMode
-	10, // 7: mbta.v1.PartialAckMessage.rejected:type_name -> mbta.v1.RejectedEvent
-	8,  // [8:8] is the sub-list for method output_type
-	8,  // [8:8] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	21, // 5: mbta.v1.BatchMessage.trace_context:type_name -> mbta.v1.TraceContext
+	0,  // 6: mbta.v1.AckMessage.ack_mode:type_name -> mbta.v1.AckMode
+	0,  // 7: mbta.v1.PartialAckMessage.ack_mode:type_name -> mbta.v1.AckMode
+	10, // 8: mbta.v1.PartialAckMessage.rejected:type_name -> mbta.v1.RejectedEvent
+	9,  // [9:9] is the sub-list for method output_type
+	9,  // [9:9] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_control_proto_init() }
@@ -1623,6 +1634,7 @@ func file_control_proto_init() {
 		return
 	}
 	file_envelope_proto_init()
+	file_signal_proto_init()
 	file_control_proto_msgTypes[0].OneofWrappers = []any{}
 	file_control_proto_msgTypes[3].OneofWrappers = []any{}
 	file_control_proto_msgTypes[10].OneofWrappers = []any{}

@@ -25,9 +25,10 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 		return
 	}
 
-	// Verify HMAC（在解密/解码前）。
-	if h.keys != nil {
-		ok, verr := core.VerifyMAC(h.keys.HMACKey(), env)
+	// Verify HMAC（在解密/解码前）。keys 经 atomic 读取，避免与 handleAuth 颁发新 keys 竞态（0-RTT）。
+	keys := h.keys.Load()
+	if keys != nil {
+		ok, verr := core.VerifyMAC(keys.HMACKey(), env)
 		if verr != nil || !ok {
 			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "hmac_mismatch", "HMAC verification failed", false)
 			h.config.Metrics.HMACFailures().Inc()
@@ -42,8 +43,8 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 
 	// Open envelope（解密+解压）。
 	var aeadKey []byte
-	if h.keys != nil {
-		aeadKey = h.keys.AEADKey()
+	if keys != nil {
+		aeadKey = keys.AEADKey()
 	}
 	batchPayload, err := core.Open(env, aeadKey)
 	if err != nil {
@@ -108,16 +109,17 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 		slog.Debug("datagram decode envelope failed", "error", err)
 		return // 静默丢弃
 	}
-	if h.keys != nil {
-		ok, _ := core.VerifyMAC(h.keys.HMACKey(), env)
+	keys := h.keys.Load()
+	if keys != nil {
+		ok, _ := core.VerifyMAC(keys.HMACKey(), env)
 		if !ok {
 			slog.Debug("datagram hmac failed")
 			return // HMAC 失败静默丢弃
 		}
 	}
 	var aeadKey []byte
-	if h.keys != nil {
-		aeadKey = h.keys.AEADKey()
+	if keys != nil {
+		aeadKey = keys.AEADKey()
 	}
 	batchPayload, err := core.Open(env, aeadKey)
 	if err != nil {
@@ -240,12 +242,7 @@ func (h *CoreHandler) routeAndACK(ctx context.Context, agentID, chunkID string, 
 				slog.Warn("event routing failed", "error", err)
 			}
 			pressure := h.config.Sink.OnPressure(h.agentID)
-			if pressure != "" && pressure != h.loadLastPressure() {
-				h.lastPressure.Store(pressure)
-				b, e, by := pressureToWindow(pressure)
-				h.window.Update(b, e, by)
-				h.sendWindowUpdate(ctx, b, e, by, string(pressure))
-			}
+			h.applyPressure(ctx, pressure)
 		}
 	}
 
@@ -267,13 +264,28 @@ func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteRe
 	default:
 		*ackMode = corepb.AckMode_ACK_MODE_ACCEPTED
 	}
-	if result.Pressure != "" && result.Pressure != h.loadLastPressure() {
-		h.lastPressure.Store(result.Pressure)
-		b, e, by := pressureToWindow(result.Pressure)
-		h.window.Update(b, e, by)
-		h.sendWindowUpdate(ctx, b, e, by, string(result.Pressure))
+	if result.Pressure != "" {
+		h.applyPressure(ctx, result.Pressure)
 	}
 	return false
+}
+
+// applyPressure 在 pressure 变化时更新窗口并下发 WINDOW（core spec §9.2：取值变化时才发送，
+// 避免同值重复）。加锁保证并发 BATCH 的"比较-更新-下发"原子——否则两个 goroutine 可能
+// 同时读到旧值并各发一份相同 WINDOW。
+func (h *CoreHandler) applyPressure(ctx context.Context, pressure core.PressureState) {
+	if pressure == "" {
+		return
+	}
+	h.pressureMu.Lock()
+	defer h.pressureMu.Unlock()
+	if pressure == h.loadLastPressure() {
+		return
+	}
+	h.lastPressure.Store(pressure)
+	b, e, by := pressureToWindow(pressure)
+	h.window.Update(b, e, by)
+	h.sendWindowUpdate(ctx, b, e, by, string(pressure))
 }
 
 func (h *CoreHandler) loadLastPressure() core.PressureState {

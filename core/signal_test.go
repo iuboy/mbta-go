@@ -58,8 +58,8 @@ func TestSignalBatchValidate(t *testing.T) {
 				SchemaURL: "https://example.com/schema",
 				Signals: []*SignalRecord{
 					{SignalType: "log", Body: "msg"},
-					{SignalType: "metric", MetricName: "req_total"},
-					{SignalType: "span", Name: "GET /api", TraceID: "t1"},
+					{SignalType: "counter", MetricName: "req_total"},
+					{SignalType: "span", Name: "GET /api", TraceID: "0123456789abcdef0123456789abcdef"},
 				},
 			},
 			wantErr: false,
@@ -175,9 +175,9 @@ func TestSignalRecordFields(t *testing.T) {
 		}
 	})
 
-	t.Run("metric signal", func(t *testing.T) {
+	t.Run("counter signal", func(t *testing.T) {
 		sig := &SignalRecord{
-			SignalType: "metric",
+			SignalType: "counter",
 			MetricName: "http_requests_total",
 			MetricFields: map[string]float64{
 				"count": 100.0,
@@ -188,8 +188,8 @@ func TestSignalRecordFields(t *testing.T) {
 			IsMonotonic: true,
 		}
 
-		if sig.SignalType != "metric" {
-			t.Errorf("SignalType = %q, want 'metric'", sig.SignalType)
+		if sig.SignalType != "counter" {
+			t.Errorf("SignalType = %q, want 'counter'", sig.SignalType)
 		}
 		if sig.MetricName != "http_requests_total" {
 			t.Errorf("MetricName = %q, want 'http_requests_total'", sig.MetricName)
@@ -205,9 +205,9 @@ func TestSignalRecordFields(t *testing.T) {
 	t.Run("span signal", func(t *testing.T) {
 		sig := &SignalRecord{
 			SignalType:      "span",
-			TraceID:         "trace-123",
-			SpanID:          "span-456",
-			ParentSpanID:    "parent-789",
+			TraceID:         "0123456789abcdef0123456789abcdef",
+			SpanID:          "0123456789abcdef",
+			ParentSpanID:    "fedcba9876543210",
 			Name:            "HTTP GET /api/users",
 			Kind:            "client",
 			StartTimeUnixMs: 1234567890,
@@ -338,8 +338,8 @@ func TestSignalBatchWithMultipleSignals(t *testing.T) {
 	batch := &SignalBatch{
 		Signals: []*SignalRecord{
 			{SignalType: "log", EventID: "evt-1", Body: "msg1"},
-			{SignalType: "metric", EventID: "evt-2", MetricName: "m1"},
-			{SignalType: "span", EventID: "evt-3", Name: "s1", TraceID: "t1"},
+			{SignalType: "counter", EventID: "evt-2", MetricName: "m1"},
+			{SignalType: "span", EventID: "evt-3", Name: "s1", TraceID: "0123456789abcdef0123456789abcdef"},
 			{SignalType: "log", EventID: "evt-4", Body: "msg4"},
 		},
 	}
@@ -374,18 +374,80 @@ func TestSignalRecordTimestamps(t *testing.T) {
 func TestSignalRecordTraceContext(t *testing.T) {
 	sig := &SignalRecord{
 		SignalType:   "span",
-		TraceID:      "trace-123",
-		SpanID:       "span-456",
-		ParentSpanID: "parent-789",
+		TraceID:      "0123456789abcdef0123456789abcdef",
+		SpanID:       "0123456789abcdef",
+		ParentSpanID: "fedcba9876543210",
 	}
 
-	if sig.TraceID != "trace-123" {
-		t.Errorf("TraceID = %q, want 'trace-123'", sig.TraceID)
+	if sig.TraceID != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("TraceID = %q, want '0123456789abcdef0123456789abcdef'", sig.TraceID)
 	}
-	if sig.SpanID != "span-456" {
-		t.Errorf("SpanID = %q, want 'span-456'", sig.SpanID)
+	if sig.SpanID != "0123456789abcdef" {
+		t.Errorf("SpanID = %q, want '0123456789abcdef'", sig.SpanID)
 	}
-	if sig.ParentSpanID != "parent-789" {
-		t.Errorf("ParentSpanID = %q, want 'parent-789'", sig.ParentSpanID)
+	if sig.ParentSpanID != "fedcba9876543210" {
+		t.Errorf("ParentSpanID = %q, want 'fedcba9876543210'", sig.ParentSpanID)
 	}
+}
+
+// TestSignalRecordW3CTraceContext 校验 W3C trace_flags/trace_state 的协议级承载
+// （capability w3c_trace_context，§6.2.2）：校验规则 + proto 编解码往返不丢字段。
+func TestSignalRecordW3CTraceContext(t *testing.T) {
+	const validTraceID = "0123456789abcdef0123456789abcdef"
+
+	t.Run("trace_flags over 8-bit rejected", func(t *testing.T) {
+		b := SignalBatch{Signals: []*SignalRecord{
+			{SignalType: "span", Name: "s", TraceID: validTraceID, TraceFlags: 0x100},
+		}}
+		if err := b.Validate(); err == nil {
+			t.Error("expected error for trace_flags > 0xff")
+		}
+	})
+
+	t.Run("trace_state over 32 entries rejected", func(t *testing.T) {
+		sig := &SignalRecord{
+			SignalType: "span", Name: "s", TraceID: validTraceID,
+			TraceState: make([]*TraceStateEntry, 33),
+		}
+		for i := range sig.TraceState {
+			sig.TraceState[i] = &TraceStateEntry{Key: "k", Value: "v"}
+		}
+		if err := (&SignalBatch{Signals: []*SignalRecord{sig}}).Validate(); err == nil {
+			t.Error("expected error for > 32 trace_state entries")
+		}
+	})
+
+	t.Run("valid trace context passes", func(t *testing.T) {
+		b := SignalBatch{Signals: []*SignalRecord{
+			{SignalType: "span", Name: "s", TraceID: validTraceID,
+				SpanID: "0123456789abcdef", TraceFlags: 0x01,
+				TraceState: []*TraceStateEntry{{Key: "vendor", Value: "value"}}},
+		}}
+		if err := b.Validate(); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("proto round-trip preserves trace_flags and trace_state", func(t *testing.T) {
+		orig := &SignalBatch{Signals: []*SignalRecord{
+			{SignalType: "span", Name: "s", TraceID: validTraceID,
+				SpanID: "0123456789abcdef", TraceFlags: 0x01,
+				TraceState: []*TraceStateEntry{{Key: "a", Value: "1"}, {Key: "b", Value: "2"}}},
+		}}
+		data, err := MarshalSignalBatch(orig)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		got, err := UnmarshalSignalBatch(data)
+		if err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		s := got.Signals[0]
+		if s.TraceFlags != 0x01 {
+			t.Errorf("TraceFlags = 0x%x, want 0x01", s.TraceFlags)
+		}
+		if len(s.TraceState) != 2 || s.TraceState[0].Key != "a" || s.TraceState[1].Value != "2" {
+			t.Errorf("TraceState order/content lost: %+v", s.TraceState)
+		}
+	})
 }

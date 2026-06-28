@@ -3,6 +3,7 @@ syntax = "proto3";
 package mbta.v1;
 
 import "envelope.proto";
+import "signal.proto";
 
 option go_package = "github.com/iuboy/mbta-go/corepb;mbta";
 
@@ -78,6 +79,7 @@ message BatchMessage {
   string source = 4;
   int32 events_count = 5;               // 供 RawEventSink 快速路径
   bytes batch = 6;                      // SignalBatch 编码字节
+  TraceContext trace_context = 7;       // batch 级 W3C trace 上下文继承（capability w3c_trace_context）
 }
 
 message DatagramMessage {

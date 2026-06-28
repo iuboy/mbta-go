@@ -56,7 +56,7 @@ var knownTypes = map[uint8]bool{
 	TypeAck: true, TypeNack: true, TypePartialAck: true,
 	TypeWindow: true, TypeThrottle: true,
 	TypePing: true, TypePong: true,
-	TypeClose: true, TypeError: true,
+	TypeClose: true, TypeError: true, TypeRedirect: true,
 }
 
 // ValidateFlags 校验 flags 的位组合合法性（core spec §3.1）。
@@ -163,8 +163,13 @@ func Read(r io.Reader, lim Limits, supportedVersions ...byte) (Frame, error) {
 
 	payload := make([]byte, length)
 	if length > 0 {
-		if _, err := io.ReadFull(r, payload); err != nil {
-			_, _ = io.CopyN(io.Discard, r, int64(length)-int64(len(payload)))
+		n, err := io.ReadFull(r, payload)
+		if err != nil {
+			// 短读：drain 声明的剩余字节以维持帧边界对齐（core spec §2.2 / tcp-binding §3.3）。
+			// 必须用实际读取数 n（非 len(payload)，后者恒等于 length 致 drain 恒为 0）。
+			if remaining := int64(length) - int64(n); remaining > 0 {
+				_, _ = io.CopyN(io.Discard, r, remaining)
+			}
 			return Frame{}, WrapError(NumProtocol, CodeProtocol, "read payload", err)
 		}
 	}
