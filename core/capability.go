@@ -32,6 +32,8 @@ var stableCapabilities = map[string]bool{
 	// pickCodec 按优先级 proto > cbor > json 选定，proto 是默认值。
 	"codec_proto": true, "codec_cbor": true, "codec_json": true,
 	"cs_intl": true, "cs_gm": true, "histogram_exponential": true,
+	// Trace 传播（spec §6.2.2）
+	"w3c_trace_context": true, // batch/stream 级 W3C traceparent/tracestate 协议级承载
 }
 
 // IsStableCapability 报告是否为已注册的 stable capability。

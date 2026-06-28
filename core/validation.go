@@ -82,6 +82,29 @@ func validateHexID(name, val string, wantBytes int) error {
 	return nil
 }
 
+// validateTraceState 校验 W3C tracestate 成员（spec §6.2.2 / W3C Trace Context）。
+// tracestate 最多 32 个成员，每个 key/value 不超 256 字符且不含控制字符。
+// 多余成员不静默截断——返回错误让调用方显式收敛，避免无声丢语义。
+func validateTraceState(entries []*TraceStateEntry) error {
+	if len(entries) > 32 {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("trace_state exceeds 32 entries (got %d)", len(entries)))
+	}
+	for i, e := range entries {
+		if e == nil || e.Key == "" {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("trace_state[%d]: empty key", i))
+		}
+		if err := validateTextField(fmt.Sprintf("trace_state[%d].key", i), e.Key); err != nil {
+			return err
+		}
+		if err := validateTextField(fmt.Sprintf("trace_state[%d].value", i), e.Value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SanitizeForLog 清洗用于日志输出的网络来源字符串：截断超长值，把所有 C0 控制字符
 // （0x00-0x1F）和 DEL（0x7F）替换为空格。用于 slog 打印 reason 等不可信字段，
 // 防御日志注入（换行伪造日志行、ANSI 转义终端注入、null 截断等）。

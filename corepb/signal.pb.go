@@ -512,6 +512,140 @@ func (x *ProfilePayload) GetLogRecordRef() string {
 	return ""
 }
 
+// W3C Trace Context tracestate 成员（有序键值对，§6.2.2 / W3C Trace Context）。
+// tracestate 是有序列表（最多 32 成员），不可用 map（map 不保序）。
+type TraceStateEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`     // W3C key（vendor-allocated，≤ 256 字符）
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"` // W3C value（≤ 256 字符）
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TraceStateEntry) Reset() {
+	*x = TraceStateEntry{}
+	mi := &file_signal_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TraceStateEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TraceStateEntry) ProtoMessage() {}
+
+func (x *TraceStateEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_signal_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TraceStateEntry.ProtoReflect.Descriptor instead.
+func (*TraceStateEntry) Descriptor() ([]byte, []int) {
+	return file_signal_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *TraceStateEntry) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *TraceStateEntry) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+// Batch/stream 级 W3C trace 上下文继承点（§6.2.2，capability w3c_trace_context）。
+// 同一 trace 的多个 signal 共享一份上下文，偏离时才在 SignalRecord 单独写
+// trace 字段（与逐信号冗余优化合并）。外部请求携带 traceparent/tracestate 进入
+// mbta 边界时由此协议级承载，而非逐 signal 塞 Attributes（保留 W3C 语义）。
+type TraceContext struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TraceId       string                 `protobuf:"bytes,1,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`                  // 32 位小写 hex（16B），非全零
+	SpanId        string                 `protobuf:"bytes,2,opt,name=span_id,json=spanId,proto3" json:"span_id,omitempty"`                     // 16 位小写 hex（8B），非全零
+	ParentSpanId  string                 `protobuf:"bytes,3,opt,name=parent_span_id,json=parentSpanId,proto3" json:"parent_span_id,omitempty"` // 16 位小写 hex（8B），可选
+	TraceFlags    uint32                 `protobuf:"varint,4,opt,name=trace_flags,json=traceFlags,proto3" json:"trace_flags,omitempty"`        // W3C trace-flags（采样位等，低 8 位有效）
+	TraceState    []*TraceStateEntry     `protobuf:"bytes,5,rep,name=trace_state,json=traceState,proto3" json:"trace_state,omitempty"`         // W3C tracestate，有序
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TraceContext) Reset() {
+	*x = TraceContext{}
+	mi := &file_signal_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TraceContext) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TraceContext) ProtoMessage() {}
+
+func (x *TraceContext) ProtoReflect() protoreflect.Message {
+	mi := &file_signal_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TraceContext.ProtoReflect.Descriptor instead.
+func (*TraceContext) Descriptor() ([]byte, []int) {
+	return file_signal_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *TraceContext) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
+	}
+	return ""
+}
+
+func (x *TraceContext) GetSpanId() string {
+	if x != nil {
+		return x.SpanId
+	}
+	return ""
+}
+
+func (x *TraceContext) GetParentSpanId() string {
+	if x != nil {
+		return x.ParentSpanId
+	}
+	return ""
+}
+
+func (x *TraceContext) GetTraceFlags() uint32 {
+	if x != nil {
+		return x.TraceFlags
+	}
+	return 0
+}
+
+func (x *TraceContext) GetTraceState() []*TraceStateEntry {
+	if x != nil {
+		return x.TraceState
+	}
+	return nil
+}
+
 // 统一信号外壳。signal_type 必填；log MUST 用 "log"。
 type SignalRecord struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
@@ -539,13 +673,15 @@ type SignalRecord struct {
 	StatusMessage      string                 `protobuf:"bytes,22,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
 	ExpHistogram       *ExponentialHistogram  `protobuf:"bytes,23,opt,name=exp_histogram,json=expHistogram,proto3" json:"exp_histogram,omitempty"` // signal_type=histogram 且 aggregation=exponential
 	Profile            *ProfilePayload        `protobuf:"bytes,24,opt,name=profile,proto3" json:"profile,omitempty"`                               // signal_type=profile
+	TraceFlags         uint32                 `protobuf:"varint,25,opt,name=trace_flags,json=traceFlags,proto3" json:"trace_flags,omitempty"`      // W3C traceparent trace-flags（capability w3c_trace_context）
+	TraceState         []*TraceStateEntry     `protobuf:"bytes,26,rep,name=trace_state,json=traceState,proto3" json:"trace_state,omitempty"`       // W3C tracestate（有序，w3c_trace_context）
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
 
 func (x *SignalRecord) Reset() {
 	*x = SignalRecord{}
-	mi := &file_signal_proto_msgTypes[6]
+	mi := &file_signal_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -557,7 +693,7 @@ func (x *SignalRecord) String() string {
 func (*SignalRecord) ProtoMessage() {}
 
 func (x *SignalRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_signal_proto_msgTypes[6]
+	mi := &file_signal_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -570,7 +706,7 @@ func (x *SignalRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignalRecord.ProtoReflect.Descriptor instead.
 func (*SignalRecord) Descriptor() ([]byte, []int) {
-	return file_signal_proto_rawDescGZIP(), []int{6}
+	return file_signal_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SignalRecord) GetSignalType() string {
@@ -741,6 +877,20 @@ func (x *SignalRecord) GetProfile() *ProfilePayload {
 	return nil
 }
 
+func (x *SignalRecord) GetTraceFlags() uint32 {
+	if x != nil {
+		return x.TraceFlags
+	}
+	return 0
+}
+
+func (x *SignalRecord) GetTraceState() []*TraceStateEntry {
+	if x != nil {
+		return x.TraceState
+	}
+	return nil
+}
+
 var File_signal_proto protoreflect.FileDescriptor
 
 const file_signal_proto_rawDesc = "" +
@@ -791,7 +941,18 @@ const file_signal_proto_rawDesc = "" +
 	"\ftrace_id_ref\x18\x04 \x01(\tR\n" +
 	"traceIdRef\x12\x1e\n" +
 	"\vspan_id_ref\x18\x05 \x01(\tR\tspanIdRef\x12$\n" +
-	"\x0elog_record_ref\x18\x06 \x01(\tR\flogRecordRef\"\xcd\b\n" +
+	"\x0elog_record_ref\x18\x06 \x01(\tR\flogRecordRef\"9\n" +
+	"\x0fTraceStateEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\xc4\x01\n" +
+	"\fTraceContext\x12\x19\n" +
+	"\btrace_id\x18\x01 \x01(\tR\atraceId\x12\x17\n" +
+	"\aspan_id\x18\x02 \x01(\tR\x06spanId\x12$\n" +
+	"\x0eparent_span_id\x18\x03 \x01(\tR\fparentSpanId\x12\x1f\n" +
+	"\vtrace_flags\x18\x04 \x01(\rR\n" +
+	"traceFlags\x129\n" +
+	"\vtrace_state\x18\x05 \x03(\v2\x18.mbta.v1.TraceStateEntryR\n" +
+	"traceState\"\xa9\t\n" +
 	"\fSignalRecord\x12\x1f\n" +
 	"\vsignal_type\x18\x01 \x01(\tR\n" +
 	"signalType\x12\x19\n" +
@@ -823,7 +984,11 @@ const file_signal_proto_rawDesc = "" +
 	"statusCode\x12%\n" +
 	"\x0estatus_message\x18\x16 \x01(\tR\rstatusMessage\x12B\n" +
 	"\rexp_histogram\x18\x17 \x01(\v2\x1d.mbta.v1.ExponentialHistogramR\fexpHistogram\x121\n" +
-	"\aprofile\x18\x18 \x01(\v2\x17.mbta.v1.ProfilePayloadR\aprofile\x1aP\n" +
+	"\aprofile\x18\x18 \x01(\v2\x17.mbta.v1.ProfilePayloadR\aprofile\x12\x1f\n" +
+	"\vtrace_flags\x18\x19 \x01(\rR\n" +
+	"traceFlags\x129\n" +
+	"\vtrace_state\x18\x1a \x03(\v2\x18.mbta.v1.TraceStateEntryR\n" +
+	"traceState\x1aP\n" +
 	"\x0fAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12'\n" +
 	"\x05value\x18\x02 \x01(\v2\x11.mbta.v1.AnyValueR\x05value:\x028\x01\x1a?\n" +
@@ -843,7 +1008,7 @@ func file_signal_proto_rawDescGZIP() []byte {
 	return file_signal_proto_rawDescData
 }
 
-var file_signal_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_signal_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_signal_proto_goTypes = []any{
 	(*SignalBatch)(nil),          // 0: mbta.v1.SignalBatch
 	(*Resource)(nil),             // 1: mbta.v1.Resource
@@ -851,28 +1016,32 @@ var file_signal_proto_goTypes = []any{
 	(*AnyValue)(nil),             // 3: mbta.v1.AnyValue
 	(*ExponentialHistogram)(nil), // 4: mbta.v1.ExponentialHistogram
 	(*ProfilePayload)(nil),       // 5: mbta.v1.ProfilePayload
-	(*SignalRecord)(nil),         // 6: mbta.v1.SignalRecord
-	nil,                          // 7: mbta.v1.Resource.AttributesEntry
-	nil,                          // 8: mbta.v1.SignalRecord.AttributesEntry
-	nil,                          // 9: mbta.v1.SignalRecord.MetricFieldsEntry
+	(*TraceStateEntry)(nil),      // 6: mbta.v1.TraceStateEntry
+	(*TraceContext)(nil),         // 7: mbta.v1.TraceContext
+	(*SignalRecord)(nil),         // 8: mbta.v1.SignalRecord
+	nil,                          // 9: mbta.v1.Resource.AttributesEntry
+	nil,                          // 10: mbta.v1.SignalRecord.AttributesEntry
+	nil,                          // 11: mbta.v1.SignalRecord.MetricFieldsEntry
 }
 var file_signal_proto_depIdxs = []int32{
 	1,  // 0: mbta.v1.SignalBatch.resource:type_name -> mbta.v1.Resource
 	2,  // 1: mbta.v1.SignalBatch.scope:type_name -> mbta.v1.InstrumentationScope
-	6,  // 2: mbta.v1.SignalBatch.signals:type_name -> mbta.v1.SignalRecord
-	7,  // 3: mbta.v1.Resource.attributes:type_name -> mbta.v1.Resource.AttributesEntry
-	8,  // 4: mbta.v1.SignalRecord.attributes:type_name -> mbta.v1.SignalRecord.AttributesEntry
-	3,  // 5: mbta.v1.SignalRecord.body:type_name -> mbta.v1.AnyValue
-	9,  // 6: mbta.v1.SignalRecord.metric_fields:type_name -> mbta.v1.SignalRecord.MetricFieldsEntry
-	4,  // 7: mbta.v1.SignalRecord.exp_histogram:type_name -> mbta.v1.ExponentialHistogram
-	5,  // 8: mbta.v1.SignalRecord.profile:type_name -> mbta.v1.ProfilePayload
-	3,  // 9: mbta.v1.Resource.AttributesEntry.value:type_name -> mbta.v1.AnyValue
-	3,  // 10: mbta.v1.SignalRecord.AttributesEntry.value:type_name -> mbta.v1.AnyValue
-	11, // [11:11] is the sub-list for method output_type
-	11, // [11:11] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	8,  // 2: mbta.v1.SignalBatch.signals:type_name -> mbta.v1.SignalRecord
+	9,  // 3: mbta.v1.Resource.attributes:type_name -> mbta.v1.Resource.AttributesEntry
+	6,  // 4: mbta.v1.TraceContext.trace_state:type_name -> mbta.v1.TraceStateEntry
+	10, // 5: mbta.v1.SignalRecord.attributes:type_name -> mbta.v1.SignalRecord.AttributesEntry
+	3,  // 6: mbta.v1.SignalRecord.body:type_name -> mbta.v1.AnyValue
+	11, // 7: mbta.v1.SignalRecord.metric_fields:type_name -> mbta.v1.SignalRecord.MetricFieldsEntry
+	4,  // 8: mbta.v1.SignalRecord.exp_histogram:type_name -> mbta.v1.ExponentialHistogram
+	5,  // 9: mbta.v1.SignalRecord.profile:type_name -> mbta.v1.ProfilePayload
+	6,  // 10: mbta.v1.SignalRecord.trace_state:type_name -> mbta.v1.TraceStateEntry
+	3,  // 11: mbta.v1.Resource.AttributesEntry.value:type_name -> mbta.v1.AnyValue
+	3,  // 12: mbta.v1.SignalRecord.AttributesEntry.value:type_name -> mbta.v1.AnyValue
+	13, // [13:13] is the sub-list for method output_type
+	13, // [13:13] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_signal_proto_init() }
@@ -894,7 +1063,7 @@ func file_signal_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_signal_proto_rawDesc), len(file_signal_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

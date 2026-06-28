@@ -34,15 +34,17 @@
 - spec §6.2 明确：`trace_id`（非空时）MUST 是 32 位小写 hex；`span_id`/`parent_span_id`（非空时）MUST 是 16 位小写 hex；全零值非法（对齐 OTel）。
 - Go `Validate()` 加格式校验函数，对三个字段非空时校验。
 
-### 缺口 3：无 W3C Trace Context 协商（中期）
+### 缺口 3：无 W3C Trace Context 协商（本次实施）
 
-**现状**：spec 的 capability registry（附录 C）无 trace 相关能力；HELLO 协商不含 trace 传播；帧 Header 无 metadata 扩展位。
+**现状**（已修复）：新增 capability `w3c_trace_context`（stable，附录 C.4），协议级承载 W3C traceparent/tracestate。
 
-**问题**：外部请求带 W3C `traceparent`/`tracestate` 进入 mbta 边界时，没有协议级注入点，只能逐 signal 塞 Attributes，丢失 W3C 语义。
+**实施内容**：
+- `SignalRecord.trace_flags`（W3C trace-flags，≤ 0xff）+ `SignalRecord.trace_state`（有序 tracestate，≤ 32 成员）——per-signal 承载。
+- `BatchMessage.trace_context`（`TraceContext`）——batch/stream 级继承头，同一 trace 多 signal 共享，偏离时才单独写（与缺口 2 合并）。
+- HELLO 协商 `w3c_trace_context`；Validate 校验 flags 范围与 tracestate 约束；codec_proto 双向映射 + 往返测试。
+- spec §6.2.2 新增章节定义语义。
 
-**修复方向**（中期，不在本次）：
-- 新增 capability `w3c_trace_context`（experimental → stable），HELLO 协商。
-- 或定义 batch/stream 级 trace 上下文头（与缺口 2 合并）。
+外部请求携带 `traceparent`/`tracestate` 进入 mbta 边界时，现可在协议层无损注入，而非逐 signal 塞 Attributes。消费侧（如 mebsuta 从 HTTP traceparent 提取并填入 BatchMessage）依赖此契约。
 
 ### 缺口 2：trace 逐信号冗余（优化权衡，中期）
 

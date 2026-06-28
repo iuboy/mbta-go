@@ -389,3 +389,65 @@ func TestSignalRecordTraceContext(t *testing.T) {
 		t.Errorf("ParentSpanID = %q, want 'fedcba9876543210'", sig.ParentSpanID)
 	}
 }
+
+// TestSignalRecordW3CTraceContext 校验 W3C trace_flags/trace_state 的协议级承载
+// （capability w3c_trace_context，§6.2.2）：校验规则 + proto 编解码往返不丢字段。
+func TestSignalRecordW3CTraceContext(t *testing.T) {
+	const validTraceID = "0123456789abcdef0123456789abcdef"
+
+	t.Run("trace_flags over 8-bit rejected", func(t *testing.T) {
+		b := SignalBatch{Signals: []*SignalRecord{
+			{SignalType: "span", Name: "s", TraceID: validTraceID, TraceFlags: 0x100},
+		}}
+		if err := b.Validate(); err == nil {
+			t.Error("expected error for trace_flags > 0xff")
+		}
+	})
+
+	t.Run("trace_state over 32 entries rejected", func(t *testing.T) {
+		sig := &SignalRecord{
+			SignalType: "span", Name: "s", TraceID: validTraceID,
+			TraceState: make([]*TraceStateEntry, 33),
+		}
+		for i := range sig.TraceState {
+			sig.TraceState[i] = &TraceStateEntry{Key: "k", Value: "v"}
+		}
+		if err := (&SignalBatch{Signals: []*SignalRecord{sig}}).Validate(); err == nil {
+			t.Error("expected error for > 32 trace_state entries")
+		}
+	})
+
+	t.Run("valid trace context passes", func(t *testing.T) {
+		b := SignalBatch{Signals: []*SignalRecord{
+			{SignalType: "span", Name: "s", TraceID: validTraceID,
+				SpanID: "0123456789abcdef", TraceFlags: 0x01,
+				TraceState: []*TraceStateEntry{{Key: "vendor", Value: "value"}}},
+		}}
+		if err := b.Validate(); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("proto round-trip preserves trace_flags and trace_state", func(t *testing.T) {
+		orig := &SignalBatch{Signals: []*SignalRecord{
+			{SignalType: "span", Name: "s", TraceID: validTraceID,
+				SpanID: "0123456789abcdef", TraceFlags: 0x01,
+				TraceState: []*TraceStateEntry{{Key: "a", Value: "1"}, {Key: "b", Value: "2"}}},
+		}}
+		data, err := MarshalSignalBatch(orig)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		got, err := UnmarshalSignalBatch(data)
+		if err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		s := got.Signals[0]
+		if s.TraceFlags != 0x01 {
+			t.Errorf("TraceFlags = 0x%x, want 0x01", s.TraceFlags)
+		}
+		if len(s.TraceState) != 2 || s.TraceState[0].Key != "a" || s.TraceState[1].Value != "2" {
+			t.Errorf("TraceState order/content lost: %+v", s.TraceState)
+		}
+	})
+}

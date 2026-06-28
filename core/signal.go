@@ -1,6 +1,18 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+
+	corepb "github.com/iuboy/mbta-go/corepb"
+)
+
+// TraceStateEntry 是 W3C tracestate 的有序键值对成员（core spec §6.2.2 / W3C Trace Context）。
+// 等价 corepb.TraceStateEntry。
+type TraceStateEntry = corepb.TraceStateEntry
+
+// TraceContext 是 batch/stream 级 W3C trace 上下文继承点（core spec §6.2.2，
+// capability w3c_trace_context）。等价 corepb.TraceContext。
+type TraceContext = corepb.TraceContext
 
 // signal_type 取值（core spec §6.2）。
 const (
@@ -81,6 +93,17 @@ func (b *SignalBatch) Validate() error {
 		if err := validateHexID("parent_span_id", s.ParentSpanID, 8); err != nil {
 			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
 		}
+
+		// W3C Trace Context（capability w3c_trace_context，§6.2.2）：
+		// trace-flags 是 W3C traceparent 的 1 字节字段（仅低 8 位有效）；
+		// tracestate 为有序键值对（≤ 32 成员）。详见 validation.validateTraceState。
+		if s.TraceFlags > 0xff {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("signal[%d]: trace_flags exceeds 8-bit W3C range (0x%x)", i, s.TraceFlags))
+		}
+		if err := validateTraceState(s.TraceState); err != nil {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+		}
 	}
 	return nil
 }
@@ -123,4 +146,11 @@ type SignalRecord struct {
 	EndTimeUnixMs   int64  `json:"end_time_unix_ms,omitempty"`
 	StatusCode      string `json:"status_code,omitempty"`
 	StatusMessage   string `json:"status_message,omitempty"`
+	// W3C Trace Context 字段（capability w3c_trace_context，core spec §6.2.2）。
+	// trace_flags 承载 traceparent 的采样位等（低 8 位有效）；
+	// trace_state 承载 W3C tracestate（有序键值对）。
+	// 这两个字段与 trace_id/span_id/parent_span_id 一起构成完整的 W3C traceparent 语义，
+	// 使外部请求携带的 traceparent 能在协议层无损承载，而非退化塞入 attributes。
+	TraceFlags uint32            `json:"trace_flags,omitempty"`
+	TraceState []*TraceStateEntry `json:"trace_state,omitempty"`
 }
