@@ -150,6 +150,12 @@ func (c *CoreClient) RecvAuthResult() error {
 		if uerr := core.Decode(f.Payload, &failMsg); uerr != nil {
 			slog.Debug("failed to decode auth_fail frame", "error", uerr)
 		}
+		// 重放防护（core spec §9.5）：retryable 时服务端回传新的一次性 challenge，
+		// 客户端 MUST 用新挑战重算。更新本地 challengeNonce，供上层重试时
+		// buildAuthMessage 使用——旧 challenge 一次性，复用会使重放防护形同虚设。
+		if failMsg.GetRetryable() && len(failMsg.GetChallengeNonce()) > 0 {
+			c.challengeNonce = failMsg.GetChallengeNonce()
+		}
 		return core.NewError(core.NumAuth, core.CodeAuth, fmt.Sprintf("auth failed: %s (%s)", failMsg.GetReason(), failMsg.GetCode()))
 
 	default:

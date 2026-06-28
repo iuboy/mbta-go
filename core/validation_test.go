@@ -60,7 +60,7 @@ func TestSanitizeForLog(t *testing.T) {
 func TestSignalBatchValidate_FieldLimits(t *testing.T) {
 	t.Run("over-long metric_name rejected", func(t *testing.T) {
 		long := strings.Repeat("a", MaxSignalFieldLen+1)
-		b := &SignalBatch{Signals: []*SignalRecord{{SignalType: "metric", MetricName: long}}}
+		b := &SignalBatch{Signals: []*SignalRecord{{SignalType: "counter", MetricName: long}}}
 		if err := b.Validate(); err == nil {
 			t.Error("expected error for over-long metric_name")
 		}
@@ -83,7 +83,7 @@ func TestSignalBatchValidate_FieldLimits(t *testing.T) {
 	})
 	t.Run("legit short fields accepted", func(t *testing.T) {
 		b := &SignalBatch{Signals: []*SignalRecord{
-			{SignalType: "metric", MetricName: "cpu.usage", Unit: "%"},
+			{SignalType: "counter", MetricName: "cpu.usage", Unit: "%"},
 		}}
 		if err := b.Validate(); err != nil {
 			t.Errorf("legit short fields rejected: %v", err)

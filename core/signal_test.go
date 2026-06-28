@@ -58,7 +58,7 @@ func TestSignalBatchValidate(t *testing.T) {
 				SchemaURL: "https://example.com/schema",
 				Signals: []*SignalRecord{
 					{SignalType: "log", Body: "msg"},
-					{SignalType: "metric", MetricName: "req_total"},
+					{SignalType: "counter", MetricName: "req_total"},
 					{SignalType: "span", Name: "GET /api", TraceID: "0123456789abcdef0123456789abcdef"},
 				},
 			},
@@ -175,9 +175,9 @@ func TestSignalRecordFields(t *testing.T) {
 		}
 	})
 
-	t.Run("metric signal", func(t *testing.T) {
+	t.Run("counter signal", func(t *testing.T) {
 		sig := &SignalRecord{
-			SignalType: "metric",
+			SignalType: "counter",
 			MetricName: "http_requests_total",
 			MetricFields: map[string]float64{
 				"count": 100.0,
@@ -188,8 +188,8 @@ func TestSignalRecordFields(t *testing.T) {
 			IsMonotonic: true,
 		}
 
-		if sig.SignalType != "metric" {
-			t.Errorf("SignalType = %q, want 'metric'", sig.SignalType)
+		if sig.SignalType != "counter" {
+			t.Errorf("SignalType = %q, want 'counter'", sig.SignalType)
 		}
 		if sig.MetricName != "http_requests_total" {
 			t.Errorf("MetricName = %q, want 'http_requests_total'", sig.MetricName)
@@ -338,7 +338,7 @@ func TestSignalBatchWithMultipleSignals(t *testing.T) {
 	batch := &SignalBatch{
 		Signals: []*SignalRecord{
 			{SignalType: "log", EventID: "evt-1", Body: "msg1"},
-			{SignalType: "metric", EventID: "evt-2", MetricName: "m1"},
+			{SignalType: "counter", EventID: "evt-2", MetricName: "m1"},
 			{SignalType: "span", EventID: "evt-3", Name: "s1", TraceID: "0123456789abcdef0123456789abcdef"},
 			{SignalType: "log", EventID: "evt-4", Body: "msg4"},
 		},

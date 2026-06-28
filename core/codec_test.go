@@ -32,7 +32,7 @@ func richSignalBatch() *SignalBatch {
 				},
 			},
 			{
-				SignalType:   "metric",
+				SignalType:   "counter",
 				MetricName:   "cpu.usage",
 				Unit:         "%",
 				Temporality:  "gauge",
@@ -224,7 +224,7 @@ func assertSignalBatchEqual(t *testing.T, want, got *SignalBatch, codecName stri
 
 	// metric signal
 	metric := got.Signals[1]
-	if metric.SignalType != "metric" {
+	if metric.SignalType != "counter" {
 		t.Errorf("%s: signal[1].type = %q, want metric", codecName, metric.SignalType)
 	}
 	if metric.MetricName != "cpu.usage" {

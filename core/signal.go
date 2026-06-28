@@ -14,12 +14,38 @@ type TraceStateEntry = corepb.TraceStateEntry
 // capability w3c_trace_context）。等价 corepb.TraceContext。
 type TraceContext = corepb.TraceContext
 
-// signal_type 取值（core spec §6.2）。
+// ExponentialHistogram 是 histogram signal 的 exponential bucket 表达（core spec §6.2）。
+// 等价 corepb.ExponentialHistogram。
+type ExponentialHistogram = corepb.ExponentialHistogram
+
+// ProfilePayload 是 profile signal 载荷 + 跨信号双向关联（core spec §6.2）。
+// 等价 corepb.ProfilePayload。
+type ProfilePayload = corepb.ProfilePayload
+
+// signal_type 取值（core spec §6.2 闭合枚举）。值发布后不可改（§1.4）。
 const (
-	SignalTypeLog    = "log"
-	SignalTypeMetric = "metric"
-	SignalTypeSpan   = "span"
+	SignalTypeLog       = "log"
+	SignalTypeGauge     = "gauge"
+	SignalTypeCounter   = "counter"
+	SignalTypeHistogram = "histogram"
+	SignalTypeSummary   = "summary"
+	SignalTypeSpan      = "span"
+	SignalTypeProfile   = "profile"
 )
+
+// validSignalTypes 是 spec §6.2 允许的 signal_type 闭合集合。
+// 非法值（含历史误用的 "metric"）在 Validate 被拒——协议入口拦截，防止发出后
+// 被合规对端当未知 type 拒绝、且无法映射 OTLP（§15）。
+var validSignalTypes = map[string]bool{
+	SignalTypeLog: true, SignalTypeGauge: true, SignalTypeCounter: true,
+	SignalTypeHistogram: true, SignalTypeSummary: true,
+	SignalTypeSpan: true, SignalTypeProfile: true,
+}
+
+// Deprecated: "metric" 不在 spec §6.2 的闭合枚举内（{log,gauge,counter,histogram,
+// summary,span,profile}），使用 SignalTypeGauge/SignalTypeCounter 等具体类型。
+// 保留仅为过渡；Validate 会拒绝该值。
+const SignalTypeMetric = "metric"
 
 // SignalBatch 是 BATCH payload 的规范结构，对齐协议文档 §6。
 type SignalBatch struct {
@@ -38,9 +64,14 @@ func (b *SignalBatch) Validate() error {
 		if s.SignalType == "" {
 			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: signal_type is required", i))
 		}
+		// signal_type 必须在 §6.2 闭合枚举内（拦截 "metric" 等历史/非法值）。
+		if !validSignalTypes[s.SignalType] {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("signal[%d]: invalid signal_type %q", i, s.SignalType))
+		}
 		// 基于 signal_type 的类型特定校验
 		switch s.SignalType {
-		case SignalTypeMetric:
+		case SignalTypeGauge, SignalTypeCounter, SignalTypeHistogram, SignalTypeSummary:
 			if s.MetricName == "" {
 				return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
 			}
@@ -153,4 +184,9 @@ type SignalRecord struct {
 	// 使外部请求携带的 traceparent 能在协议层无损承载，而非退化塞入 attributes。
 	TraceFlags uint32            `json:"trace_flags,omitempty"`
 	TraceState []*TraceStateEntry `json:"trace_state,omitempty"`
+	// Histogram / Profile 载荷（core spec §6.2）。
+	// exp_histogram 用于 signal_type=histogram 且 aggregation=exponential；
+	// profile 用于 signal_type=profile（OTLP Profiles 映射，附录 B）。
+	ExpHistogram *ExponentialHistogram `json:"exp_histogram,omitempty"`
+	Profile      *ProfilePayload       `json:"profile,omitempty"`
 }

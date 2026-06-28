@@ -168,7 +168,8 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 		InitialConnectionReceiveWindow: initialConnectionWnd,
 		MaxStreamReceiveWindow:         maxStreamWnd,
 		MaxConnectionReceiveWindow:     maxConnectionWnd,
-		Allow0RTT:                      true, // 接受 0-RTT resumption（core spec §11.6）
+		Allow0RTT:                      true,       // 接受 0-RTT resumption（core spec §11.6）
+		EnableDatagrams:                true,       // SupportsDatagram()=true 的前置条件（RFC 9221，§11.4）
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Address)
@@ -301,6 +302,7 @@ func dial(ctx context.Context, cfg QUICClientConfig, early bool) (*Conn, error) 
 		InitialConnectionReceiveWindow: initialConnectionWnd,
 		MaxStreamReceiveWindow:         maxStreamWnd,
 		MaxConnectionReceiveWindow:     maxConnectionWnd,
+		EnableDatagrams:                true, // SupportsDatagram()=true 的前置条件（RFC 9221，§11.4）
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Server)

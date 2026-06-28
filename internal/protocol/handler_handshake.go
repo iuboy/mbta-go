@@ -38,7 +38,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	// 恢复后 earlyData=true，dataLoop 可在 AUTH 前启动处理 0-RTT BATCH。
 	if ticket := msg.GetSessionTicket(); len(ticket) > 0 && h.config.SessionStore != nil {
 		if state, ok := h.config.SessionStore.Get(ticket); ok {
-			h.keys = state.Keys
+			h.keys.Store(state.Keys)
 			h.agentID = state.AgentID
 			h.earlyData = true
 			slog.Info("0-RTT resumption: keys restored from ticket", "agent", core.SanitizeForLog(h.agentID))
@@ -149,7 +149,7 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 		h.sendAuthFail(ctx, "internal_error", "key generation failed", true)
 		return core.WrapError(core.NumConfig, core.CodeConfig, "session key generation", err)
 	}
-	h.keys = keys
+	h.keys.Store(keys)
 	h.expiresAt.Store(time.Now().Add(core.DefaultSessionTTL).Unix())
 
 	okMsg := &corepb.AuthOKMessage{

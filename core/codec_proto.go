@@ -98,6 +98,9 @@ func toProtoSignalRecord(s *SignalRecord) *corepb.SignalRecord {
 			pb.TraceState[i] = &corepb.TraceStateEntry{Key: e.Key, Value: e.Value}
 		}
 	}
+	// Histogram exponential / Profile 载荷（§6.2，附录 B）。
+	pb.ExpHistogram = s.ExpHistogram
+	pb.Profile = s.Profile
 	return pb
 }
 
@@ -160,6 +163,9 @@ func fromProtoSignalRecord(s *corepb.SignalRecord) *SignalRecord {
 			r.TraceState[i] = &TraceStateEntry{Key: e.GetKey(), Value: e.GetValue()}
 		}
 	}
+	// Histogram exponential / Profile 载荷（§6.2，附录 B）。
+	r.ExpHistogram = s.GetExpHistogram()
+	r.Profile = s.GetProfile()
 	return r
 }
 
