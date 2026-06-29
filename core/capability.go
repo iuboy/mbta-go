@@ -17,6 +17,8 @@ const (
 
 // CapW3CTraceContext 是 batch/stream 级 W3C trace 上下文协议承载 capability（spec §6.2.2）。
 // 客户端发送门控（CoreClient.SendBatch）与服务端校验共享此常量，避免散落 magic string。
+//
+//nolint:gosec // G101 误报：这是协议 capability 标识符，非凭据
 const CapW3CTraceContext = "w3c_trace_context"
 
 // stableCapabilities 是已注册的 stable capability 全集（core spec 附录 C）。
