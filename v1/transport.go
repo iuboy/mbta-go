@@ -141,6 +141,7 @@ func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 // Listener accepts MBTA QUIC connections.
 type Listener struct {
 	listener *quic.Listener
+	conn     *net.UDPConn // underlying UDP socket; quic.Listener.Close does not close it
 	config   QUICServerConfig
 }
 
@@ -188,7 +189,7 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen QUIC", err)
 	}
 
-	return &Listener{listener: ql, config: cfg}, nil
+	return &Listener{listener: ql, conn: udpConn, config: cfg}, nil
 }
 
 // Conn wraps a QUIC connection with MBTA stream role tracking.
@@ -217,7 +218,12 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 
 // Close shuts down the listener.
 func (l *Listener) Close() error {
-	return l.listener.Close()
+	// quic.Listener.Close does not close the underlying PacketConn, so the UDP
+	// socket (and its bound port) would leak. Closing it explicitly lets the
+	// same address be rebound on a generation switch instead of failing with
+	// "address already in use".
+	_ = l.listener.Close()
+	return l.conn.Close()
 }
 
 // Addr returns the listener address.
