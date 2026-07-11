@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"reflect"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
 	"google.golang.org/protobuf/proto"
@@ -187,6 +188,17 @@ func anyToProtoValue(v any) *corepb.AnyValue {
 	case []byte:
 		return &corepb.AnyValue{Value: &corepb.AnyValue_BytesValue{BytesValue: val}}
 	default:
+		// 用 reflect 匹配所有整数/浮点 kind，避免 int32/uint64/float32 等静默降级为 string。
+		if rv := reflect.ValueOf(v); rv.IsValid() && !rv.IsZero() {
+			switch rv.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				return &corepb.AnyValue{Value: &corepb.AnyValue_IntValue{IntValue: rv.Int()}}
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+				return &corepb.AnyValue{Value: &corepb.AnyValue_IntValue{IntValue: int64(rv.Uint())}}
+			case reflect.Float32, reflect.Float64:
+				return &corepb.AnyValue{Value: &corepb.AnyValue_DoubleValue{DoubleValue: rv.Float()}}
+			}
+		}
 		return &corepb.AnyValue{Value: &corepb.AnyValue_StringValue{StringValue: fmt.Sprintf("%v", v)}}
 	}
 }

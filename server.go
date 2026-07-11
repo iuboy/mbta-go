@@ -2,6 +2,7 @@ package mbta
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -105,12 +106,18 @@ func (s *Server) Start(ctx context.Context) error {
 
 	if s.v1Server != nil {
 		g.Go(func() error {
-			return core.WrapError(core.NumTransport, core.CodeTransport, "v1", s.v1Server.Start(ctx))
+			if err := s.v1Server.Start(ctx); err != nil {
+				return core.WrapError(core.NumTransport, core.CodeTransport, "v1", err)
+			}
+			return nil
 		})
 	}
 	if s.ntlsServer != nil {
 		g.Go(func() error {
-			return core.WrapError(core.NumTransport, core.CodeTransport, "ntls", s.ntlsServer.Start(ctx))
+			if err := s.ntlsServer.Start(ctx); err != nil {
+				return core.WrapError(core.NumTransport, core.CodeTransport, "ntls", err)
+			}
+			return nil
 		})
 	}
 
@@ -146,7 +153,7 @@ func (s *Server) Close() error {
 	s.started = false
 
 	if len(errs) > 0 {
-		return fmt.Errorf("close errors: %v", errs)
+		return fmt.Errorf("close errors: %w", errors.Join(errs...))
 	}
 	return nil
 }
@@ -181,7 +188,7 @@ func (s *Server) initNTLSServer() error {
 
 	server, err := ntls.NewServer(cfg)
 	if err != nil {
-		return err
+		return core.WrapError(core.NumConfig, core.CodeConfig, "ntls server init", err)
 	}
 
 	s.ntlsServer = server
