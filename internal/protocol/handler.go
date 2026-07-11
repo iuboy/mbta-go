@@ -169,19 +169,7 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			}
 			h.handlePing(ctx, f.Payload)
 		case core.TypeClose:
-			var closeMsg core.CloseMessage
-			if derr := core.Decode(f.Payload, &closeMsg); derr != nil {
-				slog.Warn("failed to decode close message", "session", string(h.sessionID), "error", derr)
-			}
-			if closeMsg.GetCloseTimeoutMs() > 0 {
-				// 强制上限防止恶意客户端发 MaxUint32 导致 goroutine 长期占用资源（DoS）。
-				requested := time.Duration(closeMsg.GetCloseTimeoutMs()) * time.Millisecond
-				if requested > maxDrainTimeout {
-					requested = maxDrainTimeout
-				}
-				h.closeTimeout = requested
-			}
-			slog.Info("close received", "session", string(h.sessionID), "drain_timeout", h.closeTimeout)
+			h.handleClose(f.Payload)
 			return nil
 		default:
 			h.sendError(ctx, core.CodeUnsupportedMessage, fmt.Sprintf("unexpected control type 0x%02x", f.Header.Type), true)
@@ -203,6 +191,23 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			})
 		}
 	}
+}
+
+// handleClose 处理 CLOSE 帧：解码 + clamp close_timeout 防恶意 DoS。提取自 controlLoop。
+func (h *CoreHandler) handleClose(payload []byte) {
+	var closeMsg core.CloseMessage
+	if derr := core.Decode(payload, &closeMsg); derr != nil {
+		slog.Warn("failed to decode close message", "session", string(h.sessionID), "error", derr)
+	}
+	if closeMsg.GetCloseTimeoutMs() > 0 {
+		// 强制上限防止恶意客户端发 MaxUint32 导致 goroutine 长期占用资源（DoS）。
+		requested := time.Duration(closeMsg.GetCloseTimeoutMs()) * time.Millisecond
+		if requested > maxDrainTimeout {
+			requested = maxDrainTimeout
+		}
+		h.closeTimeout = requested
+	}
+	slog.Info("close received", "session", string(h.sessionID), "drain_timeout", h.closeTimeout)
 }
 
 // dataLoop 读 BATCH 帧并发处理（batchSem 限流）。

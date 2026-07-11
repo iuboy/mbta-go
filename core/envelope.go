@@ -282,7 +282,7 @@ func decompress(c corepb.Compression, src []byte) ([]byte, error) {
 		if err := dec.Reset(bytes.NewReader(src)); err != nil {
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "zstd reset", err)
 		}
-		defer dec.Reset(nil)
+		defer func() { _ = dec.Reset(nil) }() //nolint:errcheck // pool 归还前清理，错误无关紧要
 		lr := &io.LimitedReader{R: dec.IOReadCloser(), N: MaxDecompressedSize + 1}
 		var buf bytes.Buffer
 		buf.Grow(len(src) * 4)

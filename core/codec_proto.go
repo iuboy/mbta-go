@@ -197,6 +197,9 @@ func anyToProtoValue(v any) *corepb.AnyValue {
 				return &corepb.AnyValue{Value: &corepb.AnyValue_IntValue{IntValue: int64(rv.Uint())}}
 			case reflect.Float32, reflect.Float64:
 				return &corepb.AnyValue{Value: &corepb.AnyValue_DoubleValue{DoubleValue: rv.Float()}}
+			default:
+				// 其余 kind（bool/string/slice/map/struct 等）已在上方 type switch 处理，
+				// 到此说明是不支持的复杂类型，落到下方 fmt.Sprintf。
 			}
 		}
 		return &corepb.AnyValue{Value: &corepb.AnyValue_StringValue{StringValue: fmt.Sprintf("%v", v)}}

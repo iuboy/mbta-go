@@ -42,9 +42,6 @@ func WithReaperInterval(d time.Duration) SessionStoreOption {
 	}
 }
 
-// defaultReaperInterval 是用户启用 reaper 但未指定间隔时使用的扫描周期。
-const defaultReaperInterval = time.Hour
-
 // NewSessionStore 创建空 SessionStore。
 func NewSessionStore(opts ...SessionStoreOption) *SessionStore {
 	s := &SessionStore{sessions: make(map[string]*SessionState)}
