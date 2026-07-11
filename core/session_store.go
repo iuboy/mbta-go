@@ -2,6 +2,7 @@ package core
 
 import (
 	"crypto/rand"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -27,6 +28,7 @@ type SessionStore struct {
 	reaperInterval time.Duration // <= 0 表示不启用后台清理
 	stopCh         chan struct{} // 关闭 reaper goroutine（nil 表示无 reaper）
 	doneCh         chan struct{} // reaper 退出信号（nil 表示无 reaper）
+	closeOnce      sync.Once     // 保证 Close 幂等，消除 recover-as-control-flow
 }
 
 // SessionStoreOption 配置 SessionStore 行为。
@@ -50,26 +52,28 @@ func NewSessionStore(opts ...SessionStoreOption) *SessionStore {
 		opt(s)
 	}
 	if s.reaperInterval > 0 {
-		interval := s.reaperInterval
-		if interval < 0 {
-			interval = defaultReaperInterval
-		}
 		s.stopCh = make(chan struct{})
 		s.doneCh = make(chan struct{})
-		go s.reapLoop(interval)
+		go s.reapLoop(s.reaperInterval)
 	}
 	return s
 }
 
 // NewTicket 生成随机 session ticket（32 字节）。
-func NewTicket() []byte {
+// 熵源失败时返回 error——绝不能静默生成全零可预测票据（会话固定/冒充攻击）。
+func NewTicket() ([]byte, error) {
 	t := make([]byte, 32)
-	_, _ = rand.Read(t)
-	return t
+	if _, err := rand.Read(t); err != nil {
+		return nil, fmt.Errorf("generate session ticket: %w", err)
+	}
+	return t, nil
 }
 
-// Put 存储 ticket → state。
+// Put 存储 ticket → state。nil state 被静默拒绝以防后续 Get panic。
 func (s *SessionStore) Put(ticket []byte, state *SessionState) {
+	if state == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[string(ticket)] = state
@@ -132,17 +136,8 @@ func (s *SessionStore) Close() {
 	if s.stopCh == nil {
 		return
 	}
-	// 关闭 stopCh 通知 reaper 退出；recover 兜底防御重复关闭导致的 panic
-	// （close 一个已 closed channel 会 panic，即便调用方误用也保证安全）。
-	func() {
-		defer func() { _ = recover() }()
-		select {
-		case <-s.stopCh:
-			// 已关闭
-		default:
-			close(s.stopCh)
-		}
-	}()
+	s.closeOnce.Do(func() {
+		close(s.stopCh)
+	})
 	<-s.doneCh
-	s.stopCh = nil
 }

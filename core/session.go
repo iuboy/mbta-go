@@ -147,6 +147,7 @@ func (sm *StateMachine) Transition(next State) error {
 	defer sm.mu.Unlock()
 
 	if slices.Contains(validTransitions[sm.state], next) {
+		prev := sm.state
 		sm.state = next
 		// Start drain timer when entering Draining state.
 		if next == StateDraining && sm.drainTimeout > 0 {
@@ -154,6 +155,11 @@ func (sm *StateMachine) Transition(next State) error {
 				sm.drainTimer.Stop()
 			}
 			sm.drainTimer = time.NewTimer(sm.drainTimeout)
+		}
+		// Stop drain timer when leaving Draining state to avoid stale timer 占用 runtime heap。
+		if prev == StateDraining && next != StateDraining && sm.drainTimer != nil {
+			sm.drainTimer.Stop()
+			sm.drainTimer = nil
 		}
 		return nil
 	}

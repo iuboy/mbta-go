@@ -193,33 +193,37 @@ func (w *Window) Snapshot() (maxBatches int, maxEvents int, maxBytes int64) {
 const MaxThrottleDelay = 5 * time.Minute
 
 // ThrottleState tracks the current throttle status.
-// until 存 UnixNano；0 表示未限流。无锁原子读写。
+// until 存 *time.Time（含单调时钟分量），nil 表示未限流。无锁原子读写。
+//
+// 用 *time.Time 而非 UnixNano 是为了保留 Go 的单调时钟读数，
+// 使 NTP 时钟回拨不会导致节流时长异常（core spec §9.4 健壮性）。
 type ThrottleState struct {
-	until atomic.Int64
+	until atomic.Pointer[time.Time]
 }
 
 // Apply sets the throttle from a THROTTLE message.
 func (ts *ThrottleState) Apply(retryDelayMs int) {
 	d := max(0, min(time.Duration(retryDelayMs)*time.Millisecond, MaxThrottleDelay))
-	ts.until.Store(time.Now().Add(d).UnixNano())
+	deadline := time.Now().Add(d) // time.Now() 含单调时钟，Add 保留
+	ts.until.Store(&deadline)
 }
 
 // Active returns true if currently throttled.
 func (ts *ThrottleState) Active() bool {
-	u := ts.until.Load()
-	if u == 0 {
+	p := ts.until.Load()
+	if p == nil {
 		return false
 	}
-	return time.Now().UnixNano() < u
+	return time.Now().Before(*p) // Before/After 使用单调时钟比较
 }
 
 // WaitDuration returns how long until the throttle expires.
 func (ts *ThrottleState) WaitDuration() time.Duration {
-	u := ts.until.Load()
-	if u == 0 {
+	p := ts.until.Load()
+	if p == nil {
 		return 0
 	}
-	remaining := time.Until(time.Unix(0, u))
+	remaining := time.Until(*p) // time.Until 对含单调时钟的 time.Time 用单调分量
 	if remaining < 0 {
 		return 0
 	}

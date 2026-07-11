@@ -75,12 +75,15 @@ func (c *CoreClient) ackReaper(ctx context.Context) {
 					return true
 				}
 				if now.After(pb.Deadline) {
-					c.pendingAcks.Delete(key)
-					c.pendingCount.Add(-1)
-					c.inflight.Remove(pb.Events, pb.Bytes)
-					slog.Warn("reaped expired unacked batch",
-						"chunk", key, "seq", pb.Seq, "age", now.Sub(pb.SentAt).Round(time.Second))
-					c.notifyDrainIfEmpty()
+					// 用 LoadAndDelete 原子 claim：避免与 handleAck/Nack 的 LoadAndDelete 竞争，
+					// 否则两条路径都执行清理会导致 pendingCount 双减（无下溢保护）和 inflight 双扣。
+					if _, loaded := c.pendingAcks.LoadAndDelete(key); loaded {
+						c.pendingCount.Add(-1)
+						c.inflight.Remove(pb.Events, pb.Bytes)
+						slog.Warn("reaped expired unacked batch",
+							"chunk", key, "seq", pb.Seq, "age", now.Sub(pb.SentAt).Round(time.Second))
+						c.notifyDrainIfEmpty()
+					}
 				}
 				return true
 			})
