@@ -16,6 +16,7 @@ import (
 //   - dial: 建立传输连接
 //   - setupTransport: 在 Dial 成功后、握手前设置 transport（v1 在此 OpenControlStream + SetOnAuthed）
 //   - postAuth: 可选，StartLifecycle 后执行（v1 在此 openDataStreams）；nil 跳过
+//
 // DefaultHeartbeatInterval 是服务端未指定心跳间隔时的回退值。
 const DefaultHeartbeatInterval = 30 * time.Second
 

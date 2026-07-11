@@ -174,10 +174,10 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 		InitialConnectionReceiveWindow: initialConnectionWnd,
 		MaxStreamReceiveWindow:         maxStreamWnd,
 		MaxConnectionReceiveWindow:     maxConnectionWnd,
-		Allow0RTT: true, // 接受 0-RTT resumption（core spec §11.6）。
+		Allow0RTT:                      true, // 接受 0-RTT resumption（core spec §11.6）。
 		// 0-RTT 重放防护由应用层提供：(1) handler_handshake.go 票据单次使用（Get 后 Delete）；
 		// (2) processBatch 的 ReplayCache 按 chunk_id 去重。传输层 Allow0RTT 依赖这两道防线。
-		EnableDatagrams:                true, // SupportsDatagram()=true 的前置条件（RFC 9221，§11.4）
+		EnableDatagrams: true, // SupportsDatagram()=true 的前置条件（RFC 9221，§11.4）
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Address)

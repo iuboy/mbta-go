@@ -286,7 +286,7 @@ func TestReplayCacheUpdate(t *testing.T) {
 // 否则条目会被当作已完成驱逐、且 processingList 计数不一致。
 func TestReplayCacheReverseTransition(t *testing.T) {
 	rc := NewReplayCache()
-	rc.SeenOrAdd("agent-1", "chunk-1")       // 初始 Processing
+	rc.SeenOrAdd("agent-1", "chunk-1")             // 初始 Processing
 	rc.Update("agent-1", "chunk-1", ReplayDurable) // → doneList
 
 	// 反向：done → Processing（throttle 重试场景）。
