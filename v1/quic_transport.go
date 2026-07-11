@@ -24,6 +24,7 @@ type quicTransport struct {
 
 	dataCh  chan core.Frame // 聚合 data stream 帧
 	dataErr chan error      // data accept 循环错误
+	done    chan struct{}   // 关闭信号：通知所有 readDataStream 退出，避免向 closed dataCh 发送 panic
 	closeMu sync.Mutex
 	closed  bool
 }
@@ -43,6 +44,7 @@ func newQuicTransport(conn *Conn) (*quicTransport, error) {
 		controlStr: s,
 		dataCh:     make(chan core.Frame, 64),
 		dataErr:    make(chan error, 1),
+		done:       make(chan struct{}),
 	}
 	go t.acceptDataStreams()
 	return t, nil
@@ -52,7 +54,17 @@ func (t *quicTransport) acceptDataStreams() {
 	for {
 		s, _, err := t.conn.AcceptStream(context.Background())
 		if err != nil {
-			t.dataErr <- err
+			// 先发关闭信号，让所有 readDataManager 退出（避免向即将 close 的 dataCh 发送 panic）。
+			t.closeMu.Lock()
+			if !t.closed {
+				t.closed = true
+				close(t.done)
+			}
+			t.closeMu.Unlock()
+			select {
+			case t.dataErr <- err:
+			default:
+			}
 			close(t.dataCh)
 			return
 		}
@@ -67,7 +79,11 @@ func (t *quicTransport) readDataStream(s *quic.Stream) {
 		if err != nil {
 			return
 		}
-		t.dataCh <- f // 背压：ch 满则阻塞，天然限流
+		select {
+		case t.dataCh <- f: // 背压：ch 满则阻塞，天然限流
+		case <-t.done: // Close/accept 失败时退出，避免向 closed channel 发送 panic
+			return
+		}
 	}
 }
 
@@ -132,5 +148,6 @@ func (t *quicTransport) Close() error {
 		return nil
 	}
 	t.closed = true
+	close(t.done) // 通知所有 readDataStream goroutine 退出，避免 goroutine 泄漏
 	return t.conn.CloseWithError(0, "done")
 }

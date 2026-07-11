@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
+	"time"
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/protocol"
@@ -36,6 +38,8 @@ func AcceptLoop[C any](
 	closeConn func(C),
 	hcfg HandlerConfig,
 ) error {
+	// accept 错误指数退避（5ms→1s），防止 listener 持久错误（EMFILE 等）导致 CPU 空转。
+	var backoff time.Duration
 	for {
 		select {
 		case connSem <- struct{}{}:
@@ -49,10 +53,31 @@ func AcceptLoop[C any](
 				return nil //nolint:nilerr // ctx 取消属优雅关闭
 			}
 			slog.Warn("accept error", "error", err)
+			// 指数退避：首次 5ms，每次翻倍上限 1s。
+			if backoff == 0 {
+				backoff = 5 * time.Millisecond
+			} else {
+				backoff = time.Duration(math.Min(float64(backoff*2), float64(time.Second)))
+			}
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil
+			}
 			continue
 		}
+		backoff = 0 // accept 成功，重置退避
 		go func(conn C) {
 			defer func() { <-connSem }()
+			// recover 防止单个连接的 panic 崩溃整个服务进程。
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("handler panic recovered", "panic", r)
+					if closeConn != nil {
+						closeConn(conn)
+					}
+				}
+			}()
 			tr, err := newTransport(ctx, conn)
 			if err != nil {
 				slog.Error("transport setup", "error", err)

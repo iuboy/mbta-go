@@ -16,6 +16,9 @@ import (
 //   - dial: 建立传输连接
 //   - setupTransport: 在 Dial 成功后、握手前设置 transport（v1 在此 OpenControlStream + SetOnAuthed）
 //   - postAuth: 可选，StartLifecycle 后执行（v1 在此 openDataStreams）；nil 跳过
+// DefaultHeartbeatInterval 是服务端未指定心跳间隔时的回退值。
+const DefaultHeartbeatInterval = 30 * time.Second
+
 func Handshake(
 	ctx context.Context,
 	cc *protocol.CoreClient,
@@ -30,6 +33,15 @@ func Handshake(
 	if err := dial(ctx); err != nil {
 		return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
 	}
+
+	// 握手任一步骤失败：清理已建立的连接（cc.Close 幂等，会取消 lifecycle、关闭 transport、
+	// 等待 goroutine 退出），避免连接/goroutine 泄漏。
+	handshakeOK := false
+	defer func() {
+		if !handshakeOK {
+			_ = cc.Close()
+		}
+	}()
 
 	if err := setupTransport(ctx, cc); err != nil {
 		return err
@@ -57,7 +69,7 @@ func Handshake(
 	if helloAck.GetHeartbeatIntervalSec() > 0 {
 		cc.SetHeartbeatInterval(time.Duration(helloAck.GetHeartbeatIntervalSec()) * time.Second)
 	} else {
-		cc.SetHeartbeatInterval(30 * time.Second)
+		cc.SetHeartbeatInterval(DefaultHeartbeatInterval)
 	}
 
 	if err := cc.SendAuth(); err != nil {
@@ -67,12 +79,14 @@ func Handshake(
 		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth_result", err)
 	}
 
-	cc.StartLifecycle()
-
+	// 先执行 postAuth（如 openDataStreams），成功后再启动 lifecycle goroutine。
+	// 避免 postAuth 失败时已启动的 4 个 goroutine 无限运行（goroutine 泄漏）。
 	if postAuth != nil {
 		if err := postAuth(ctx); err != nil {
 			return err
 		}
 	}
+	cc.StartLifecycle()
+	handshakeOK = true
 	return nil
 }

@@ -67,7 +67,7 @@ func (t *ntlsClientTransport) CloseConn() error {
 // NewClient 创建一个 MBTA-NTLS 客户端。
 func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Server == "" {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "server address required")
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "server address required")
 	}
 	cc := protocol.NewCoreClient(nil, protocol.CoreClientConfig{
 		AgentID:      cfg.AgentID,
@@ -93,7 +93,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // 运行在独立的 lifecycle ctx 上，不随 ctx 取消而退出；client 生命周期由 Close() 终结。
 func (c *Client) Connect(ctx context.Context) error {
 	tr := &ntlsClientTransport{}
-	return binding.Handshake(ctx, c.core,
+	err := binding.Handshake(ctx, c.core,
 		// dial: 建立 TCP（TLCP/TLS1.3）连接
 		func(ctx context.Context) error {
 			conn, err := Dial(ctx, &c.cfg)
@@ -114,6 +114,16 @@ func (c *Client) Connect(ctx context.Context) error {
 		// postAuth: ntls 无 post-auth 工作
 		nil,
 	)
+	// 握手失败兜底：确保 TCP 连接被关闭，避免 fd 泄漏。
+	if err != nil {
+		c.mu.Lock()
+		if c.conn != nil {
+			_ = c.conn.Close()
+			c.conn = nil
+		}
+		c.mu.Unlock()
+	}
+	return err
 }
 
 // SendBatch 通过 MBTA-NTLS 协议发送一个 SignalBatch。
