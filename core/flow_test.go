@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestPressureStateString tests PressureState enum values.
@@ -281,4 +282,104 @@ func (m *mockDurableEventSink) OnSignalBatchWithResult(ctx context.Context, agen
 		EventsCount: len(batch.Signals),
 		Pressure:    PressureNormal,
 	}, err
+}
+
+// --- Window 单元测试 ---
+
+func TestWindow_CanSend_Boundary(t *testing.T) {
+	w := NewWindow(10, 100, 1000)
+	inf := &Inflight{}
+
+	// 空闲时正好等于上限应通过（batches: 0+1 <= 10）。
+	if !w.CanSend(inf, 100, 1000) {
+		t.Error("CanSend should allow batch exactly at limit")
+	}
+
+	// 超过任一维度应拒绝。
+	if w.CanSend(inf, 101, 1000) {
+		t.Error("CanSend should reject events exceeding limit")
+	}
+	if w.CanSend(inf, 100, 1001) {
+		t.Error("CanSend should reject bytes exceeding limit")
+	}
+}
+
+func TestWindow_CanSend_PausedDimension(t *testing.T) {
+	// max=0 表示该维度暂停。
+	w := NewWindow(0, 100, 1000)
+	inf := &Inflight{}
+	if w.CanSend(inf, 1, 1) {
+		t.Error("CanSend should reject when maxBatches=0 (paused)")
+	}
+}
+
+func TestWindow_CanSend_NilReceiver(t *testing.T) {
+	var w *Window
+	inf := &Inflight{}
+	if w.CanSend(inf, 1, 1) {
+		t.Error("nil Window CanSend should return false")
+	}
+}
+
+func TestWindow_Update_And_Snapshot(t *testing.T) {
+	w := NewWindow(10, 100, 1000)
+	w.Update(20, 200, 2000)
+	mb, me, mby := w.Snapshot()
+	if mb != 20 || me != 200 || mby != 2000 {
+		t.Errorf("Snapshot after Update = (%d,%d,%d), want (20,200,2000)", mb, me, mby)
+	}
+}
+
+// --- ThrottleState 单元测试 ---
+
+func TestThrottleState_Apply_NegativeDelay(t *testing.T) {
+	var ts ThrottleState
+	ts.Apply(-100) // 负值应被 clamp 到 0
+	if ts.Active() {
+		t.Error("negative delay should not activate throttle (clamped to 0)")
+	}
+}
+
+func TestThrottleState_Active_And_WaitDuration(t *testing.T) {
+	var ts ThrottleState
+	if ts.Active() {
+		t.Error("zero-value ThrottleState should not be active")
+	}
+	if d := ts.WaitDuration(); d != 0 {
+		t.Errorf("zero-value WaitDuration = %v, want 0", d)
+	}
+
+	ts.Apply(100) // 100ms
+	if !ts.Active() {
+		t.Error("ThrottleState should be active after Apply(100ms)")
+	}
+	d := ts.WaitDuration()
+	if d <= 0 || d > 100*time.Millisecond {
+		t.Errorf("WaitDuration = %v, want (0, 100ms]", d)
+	}
+}
+
+func TestThrottleState_Expired(t *testing.T) {
+	var ts ThrottleState
+	ts.Apply(1) // 1ms
+	time.Sleep(10 * time.Millisecond)
+	if ts.Active() {
+		t.Error("ThrottleState should be inactive after expiry")
+	}
+	if d := ts.WaitDuration(); d != 0 {
+		t.Errorf("expired WaitDuration = %v, want 0", d)
+	}
+}
+
+func TestThrottleState_MaxThrottleDelayClamp(t *testing.T) {
+	var ts ThrottleState
+	// 超大值应被 clamp 到 MaxThrottleDelay。
+	ts.Apply(int(MaxThrottleDelay/time.Millisecond) + 10000)
+	if !ts.Active() {
+		t.Error("should still be active after huge delay (clamped)")
+	}
+	// WaitDuration 不应超过 MaxThrottleDelay。
+	if d := ts.WaitDuration(); d > MaxThrottleDelay {
+		t.Errorf("WaitDuration = %v, exceeds MaxThrottleDelay %v", d, MaxThrottleDelay)
+	}
 }

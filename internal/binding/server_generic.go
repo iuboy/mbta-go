@@ -2,6 +2,7 @@ package binding
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"sync"
@@ -62,6 +63,14 @@ type RunSpec[L, C any] struct {
 //
 // 各 binding 的 Start 只需：校验配置 → 调 NewServer → 调 Run。
 func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
+	// 拒绝重复调用 Run：第二次会覆盖 s.listener 且不关闭旧的，泄漏 fd 和 ctx-cancel goroutine。
+	s.mu.Lock()
+	if s.listenerSet {
+		s.mu.Unlock()
+		return errors.New("binding.Server.Run: already running")
+	}
+	s.mu.Unlock()
+
 	l, err := spec.Listen(ctx)
 	if err != nil {
 		return err
@@ -101,12 +110,13 @@ func (s *Server[L, C]) Addr(addrOf func(l L) net.Addr) string {
 	return a.String()
 }
 
-// Close 关闭 listener（幂等）。
+// Close 关闭 listener（幂等：多次调用安全）。
 func (s *Server[L, C]) Close(closeListener func(l L) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.listenerSet {
 		return nil
 	}
+	s.listenerSet = false // 标记已关闭，使 Close 真正幂等 + Addr 返回空串
 	return closeListener(s.listener)
 }

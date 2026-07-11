@@ -69,6 +69,9 @@ func (b *SignalBatch) Validate() error {
 		return NewError(NumValidation, CodeValidation, "signals must not be empty")
 	}
 	for i, s := range b.Signals {
+		if s == nil {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: must not be null", i))
+		}
 		if err := validateSignal(i, s); err != nil {
 			return err
 		}
@@ -113,6 +116,10 @@ func validateSignalType(i int, s *SignalRecord) error {
 	case SignalTypeLog:
 		if s.Body == nil {
 			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: body is required for log type", i))
+		}
+	case SignalTypeProfile:
+		if s.Profile == nil {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: profile payload is required for profile type", i))
 		}
 	}
 	return nil

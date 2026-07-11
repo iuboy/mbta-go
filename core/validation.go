@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // MaxSignalFieldLen 是 SignalRecord 单个字符串字段的最大字节长度。取值保守
@@ -154,13 +155,24 @@ func ValidateBatchTraceContext(tc *TraceContext) error {
 // 但当日志被转发到 syslog/journald/ELK 等外部系统时，中间层可能丢失转义。
 // SanitizeForLog 提供 defense-in-depth。
 func SanitizeForLog(s string) string {
+	truncated := false
 	if len(s) > MaxSignalFieldLen {
-		s = s[:MaxSignalFieldLen]
+		// 截断到最后一个有效 UTF-8 边界，避免在多字节字符中间截断产生无效 UTF-8。
+		end := MaxSignalFieldLen
+		for end > 0 && !utf8.RuneStart(s[end]) {
+			end--
+		}
+		s = s[:end]
+		truncated = true
 	}
-	return strings.Map(func(r rune) rune {
+	s = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return ' '
 		}
 		return r
 	}, s)
+	if truncated {
+		s += "…(truncated)"
+	}
+	return s
 }

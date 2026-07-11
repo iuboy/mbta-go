@@ -46,11 +46,15 @@ func newTCPTransport(conn net.Conn) *tcpTransport {
 // 在该通道的发送上——Close 关闭 done（同时关 conn 让 core.Read 返回 err）即可唤醒退出，
 // 避免 goroutine 泄漏（tcp-binding §3.3 半开连接处理）。
 func (t *tcpTransport) readLoop() {
+	// defer close 保证所有退出路径（读错误或 done 信号）都关闭 channels，
+	// 使阻塞在 RecvControlFrame/RecvDataFrame 的消费者收到 io.EOF 而非永久挂起。
+	defer func() {
+		close(t.controlCh)
+		close(t.dataCh)
+	}()
 	for {
 		f, err := core.Read(t.conn, core.DefaultLimits())
 		if err != nil {
-			close(t.controlCh)
-			close(t.dataCh)
 			return
 		}
 		ch := t.dataCh
@@ -92,8 +96,13 @@ func (t *tcpTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 }
 
 // SendFrame 写帧（按 ChannelID 写单连接，writeMu 串行化）。
+// ctx 用于在获取写锁前检查取消，避免对慢速/无响应对端的写操作永久阻塞。
 func (t *tcpTransport) SendFrame(ctx context.Context, f core.Frame) error {
-	_ = ctx
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	return core.Write(t.conn, f.Header.Version, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)

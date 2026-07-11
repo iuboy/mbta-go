@@ -3,6 +3,7 @@ package core
 import (
 	"container/list"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -88,11 +89,13 @@ func NewReplayCacheWithSize(maxSize int) *ReplayCache {
 }
 
 // replayKey builds the dedup key from agentID and chunkID.
+// 长度前缀编码避免输入含 \x00 时碰撞（如 ("a\x00b","c") 与 ("a","b\x00c")）。
 func replayKey(agentID, chunkID string) string {
-	return agentID + "\x00" + chunkID
+	return strconv.Itoa(len(agentID)) + ":" + agentID + chunkID
 }
 
 // SetMetrics 注入可观测性接口，用于上报缓存驱逐次数。可选；nil 表示不上报。
+// 必须在缓存进入并发使用前调用，不与 SeenOrAdd/Update/Get 并发。
 func (rc *ReplayCache) SetMetrics(m Metrics) { rc.metrics = m }
 
 // SeenOrAdd checks if a (agentID, chunkID) pair has been seen. Returns the entry if so.
@@ -106,7 +109,8 @@ func (rc *ReplayCache) SeenOrAdd(agentID, chunkID string) *ReplayEntry {
 	defer rc.mu.Unlock()
 
 	if n, ok := rc.entries[key]; ok {
-		return &n.entry
+		entry := n.entry // 返回拷贝，避免外部并发读与 Update 写竞争
+		return &entry
 	}
 
 	// 容量满时淘汰：优先已完成条目，O(1)。
@@ -162,6 +166,11 @@ func (rc *ReplayCache) Update(agentID, chunkID string, status ReplayStatus) {
 	if wasProcessing && status != ReplayProcessing {
 		rc.processingList.Remove(n.el)
 		n.el = rc.doneList.PushBack(n)
+	} else if !wasProcessing && status == ReplayProcessing {
+		// 反向转换（done→Processing）：throttle 重试场景需要将 done 条目移回 processingList，
+		// 否则该条目会被当作已完成驱逐，且 processingList 计数不一致。
+		rc.doneList.Remove(n.el)
+		n.el = rc.processingList.PushBack(n)
 	}
 }
 
@@ -171,7 +180,8 @@ func (rc *ReplayCache) Get(agentID, chunkID string) *ReplayEntry {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	if n, ok := rc.entries[key]; ok {
-		return &n.entry
+		entry := n.entry // 返回拷贝，避免外部并发读与 Update 写竞争
+		return &entry
 	}
 	return nil
 }

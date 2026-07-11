@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
+	"time"
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/protocol"
@@ -36,6 +38,8 @@ func AcceptLoop[C any](
 	closeConn func(C),
 	hcfg HandlerConfig,
 ) error {
+	// accept 错误指数退避（5ms→1s），防止 listener 持久错误（EMFILE 等）导致 CPU 空转。
+	var backoff time.Duration
 	for {
 		select {
 		case connSem <- struct{}{}:
@@ -49,35 +53,78 @@ func AcceptLoop[C any](
 				return nil //nolint:nilerr // ctx 取消属优雅关闭
 			}
 			slog.Warn("accept error", "error", err)
+			backoff = nextBackoff(backoff)
+			if !sleepCtx(ctx, backoff) {
+				return nil
+			}
 			continue
 		}
-		go func(conn C) {
-			defer func() { <-connSem }()
-			tr, err := newTransport(ctx, conn)
-			if err != nil {
-				slog.Error("transport setup", "error", err)
-				if closeConn != nil {
-					closeConn(conn)
-				}
-				return
+		backoff = 0 // accept 成功，重置退避
+		go handleConn(ctx, conn, connSem, newTransport, closeConn, hcfg)
+	}
+}
+
+// nextBackoff 计算下一次 accept 退避（指数 5ms→1s）。
+func nextBackoff(prev time.Duration) time.Duration {
+	if prev == 0 {
+		return 5 * time.Millisecond
+	}
+	return time.Duration(math.Min(float64(prev*2), float64(time.Second)))
+}
+
+// sleepCtx 睡眠 d 或直到 ctx 取消；ctx 取消返回 false。
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// handleConn 处理单个连接的完整生命周期（transport 建立 → 协议处理），
+// 含 panic recover 防 single 连接崩溃整个服务。提取自 AcceptLoop 降低认知复杂度。
+func handleConn[C any](
+	ctx context.Context,
+	conn C,
+	connSem chan struct{},
+	newTransport func(context.Context, C) (protocol.Transport, error),
+	closeConn func(C),
+	hcfg HandlerConfig,
+) {
+	defer func() { <-connSem }()
+	// recover 防止单个连接的 panic 崩溃整个服务进程。
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("handler panic recovered", "panic", r)
+			if closeConn != nil {
+				closeConn(conn)
 			}
-			h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-				Auth:            hcfg.Auth,
-				Policy:          hcfg.Policy,
-				Sink:            hcfg.Sink,
-				Metrics:         hcfg.Metrics,
-				ServerID:        hcfg.ServerID,
-				RedirectChecker: hcfg.RedirectChecker,
-			})
-			if err := h.Handle(ctx); err != nil {
-				// ErrRedirected is normal HA flow (follower steered a client to
-				// the leader), not a handler error — suppress the noisy log.
-				if errors.Is(err, core.ErrRedirected) {
-					slog.Debug("connection redirected to leader")
-				} else {
-					slog.Error("handler error", "error", err)
-				}
-			}
-		}(conn)
+		}
+	}()
+	tr, err := newTransport(ctx, conn)
+	if err != nil {
+		slog.Error("transport setup", "error", err)
+		if closeConn != nil {
+			closeConn(conn)
+		}
+		return
+	}
+	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
+		Auth:            hcfg.Auth,
+		Policy:          hcfg.Policy,
+		Sink:            hcfg.Sink,
+		Metrics:         hcfg.Metrics,
+		ServerID:        hcfg.ServerID,
+		RedirectChecker: hcfg.RedirectChecker,
+	})
+	if err := h.Handle(ctx); err != nil {
+		// ErrRedirected is normal HA flow (follower steered a client to
+		// the leader), not a handler error — suppress the noisy log.
+		if errors.Is(err, core.ErrRedirected) {
+			slog.Debug("connection redirected to leader")
+		} else {
+			slog.Error("handler error", "error", err)
+		}
 	}
 }

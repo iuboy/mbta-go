@@ -26,8 +26,27 @@ type ChunkID [16]byte
 var chunkEntropy = &ulid.LockedMonotonicReader{MonotonicReader: ulid.Monotonic(rand.Reader, 0)}
 
 // NewChunkID 生成一个新的 ULID ChunkID（并发安全）。
+//
+// ulid.MustNew 在熵源失败或单调计数器溢出时会 panic 崩溃整个进程，
+// 这对运行中的服务不可接受。此处用 recover 兜底：若 MustNew panic，
+// 降级为纯随机 ChunkID（仍全局唯一，仅丧失同毫秒单调性），绝不崩溃进程。
 func NewChunkID() ChunkID {
-	u := ulid.MustNew(ulid.Timestamp(time.Now()), chunkEntropy)
+	var u ulid.ULID
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// 熵源失败/单调溢出降级：填充纯随机字节，保证唯一性（丧失单调序）。
+				if _, err := rand.Read(u[:]); err != nil {
+					// crypto/rand 彻底不可用：用时间戳填充，尽力保证唯一。
+					now := time.Now().UnixNano()
+					for i := 0; i < 16; i++ {
+						u[i] = byte(now >> (i % 8 * 8))
+					}
+				}
+			}
+		}()
+		u = ulid.MustNew(ulid.Timestamp(time.Now()), chunkEntropy)
+	}()
 	return ChunkID(u)
 }
 

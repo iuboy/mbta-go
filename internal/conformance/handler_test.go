@@ -272,7 +272,7 @@ func TestCoreHandler_Datagram(t *testing.T) {
 func TestCoreHandler_EarlyData(t *testing.T) {
 	store := core.NewSessionStore()
 	resumptionKeys, _ := core.GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
-	ticket := core.NewTicket()
+	ticket, _ := core.NewTicket()
 	store.Put(ticket, &core.SessionState{
 		Keys:    resumptionKeys,
 		AgentID: "agent-1",

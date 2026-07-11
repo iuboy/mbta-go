@@ -61,8 +61,11 @@ var knownTypes = map[uint8]bool{
 
 // ValidateFlags 校验 flags 的位组合合法性（core spec §3.1）。
 func ValidateFlags(flags byte) error {
-	if FlowClassOf(flags) == 3 {
+	if FlowClassOf(flags) == FlowClassOf(FlowClassReserved) {
 		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("reserved FlowClass: 0x%02x", flags&FlagFlowClassMask))
+	}
+	if flags&FlagReserved4 != 0 {
+		return NewError(NumProtocol, CodeProtocol, "reserved flag bit set (0x10)")
 	}
 	cd := flags & FlagControlDataMask
 	if cd == 0 || cd == FlagControlDataMask {

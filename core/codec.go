@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"sync"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
 )
@@ -26,22 +27,29 @@ type SignalCodec interface {
 
 // codecRegistry 是已注册的 SignalCodec 集合，按 wire Codec enum 索引。
 //
-// 写入仅发生在 init()（单线程、无竞争），读取发生在运行时（go test -race 安全，
-// 因为 init 完成后 map 不再变更）。
-var codecRegistry = map[corepb.Codec]SignalCodec{}
+// 写入仅发生在 init()（单线程、无竞争），读取发生在运行时。用 RWMutex 保护，
+// 使 RegisterCodec 在运行时调用（第三方 codec）也安全。
+var (
+	codecRegistryMu sync.RWMutex
+	codecRegistry   = map[corepb.Codec]SignalCodec{}
+)
 
-// RegisterCodec 注册一个 codec（覆盖同名）。
+// RegisterCodec 注册一个 codec（覆盖同名）。线程安全，但建议在 init() 调用。
 //
-// 幂等：重复注册同一 Codec 值以最后一次为准。仅应在 init() 调用以避免数据竞争。
+// 幂等：重复注册同一 Codec 值以最后一次为准。
 func RegisterCodec(c SignalCodec) {
 	if c == nil {
 		return
 	}
+	codecRegistryMu.Lock()
+	defer codecRegistryMu.Unlock()
 	codecRegistry[c.Codec()] = c
 }
 
 // LookupCodec 返回 codec 对应实现；未注册返回 nil。
 func LookupCodec(codec corepb.Codec) SignalCodec {
+	codecRegistryMu.RLock()
+	defer codecRegistryMu.RUnlock()
 	return codecRegistry[codec]
 }
 

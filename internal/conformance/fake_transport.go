@@ -63,6 +63,12 @@ func (t *FakeTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 }
 
 func (t *FakeTransport) SendFrame(ctx context.Context, f core.Frame) error {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return io.ErrClosedPipe
+	}
+	t.mu.Unlock()
 	select {
 	case t.Sent <- f:
 		return nil
@@ -74,19 +80,43 @@ func (t *FakeTransport) SendFrame(ctx context.Context, f core.Frame) error {
 func (t *FakeTransport) SupportsDatagram() bool { return t.datagram }
 
 func (t *FakeTransport) SendDatagram(ctx context.Context, payload []byte) error {
-	_ = ctx
-	_ = payload
-	return protocol.ErrDatagramUnsupported
+	if !t.datagram {
+		return protocol.ErrDatagramUnsupported
+	}
+	// datagram=true 模拟 QUIC：作为 data 帧路由到 Sent 供测试验证。
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return io.ErrClosedPipe
+	}
+	t.mu.Unlock()
+	select {
+	case t.Sent <- core.Frame{Payload: payload}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (t *FakeTransport) Multiplexing() protocol.MultiplexModel {
+	if t.datagram {
+		return protocol.MultiplexQuicMultiStream
+	}
 	return protocol.MultiplexTCPSingleConn
 }
 
 func (t *FakeTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.closed {
+		return nil
+	}
 	t.closed = true
+	// 关闭 channels 使阻塞在 RecvControlFrame/RecvDataFrame 的消费者收到 io.EOF，
+	// 并让 SendFrame 立即返回 ErrClosedPipe，避免 goroutine 泄漏。
+	close(t.ControlIn)
+	close(t.DataIn)
+	close(t.Sent)
 	return nil
 }
 

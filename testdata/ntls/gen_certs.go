@@ -19,6 +19,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"time"
 
@@ -82,9 +83,14 @@ func issueCert(cn string, keyUsage x509.KeyUsage, holder *sm2.PrivateKey,
 	tmpl := &x509.Certificate{
 		SerialNumber: serial(),
 		Subject:      pkix.Name{Country: []string{"CN"}, Province: []string{"Beijing"}, Organization: []string{"Pollux-Test"}, CommonName: cn},
-		NotBefore:    time.Unix(1748100000, 0),
-		NotAfter:     time.Unix(1748100000, 0).AddDate(10, 0, 0),
-		KeyUsage:     keyUsage,
+		// SAN：现代 TLS 栈用 SAN 做主机名校验（CN 已弃用）。补 DNS/IP SAN 与 shell 脚本一致。
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		NotBefore:             time.Unix(1748100000, 0),
+		NotAfter:              time.Unix(1748100000, 0).AddDate(10, 0, 0),
+		KeyUsage:              keyUsage,
+		BasicConstraintsValid: true,
+		IsCA:                  false,
 	}
 	der, err := polluxSmx509.CreateCertificate(tmpl, caCert, &holder.PublicKey, caKey)
 	must(err)

@@ -111,10 +111,14 @@ func TestSanitizeForLog(t *testing.T) {
 	if got := SanitizeForLog("a\x00b\x1bc\nd"); got != "a b c d" {
 		t.Errorf("control chars not replaced: %q", got)
 	}
-	// 超长截断到 MaxSignalFieldLen。
+	// 超长截断到 MaxSignalFieldLen 以内（含截断标记）。
 	long := strings.Repeat("a", MaxSignalFieldLen+10)
-	if got := SanitizeForLog(long); len(got) != MaxSignalFieldLen {
-		t.Errorf("truncated len = %d, want %d", len(got), MaxSignalFieldLen)
+	got := SanitizeForLog(long)
+	if len(got) > MaxSignalFieldLen+20 {
+		t.Errorf("truncated len = %d, want <= %d+marker", len(got), MaxSignalFieldLen)
+	}
+	if !strings.Contains(got, "(truncated)") {
+		t.Errorf("truncated marker missing: len=%d", len(got))
 	}
 }
 

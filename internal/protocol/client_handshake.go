@@ -65,6 +65,11 @@ func (c *CoreClient) RecvHelloAck() (*core.HelloAckMessage, error) {
 		Compression:          ack.GetCompression(),
 		CipherSuite:          ack.GetCipherSuite(),
 	}
+	// 防御性校验：服务端选定的 cipher suite 不能是 UNSPECIFIED，
+	// 否则后续 key 派生会用错误算法（SHA-256 vs SM3）静默失败。
+	if ack.GetCipherSuite() == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
+		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server selected unspecified cipher suite")
+	}
 	c.challengeNonce = ack.GetChallengeNonce()
 
 	if len(c.challengeNonce) == 0 {
@@ -127,10 +132,15 @@ func (c *CoreClient) RecvAuthResult() error {
 		cs := okMsg.GetCipherSuite()
 		c.keys = core.NewSessionKeys(okMsg.GetKeyId(), cs, okMsg.GetHmacKey())
 		// AEAD 密钥按套件下发字段（intl=AesKey, gm=Sm4Key）。
-		if cs == corepb.CipherSuite_CIPHER_SUITE_INTL {
+		// 显式 switch 替代 else 兜底，避免 UNSPECIFIED 静默用空 Sm4Key 导致加密失效。
+		switch cs {
+		case corepb.CipherSuite_CIPHER_SUITE_INTL:
 			c.keys.SetAEADKey(okMsg.GetAesKey())
-		} else {
+		case corepb.CipherSuite_CIPHER_SUITE_GM:
 			c.keys.SetAEADKey(okMsg.GetSm4Key())
+		default:
+			return core.NewError(core.NumProtocol, core.CodeProtocol,
+				fmt.Sprintf("unsupported cipher suite in AUTH_OK: %s", cs))
 		}
 
 		if okMsg.GetExpiresAtUnix() > 0 {

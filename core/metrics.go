@@ -289,22 +289,28 @@ type noopHistogram struct{}
 
 func (noopHistogram) Observe(float64) {}
 
-func newCounter(reg prometheus.Registerer, opts prometheus.CounterOpts) prometheus.Counter {
-	c := prometheus.NewCounter(opts)
-	reg.MustRegister(c)
+// registerOrExisting 尝试注册 collector；若已注册（重复调用 New），返回已有 collector 而非 panic。
+func registerOrExisting[T prometheus.Collector](reg prometheus.Registerer, c T) T {
+	if err := reg.Register(c); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			return are.ExistingCollector.(T)
+		}
+		// 非重复注册的意外错误：无法恢复，panic 保持与 MustRegister 一致的可观测性。
+		panic(err)
+	}
 	return c
 }
 
+func newCounter(reg prometheus.Registerer, opts prometheus.CounterOpts) prometheus.Counter {
+	return registerOrExisting(reg, prometheus.NewCounter(opts))
+}
+
 func newGauge(reg prometheus.Registerer, opts prometheus.GaugeOpts) prometheus.Gauge {
-	g := prometheus.NewGauge(opts)
-	reg.MustRegister(g)
-	return g
+	return registerOrExisting(reg, prometheus.NewGauge(opts))
 }
 
 func newHistogram(reg prometheus.Registerer, opts prometheus.HistogramOpts) prometheus.Histogram {
-	h := prometheus.NewHistogram(opts)
-	reg.MustRegister(h)
-	return h
+	return registerOrExisting(reg, prometheus.NewHistogram(opts))
 }
 
 // 编译期断言：*MBTAMetrics 与 NoOpMetrics 都满足 Metrics 接口。

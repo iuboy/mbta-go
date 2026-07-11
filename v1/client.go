@@ -97,12 +97,15 @@ func (w *quicStreamWrapper) writeFrameCtx(ctx context.Context, typ uint8, flags 
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if dl, ok := ctx.Deadline(); ok {
-		if err := w.stream.SetWriteDeadline(dl); err != nil {
-			return core.WrapError(core.NumStream, core.CodeStream, "set write deadline", err)
-		}
-		defer func() { _ = w.stream.SetWriteDeadline(time.Time{}) }()
+	// ctx 无 deadline 时设默认上限，避免 QUIC 流控背压下 Write 永久阻塞（goroutine 泄漏）。
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(30 * time.Second)
 	}
+	if err := w.stream.SetWriteDeadline(dl); err != nil {
+		return core.WrapError(core.NumStream, core.CodeStream, "set write deadline", err)
+	}
+	defer func() { _ = w.stream.SetWriteDeadline(time.Time{}) }()
 	return core.Write(w, core.Version, typ, flags, channel, payload)
 }
 
@@ -134,7 +137,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // 握手成功后，后台 goroutine 运行在独立的 lifecycle ctx 上。
 func (c *Client) Connect(ctx context.Context) error {
 	tr := &v1ClientTransport{}
-	return binding.Handshake(ctx, c.core,
+	err := binding.Handshake(ctx, c.core,
 		// dial: 建立 QUIC 连接
 		func(ctx context.Context) error {
 			conn, err := Dial(ctx, c.cfg.Transport)
@@ -175,6 +178,17 @@ func (c *Client) Connect(ctx context.Context) error {
 			return nil
 		},
 	)
+	// 握手失败时 Handshake 会调 cc.Close()，但若 setupTransport 在 SetTransport 前失败，
+	// c.tr 仍为 nil → CloseConn 被跳过 → QUIC 连接泄漏。此处兜底清理。
+	if err != nil {
+		c.mu.Lock()
+		if c.conn != nil {
+			_ = c.conn.CloseWithError(0, "connect failed")
+			c.conn = nil
+		}
+		c.mu.Unlock()
+	}
+	return err
 }
 
 // openDataStreams 按 PickStrategy 打开数据流并构造 StreamPicker。

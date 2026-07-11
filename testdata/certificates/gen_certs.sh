@@ -2,17 +2,20 @@
 # 生成测试用 TLS 证书
 # 这些证书仅用于测试，不得用于生产环境
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# 清理上次失败遗留的 stale serial，避免证书复用意外序号。
+rm -f ca.srl
 
 echo "生成 CA 私钥和证书..."
 openssl req -new -newkey rsa:2048 -nodes -x509 -sha256 -days 365 \
     -keyout ca.key -out ca.crt \
     -subj "/C=US/ST=Test/L=Test/O=MBTA Test/OU=Testing/CN=MBTA Test CA" \
     -addext "basicConstraints=critical,CA:TRUE" \
-    -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null || true
+    -addext "keyUsage=critical,keyCertSign,cRLSign"
 
 echo "生成服务器私钥和 CSR..."
 openssl req -new -newkey rsa:2048 -nodes -sha256 -days 365 \

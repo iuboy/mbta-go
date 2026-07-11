@@ -26,6 +26,9 @@ const (
 	windowMaxBytes              int64 = 16 * 1024 * 1024
 	throttleRetryMs                   = 1000
 	challengeNonceLen                 = 16
+	// maxDrainTimeout 限制客户端 close_timeout_ms 的上限，防恶意客户端发 MaxUint32
+	// 致 handler goroutine 阻塞 ~49 天（内存/goroutine DoS）。
+	maxDrainTimeout = 30 * time.Second
 )
 
 // CodeEnvelopeAlgoMismatch 是 envelope 算法一致性复核失败时回送的 NACK code。
@@ -51,8 +54,8 @@ type CoreHandler struct {
 	config HandlerConfig
 
 	sm         *core.ServerMachine
-	negotiated *core.NegotiateResult
-	keys       atomic.Pointer[core.SessionKeys] // 0-RTT：controlLoop(handleAuth) 与 dataLoop(processBatch) 并发读写
+	negotiated atomic.Pointer[core.NegotiateResult] // controlLoop(handleHello) 写 / dataLoop(processBatch) 读，原子化避免数据竞争
+	keys       atomic.Pointer[core.SessionKeys]     // 0-RTT：controlLoop(handleAuth) 与 dataLoop(processBatch) 并发读写
 	replay     *core.ReplayCache
 	window     *core.Window
 	inflight   *core.Inflight
@@ -67,9 +70,10 @@ type CoreHandler struct {
 	lastPressure   atomic.Value
 	pressureMu     sync.Mutex // 保护 lastPressure 的"比较-更新-下发"序列（§9.2 避免同值重复 WINDOW）
 
-	dataOnce sync.Once
-	dataWG   sync.WaitGroup // 跟踪 data frame 处理 goroutine
-	batchSem chan struct{}  // data frame 并发上限（QUIC=64 / TCP=8）
+	dataOnce       sync.Once
+	dataWG         sync.WaitGroup     // 跟踪 data frame 处理 goroutine
+	batchSem       chan struct{}      // data frame 并发上限（QUIC=64 / TCP=8）
+	cancelDataLoop context.CancelFunc // 取消 dataLoop 派生 context，使 processBatch 尽快退出
 }
 
 // NewCoreHandler 创建 handler。batchSem 容量按 Multiplexing 选（保留两套并发模型）。
@@ -111,6 +115,11 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 	drainTimeout := h.closeTimeout
 	if drainTimeout == 0 {
 		drainTimeout = 5 * time.Second
+	}
+	// 取消 dataLoop context，使仍在阻塞的 processBatch goroutine 尽快退出，
+	// 避免 cleanup 后读 nil keys（h.keys.Store(nil)）或永久泄漏。
+	if h.cancelDataLoop != nil {
+		h.cancelDataLoop()
 	}
 	done := make(chan struct{})
 	go func() { h.dataWG.Wait(); close(done) }()
@@ -160,12 +169,7 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			}
 			h.handlePing(ctx, f.Payload)
 		case core.TypeClose:
-			var closeMsg core.CloseMessage
-			_ = core.Decode(f.Payload, &closeMsg)
-			if closeMsg.GetCloseTimeoutMs() > 0 {
-				h.closeTimeout = time.Duration(closeMsg.GetCloseTimeoutMs()) * time.Millisecond
-			}
-			slog.Info("close received", "session", string(h.sessionID), "drain_timeout", h.closeTimeout)
+			h.handleClose(f.Payload)
 			return nil
 		default:
 			h.sendError(ctx, core.CodeUnsupportedMessage, fmt.Sprintf("unexpected control type 0x%02x", f.Header.Type), true)
@@ -175,14 +179,35 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 		// READY 或 0-RTT early_data 后启动 data loop（exactly once）
 		if h.sm.State() == core.ServerStateReady || h.earlyData {
 			h.dataOnce.Do(func() {
+				// 派生可取消 context：controlLoop 退出后 Handle 调 cancelDataLoop，
+				// 使阻塞在 sink 的 processBatch goroutine 收到取消信号尽快退出。
+				dataCtx, cancel := context.WithCancel(ctx)
+				h.cancelDataLoop = cancel
 				h.dataWG.Add(1)
 				go func() {
 					defer h.dataWG.Done()
-					h.dataLoop(ctx)
+					h.dataLoop(dataCtx)
 				}()
 			})
 		}
 	}
+}
+
+// handleClose 处理 CLOSE 帧：解码 + clamp close_timeout 防恶意 DoS。提取自 controlLoop。
+func (h *CoreHandler) handleClose(payload []byte) {
+	var closeMsg core.CloseMessage
+	if derr := core.Decode(payload, &closeMsg); derr != nil {
+		slog.Warn("failed to decode close message", "session", string(h.sessionID), "error", derr)
+	}
+	if closeMsg.GetCloseTimeoutMs() > 0 {
+		// 强制上限防止恶意客户端发 MaxUint32 导致 goroutine 长期占用资源（DoS）。
+		requested := time.Duration(closeMsg.GetCloseTimeoutMs()) * time.Millisecond
+		if requested > maxDrainTimeout {
+			requested = maxDrainTimeout
+		}
+		h.closeTimeout = requested
+	}
+	slog.Info("close received", "session", string(h.sessionID), "drain_timeout", h.closeTimeout)
 }
 
 // dataLoop 读 BATCH 帧并发处理（batchSem 限流）。

@@ -102,7 +102,15 @@ type NegotiateResult struct {
 //
 // 设计说明：HELLO 和 AUTH 分为两步，便于 token 轮换、AUTH payload 加密保护、
 // 以及 HELLO_ACK 下发 challenge nonce 用于挑战-响应。
+// maxClientCapabilities 限制客户端 HELLO 中可声明的能力数量，防 pre-auth DoS
+// （恶意客户端发送数千能力导致 toSet/FilterUnknownStable 内存与 CPU 放大）。
+const maxClientCapabilities = 256
+
 func Negotiate(clientCaps []string, policy Policy) (NegotiateResult, error) {
+	if len(clientCaps) > maxClientCapabilities {
+		return NegotiateResult{}, NewError(NumProtocol, CodeProtocol,
+			fmt.Sprintf("too many capabilities advertised: %d (max %d)", len(clientCaps), maxClientCapabilities))
+	}
 	if unknown := FilterUnknownStable(clientCaps); len(unknown) > 0 {
 		return NegotiateResult{}, NewError(NumProtocol, CodeProtocol,
 			fmt.Sprintf("unknown stable capabilities from client: %v", unknown))

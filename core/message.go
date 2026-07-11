@@ -75,11 +75,8 @@ func ValidateBatch(m *BatchMessage) error {
 	if m.GetSeq() == 0 {
 		return NewError(NumValidation, CodeValidation, "seq must be >= 1")
 	}
-	if len(m.GetChunkId()) == 0 {
-		return NewError(NumValidation, CodeValidation, "chunk_id is required")
-	}
-	if len(m.GetChunkId()) > 16 {
-		return NewError(NumValidation, CodeValidation, fmt.Sprintf("chunk_id exceeds 16 bytes (ULID), got %d", len(m.GetChunkId())))
+	if len(m.GetChunkId()) != 16 {
+		return NewError(NumValidation, CodeValidation, fmt.Sprintf("chunk_id must be exactly 16 bytes (ULID), got %d", len(m.GetChunkId())))
 	}
 	if len(m.GetBatch()) == 0 {
 		return NewError(NumValidation, CodeValidation, "batch must not be empty")

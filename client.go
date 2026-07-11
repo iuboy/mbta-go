@@ -275,6 +275,11 @@ func (c *Client) initV2Client() (versionedClient, error) {
 
 // initNTLSClient 初始化 NTLS（TCP + TLCP）客户端。
 func (c *Client) initNTLSClient() (versionedClient, error) {
+	// fail-fast：与 initV1Client 一致，NewClient 时校验凭证非空，
+	// 避免延迟到 Connect 才报隐晦的 "ntls credentials required" 错误。
+	if c.cfg.NTLSCreds == nil {
+		return nil, core.NewError(core.NumCredential, core.CodeCredential, "ntls credentials not provided")
+	}
 	cfg := ntls.ClientConfig{
 		Server:      c.cfg.Server,
 		Credentials: c.cfg.NTLSCreds,

@@ -171,6 +171,9 @@ func (c *CoreClient) waitGoroutines() {
 	deadline := time.NewTimer(waitTimeout)
 	defer deadline.Stop()
 	for _, ch := range []<-chan struct{}{c.ackDone, c.reaperDone, c.heartbeatDone, c.ackWorkerDone} {
+		if ch == nil {
+			continue // 防御：未初始化的 channel 跳过（从 nil channel 接收会永久阻塞）
+		}
 		select {
 		case <-ch:
 		case <-deadline.C:
@@ -193,8 +196,11 @@ func (c *CoreClient) close() {
 	closeMsg := &corepb.CloseMessage{Code: "shutdown", Reason: "client closing"}
 	if payload, err := core.Encode(closeMsg); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := c.tr.WriteFrame(ctx, core.TypeClose, core.FlagControl, core.ChannelControl, payload); err != nil {
-			slog.Warn("write close frame", "error", err)
+		// c.tr 可能为 nil（Connect 未完成或未调用即 Close），与下方 CloseConn 的 nil 检查对称。
+		if c.tr != nil {
+			if err := c.tr.WriteFrame(ctx, core.TypeClose, core.FlagControl, core.ChannelControl, payload); err != nil {
+				slog.Warn("write close frame", "error", err)
+			}
 		}
 		cancel()
 	}
@@ -279,10 +285,14 @@ func (c *CoreClient) StartLifecycle() {
 	if c.readControlFn != nil {
 		fn := c.readControlFn
 		go func() { defer close(c.ackDone); fn(c.lifecycleCtx) }()
+	} else {
+		close(c.ackDone) // 无 hook：立即关闭 done channel，避免 waitGoroutines 等到超时
 	}
 	if c.heartbeatLoopFn != nil {
 		fn := c.heartbeatLoopFn
 		go func() { defer close(c.heartbeatDone); fn(c.lifecycleCtx) }()
+	} else {
+		close(c.heartbeatDone) // 无 hook：同上
 	}
 	go func() { defer close(c.reaperDone); c.ackReaper(c.lifecycleCtx) }()
 	go func() { defer close(c.ackWorkerDone); c.runACKWorker(c.lifecycleCtx) }()
@@ -308,6 +318,7 @@ func (c *CoreClient) SetOnAuthed(fn func(context.Context)) {
 // --- binding 在 Connect 中调用的状态设置方法 ---
 
 // SetTransport 设置/替换传输实现。Connect 拨号成功后由 binding 调用。
+// 线程安全约束：仅在 Connect 的单线程路径调用，不可与 Close 并发。
 func (c *CoreClient) SetTransport(tr ClientTransport) {
 	c.tr = tr
 }
