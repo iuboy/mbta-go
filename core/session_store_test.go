@@ -11,7 +11,7 @@ func TestSessionStore_PutGetDelete(t *testing.T) {
 	s := NewSessionStore()
 	defer s.Close()
 
-	ticket := NewTicket()
+	ticket, _ := NewTicket()
 	state := &SessionState{
 		Keys:    &SessionKeys{KeyID: "k1"},
 		AgentID: "agent-1",
@@ -43,7 +43,7 @@ func TestSessionStore_ExpiredNotReturned(t *testing.T) {
 	s := NewSessionStore()
 	defer s.Close()
 
-	ticket := NewTicket()
+	ticket, _ := NewTicket()
 	s.Put(ticket, &SessionState{
 		Keys:    &SessionKeys{KeyID: "k1"},
 		AgentID: "agent-1",
@@ -61,8 +61,8 @@ func TestSessionStore_ReaperEvictsExpired(t *testing.T) {
 	s := NewSessionStore(WithReaperInterval(20 * time.Millisecond))
 	defer s.Close()
 
-	freshTicket := NewTicket()
-	expiredTicket := NewTicket()
+	freshTicket, _ := NewTicket()
+	expiredTicket, _ := NewTicket()
 
 	s.Put(freshTicket, &SessionState{
 		Keys: &SessionKeys{KeyID: "fresh"}, AgentID: "a-fresh",
@@ -118,7 +118,7 @@ func TestSessionStore_ReaperPreservesFresh(t *testing.T) {
 	s := NewSessionStore(WithReaperInterval(20 * time.Millisecond))
 	defer s.Close()
 
-	ticket := NewTicket()
+	ticket, _ := NewTicket()
 	s.Put(ticket, &SessionState{
 		Keys: &SessionKeys{KeyID: "k"}, AgentID: "a",
 		Expiry: time.Now().Add(time.Hour),

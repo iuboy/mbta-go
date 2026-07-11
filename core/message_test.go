@@ -54,6 +54,12 @@ func TestValidateBatch(t *testing.T) {
 	if err := ValidateBatch(&BatchMessage{Seq: 1, ChunkId: make([]byte, 17), Batch: []byte("p")}); err == nil {
 		t.Error("oversized chunk_id should fail")
 	}
+	// 回归：1-15 字节的截断 chunk_id 现在必须被拒绝（之前只检查 >16）。
+	for _, n := range []int{1, 8, 15} {
+		if err := ValidateBatch(&BatchMessage{Seq: 1, ChunkId: make([]byte, n), Batch: []byte("p")}); err == nil {
+			t.Errorf("truncated chunk_id (%d bytes) should fail; must be exactly 16", n)
+		}
+	}
 	if err := ValidateBatch(&BatchMessage{Seq: 1, ChunkId: cid.Bytes(), Batch: nil}); err == nil {
 		t.Error("empty batch should fail")
 	}

@@ -56,6 +56,9 @@ bench:
 ## fmt: Format Go code
 fmt:
 	gofmt -s -w .
+
+## tidy: Tidy module dependencies (separate from fmt to keep formatting side-effect-free)
+tidy:
 	$(GOCMD) mod tidy
 
 ## check: Run all checks (fmt + vet + lint + test)

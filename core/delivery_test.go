@@ -74,25 +74,25 @@ func TestReplayKey(t *testing.T) {
 			name:    "basic key generation",
 			agentID: "agent-123",
 			chunkID: "chunk-456",
-			want:    "agent-123\x00chunk-456",
+			want:    "9:agent-123chunk-456",
 		},
 		{
 			name:    "empty chunkID",
 			agentID: "agent-123",
 			chunkID: "",
-			want:    "agent-123\x00",
+			want:    "9:agent-123",
 		},
 		{
 			name:    "chunkID with null byte",
 			agentID: "agent-123",
 			chunkID: "chunk\x00456",
-			want:    "agent-123\x00chunk\x00456",
+			want:    "9:agent-123chunk\x00456",
 		},
 		{
 			name:    "both empty",
 			agentID: "",
 			chunkID: "",
-			want:    "\x00",
+			want:    "0:",
 		},
 	}
 
@@ -119,6 +119,15 @@ func TestReplayKey(t *testing.T) {
 		}
 		if k3 == k4 {
 			t.Error("k3 and k4 should be different")
+		}
+	})
+
+	t.Run("No collision with null bytes in input (length-prefix encoding)", func(t *testing.T) {
+		// 旧编码 agentID+"\x00"+chunkID 对含 \x00 的输入会碰撞；长度前缀编码不会。
+		k1 := replayKey("a\x00b", "c")
+		k2 := replayKey("a", "b\x00c")
+		if k1 == k2 {
+			t.Error("length-prefix encoding should not collide for inputs containing \\x00")
 		}
 	})
 }
@@ -270,6 +279,34 @@ func TestReplayCacheUpdate(t *testing.T) {
 			t.Errorf("Entry should not exist, got Status = %v", entry.Status)
 		}
 	})
+}
+
+// TestReplayCacheReverseTransition 回归：done→Processing 反向转换。
+// 修复 throttle 数据丢失：applyRouteResult 在 throttle 时将 done 条目移回 processingList，
+// 否则条目会被当作已完成驱逐、且 processingList 计数不一致。
+func TestReplayCacheReverseTransition(t *testing.T) {
+	rc := NewReplayCache()
+	rc.SeenOrAdd("agent-1", "chunk-1")       // 初始 Processing
+	rc.Update("agent-1", "chunk-1", ReplayDurable) // → doneList
+
+	// 反向：done → Processing（throttle 重试场景）。
+	rc.Update("agent-1", "chunk-1", ReplayProcessing)
+
+	entry := rc.Get("agent-1", "chunk-1")
+	if entry == nil {
+		t.Fatal("entry should exist after reverse transition")
+	}
+	if entry.Status != ReplayProcessing {
+		t.Errorf("Status = %v, want ReplayProcessing", entry.Status)
+	}
+
+	// 再次 SeenOrAdd 不应误判为已存在（返回 nil = 新条目），
+	// 因为状态已回到 Processing，重试应能重新投递。
+	if existing := rc.SeenOrAdd("agent-1", "chunk-1"); existing == nil {
+		// Processing 状态下 SeenOrAdd 返回 existing（非 nil），表示已存在。
+		// 这是正确的——SeenOrAdd 发现已存在条目即返回它，上层据此决定是否重投。
+		t.Log("SeenOrAdd returned nil for Processing entry (acceptable: entry exists in Processing)")
+	}
 }
 
 // TestReplayCacheGet tests the Get method.

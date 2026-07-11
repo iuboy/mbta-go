@@ -157,6 +157,8 @@ func TestValidateFlags(t *testing.T) {
 		{name: "Control and Data both", flags: FlagControl | FlagData, wantErr: true},
 		{name: "FlowClass reserved=3", flags: FlagControl | (3 << FlagFlowClassShift), wantErr: true},
 		{name: "MoreFollows and Coalesced", flags: FlagData | FlagMoreFollows | FlagCoalesced, wantErr: true},
+		{name: "Reserved flag bit 0x10", flags: FlagControl | FlagReserved4, wantErr: true},
+		{name: "Reserved4 with Data", flags: FlagData | FlagReserved4, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
