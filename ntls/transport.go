@@ -160,6 +160,9 @@ func buildClientTLS13(cfg *ClientCredentials) (*tls.Config, error) {
 		InsecureSkipVerify: cfg.InsecureSkipVerify,
 		ClientSessionCache: tls.NewLRUClientSessionCache(8), // TLS 1.3 session resumption（降低 resumption 握手开销）
 	}
+	if cfg.InsecureSkipVerify {
+		slog.Warn("TLS 1.3 certificate verification is DISABLED - do not use in production")
+	}
 	if pool, err := tlshelper.LoadCertPool(cfg.CAFile); err == nil {
 		tc.RootCAs = pool
 	} else if !errors.Is(err, tlshelper.ErrNoCAFile) {
@@ -231,8 +234,20 @@ func Dial(ctx context.Context, cfg *ClientConfig) (net.Conn, error) {
 			ch <- result{nil, err}
 			return
 		}
-		c, err := tlcp.Dial("tcp", cfg.Server, tc)
-		ch <- result{c, err}
+		// 先用 DialContext 建立可取消的 TCP 连接，再在其上做 TLCP 握手。
+		// 避免 tlcp.Dial（不接受 context）在 ctx 取消时内部 goroutine 永久泄漏。
+		rawConn, dErr := (&net.Dialer{}).DialContext(ctx, "tcp", cfg.Server)
+		if dErr != nil {
+			ch <- result{nil, dErr}
+			return
+		}
+		c := tlcp.Client(rawConn, tc)
+		if hErr := c.HandshakeContext(ctx); hErr != nil {
+			_ = rawConn.Close()
+			ch <- result{nil, hErr}
+			return
+		}
+		ch <- result{c, nil}
 	}()
 	select {
 	case <-ctx.Done():
@@ -261,13 +276,23 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Address == "" {
 		return nil, core.NewError(core.NumConfig, core.CodeConfig, "address required")
 	}
+	// fail-fast：Auth/Sink/Policy 缺失属严重误配。
+	if cfg.Auth == nil {
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Auth (TokenValidator) is required")
+	}
+	if cfg.Sink == nil {
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Sink (EventSink) is required")
+	}
+	if len(cfg.Policy.SupportedCapabilities) == 0 {
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Policy.SupportedCapabilities is required")
+	}
 	if cfg.TLSMode {
 		if cfg.CertFile == "" || cfg.KeyFile == "" {
 			return nil, core.NewError(core.NumConfig, core.CodeConfig, "TLS1.3 cert/key required for mbta-tls/1")
 		}
 	} else {
-		if cfg.SignCertFile == "" || cfg.EncCertFile == "" {
-			return nil, core.NewError(core.NumConfig, core.CodeConfig, "dual SM2 certificates required for mbta-ntls/1")
+		if cfg.SignCertFile == "" || cfg.SignKeyFile == "" || cfg.EncCertFile == "" || cfg.EncKeyFile == "" {
+			return nil, core.NewError(core.NumConfig, core.CodeConfig, "dual SM2 certificates (sign + enc, cert + key) required for mbta-ntls/1")
 		}
 	}
 	if cfg.ServerID == "" {

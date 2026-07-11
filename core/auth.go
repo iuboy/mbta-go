@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"fmt"
 	"hash"
 	"time"
 
@@ -79,12 +80,17 @@ type StaticTokenValidator struct {
 // It also builds a reverse agentID->token index. When one agentID has multiple
 // tokens, last-write-wins applies (deterministic; production multi-token/agent
 // setups should implement a custom TokenValidator+TokenResolver).
+//
+// 输入 map 做防御性拷贝：validator 跨连接 goroutine 共享，若调用方后续修改原 map
+// 会引发并发读写 panic。返回的 validator 不可变（无导出的修改方法）。
 func NewStaticTokenValidator(tokens map[string]string) *StaticTokenValidator {
+	internal := make(map[string]string, len(tokens))
 	agents := make(map[string]string, len(tokens))
 	for tok, aid := range tokens {
+		internal[tok] = aid
 		agents[aid] = tok
 	}
-	return &StaticTokenValidator{tokens: tokens, agents: agents}
+	return &StaticTokenValidator{tokens: internal, agents: agents}
 }
 
 // Validate looks up the token and returns the associated agent identity.
@@ -131,15 +137,24 @@ func (k *SessionKeys) HMACKey() []byte { return k.hmacKey }
 func (k *SessionKeys) AEADKey() []byte { return k.aeadKey }
 
 // SetAEADKey 设置 AEAD 密钥（用于 AUTH_OK 后从服务端响应更新）。
-func (k *SessionKeys) SetAEADKey(key []byte) { k.aeadKey = key }
+// 防御性拷贝：key 可能来自 protobuf getter（返回底层切片引用），
+// 若 proto 消息被复用/pool 化，原切片会被修改导致密钥材料被静默破坏。
+func (k *SessionKeys) SetAEADKey(key []byte) {
+	cp := make([]byte, len(key))
+	copy(cp, key)
+	k.aeadKey = cp
+}
 
 // NewSessionKeys 构造 SessionKeys（HMAC 密钥在构造时设置，AEAD 密钥可后续用 SetAEADKey 更新）。
 // 供跨包调用方（如 protocol 包的 client/handler）在收到 AUTH_OK 后从服务端下发字段构造密钥对象。
+// hmacKey 做防御性拷贝，避免外部 slice 被复用导致密钥材料破坏。
 func NewSessionKeys(keyID string, cs corepb.CipherSuite, hmacKey []byte) *SessionKeys {
+	cp := make([]byte, len(hmacKey))
+	copy(cp, hmacKey)
 	return &SessionKeys{
 		KeyID:       keyID,
 		CipherSuite: cs,
-		hmacKey:     hmacKey,
+		hmacKey:     cp,
 	}
 }
 
@@ -155,6 +170,10 @@ func (k *SessionKeys) Zero() {
 
 // GenerateSessionKeys 为已认证 agent 生成会话密钥（r2 按 CipherSuite）。
 func GenerateSessionKeys(cs corepb.CipherSuite) (*SessionKeys, error) {
+	// fail-fast：未知套件返回 0 长度，会生成空密钥。在此显式拒绝。
+	if cs != corepb.CipherSuite_CIPHER_SUITE_INTL && cs != corepb.CipherSuite_CIPHER_SUITE_GM {
+		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported cipher suite: %v", cs))
+	}
 	hmacKey := make([]byte, HMACKeyLen(cs))
 	if _, err := rand.Read(hmacKey); err != nil {
 		return nil, WrapError(NumHMAC, CodeHMAC, "generate HMAC key", err)

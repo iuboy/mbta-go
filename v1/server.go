@@ -31,6 +31,17 @@ type Server struct {
 
 // NewServer creates a new MBTA server.
 func NewServer(cfg ServerConfig) (*Server, error) {
+	// fail-fast 校验：Auth/Sink/Policy 为空时静默接受任意连接或丢弃全部数据，
+	// 属严重误配，应在构造时暴露而非在生产中静默失败。
+	if cfg.Auth == nil {
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Auth (TokenValidator) is required")
+	}
+	if cfg.Sink == nil {
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Sink (EventSink) is required")
+	}
+	if len(cfg.Policy.SupportedCapabilities) == 0 {
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Policy.SupportedCapabilities is required")
+	}
 	if cfg.ServerID == "" {
 		cfg.ServerID = core.NewChunkID().String()
 	}

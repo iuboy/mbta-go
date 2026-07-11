@@ -36,8 +36,10 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 
 	// 0-RTT resumption：从 session ticket 恢复 keys（core spec §11.6）。
 	// 恢复后 earlyData=true，dataLoop 可在 AUTH 前启动处理 0-RTT BATCH。
+	// 票据单次使用：Get 后立即 Delete，防止捕获的票据被无限重放恢复密钥发 0-RTT。
 	if ticket := msg.GetSessionTicket(); len(ticket) > 0 && h.config.SessionStore != nil {
 		if state, ok := h.config.SessionStore.Get(ticket); ok {
+			h.config.SessionStore.Delete(ticket)
 			h.keys.Store(state.Keys)
 			h.agentID = state.AgentID
 			h.earlyData = true
@@ -55,7 +57,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 		h.sendError(ctx, core.CodeUnsupportedMessage, "capability negotiation failed", true)
 		return err
 	}
-	h.negotiated = &result
+	h.negotiated.Store(&result)
 
 	ack := &corepb.HelloAckMessage{
 		ServerId:             h.config.ServerID,
@@ -123,13 +125,18 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	}
 
 	// Challenge-response：HMAC(token, nonce) 验证客户端持有 token。
-	if len(h.challengeNonce) > 0 && h.negotiated != nil {
-		expected := core.ComputeChallengeResponse(token, string(h.challengeNonce), h.negotiated.CipherSuite)
-		if !hmac.Equal(msg.GetAuthNonce(), expected) {
-			slog.Warn("auth challenge mismatch", "session", string(h.sessionID))
-			h.failAuth(ctx, "challenge_mismatch", "auth_nonce HMAC verification failed")
-			return core.NewError(core.NumAuth, core.CodeAuth, "challenge nonce mismatch")
-		}
+	// 安全 fail-closed：challengeNonce/negotiated 缺失属异常状态，必须拒绝认证而非静默跳过。
+	negotiated := h.negotiated.Load()
+	if len(h.challengeNonce) == 0 || negotiated == nil {
+		slog.Warn("challenge nonce or negotiation result missing", "session", string(h.sessionID))
+		h.failAuth(ctx, "internal_error", "challenge nonce or negotiation result missing")
+		return core.NewError(core.NumConfig, core.CodeConfig, "missing challenge nonce or negotiation result")
+	}
+	expected := core.ComputeChallengeResponse(token, string(h.challengeNonce), negotiated.CipherSuite)
+	if !hmac.Equal(msg.GetAuthNonce(), expected) {
+		slog.Warn("auth challenge mismatch", "session", string(h.sessionID))
+		h.failAuth(ctx, "challenge_mismatch", "auth_nonce HMAC verification failed")
+		return core.NewError(core.NumAuth, core.CodeAuth, "challenge nonce mismatch")
 	}
 
 	if h.config.Auth != nil {
@@ -140,11 +147,11 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 		}
 	}
 
-	if h.negotiated == nil {
+	if negotiated == nil {
 		h.sendAuthFail(ctx, "internal_error", "no negotiation result", true)
 		return core.NewError(core.NumConfig, core.CodeConfig, "missing negotiation result")
 	}
-	keys, err := core.GenerateSessionKeys(h.negotiated.CipherSuite)
+	keys, err := core.GenerateSessionKeys(negotiated.CipherSuite)
 	if err != nil {
 		h.sendAuthFail(ctx, "internal_error", "key generation failed", true)
 		return core.WrapError(core.NumConfig, core.CodeConfig, "session key generation", err)
@@ -160,14 +167,18 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 		ExpiresAtUnix: h.expiresAt.Load(),
 	}
 	// 按协商套件下发对应 AEAD 密钥（intl=AesKey, gm=Sm4Key）。
-	if h.negotiated.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_INTL {
+	if negotiated.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_INTL {
 		okMsg.AesKey = keys.AEADKey()
 	} else {
 		okMsg.Sm4Key = keys.AEADKey()
 	}
 	// 0-RTT session ticket：颁发新 ticket（client 保存用于下次 resumption，core spec §11.6）。
 	if h.config.SessionStore != nil {
-		ticket := core.NewTicket()
+		ticket, err := core.NewTicket()
+		if err != nil {
+			h.sendAuthFail(ctx, "internal_error", "ticket generation failed", true)
+			return core.WrapError(core.NumAuth, core.CodeAuth, "generate session ticket", err)
+		}
 		h.config.SessionStore.Put(ticket, &core.SessionState{
 			Keys:    keys,
 			AgentID: h.agentID,
@@ -215,16 +226,17 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 
 // resolveAuthToken 决定 token 来源（tokenless 反查 vs legacy 明文）。
 func (h *CoreHandler) resolveAuthToken(msg *corepb.AuthMessage) (token string, tokenless bool, err error) {
-	_ = tokenless
 	if h.config.Auth == nil {
 		return msg.GetToken(), false, nil
 	}
 	// r2 tokenless：保留 legacy 路径（无 TokenResolver 时用明文 token）。
 	if resolver, ok := h.config.Auth.(core.TokenResolver); ok && resolver != nil {
 		t, rerr := resolver.ResolveToken(msg.GetAgentId())
-		if rerr == nil {
-			return t, true, nil
+		if rerr != nil {
+			// Resolver 失败必须作为认证错误传播，否则服务端会静默降级到明文 token，形成降级攻击面。
+			return "", false, core.WrapError(core.NumAuth, core.CodeAuth, "resolve token", rerr)
 		}
+		return t, true, nil
 	}
 	return msg.GetToken(), false, nil
 }

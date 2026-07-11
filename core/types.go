@@ -1,7 +1,7 @@
 package core
 
 // Message types (wire values, uint8, core spec §4).
-// 值发布后不可改（§1.4）。1–16 已分配，17–255 保留。
+// 值发布后不可改（§1.4）。1–17 已分配，18–255 保留。
 const (
 	TypeHello    uint8 = 1 // C→S handshake
 	TypeHelloAck uint8 = 2 // S→C handshake response
@@ -48,6 +48,7 @@ const (
 	FlowClassNormal     byte = 0x00 << FlagFlowClassShift
 	FlowClassBestEffort byte = 0x01 << FlagFlowClassShift
 	FlowClassCritical   byte = 0x02 << FlagFlowClassShift
+	FlowClassReserved   byte = 0x03 << FlagFlowClassShift
 )
 
 // FlowClassOf 从 flags 提取 FlowClass（返回 0/1/2；3 为 reserved，由 ValidateFlags 拒绝）。

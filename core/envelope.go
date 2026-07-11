@@ -113,6 +113,10 @@ func Open(env *SecureEnvelope, aeadKey []byte) ([]byte, error) {
 	if env == nil {
 		return nil, NewError(NumEnvelope, CodeEnvelope, "nil envelope")
 	}
+	// 版本校验：拒绝不兼容协议版本的 envelope，避免字段被静默误解。
+	if env.EnvelopeVersion != EnvelopeVersion {
+		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported envelope version: %d", env.EnvelopeVersion))
+	}
 	if env.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
 		return nil, NewError(NumEnvelope, CodeEnvelope, "cipher suite unspecified")
 	}
@@ -202,7 +206,8 @@ var (
 	}
 	zstdDecoderPool = sync.Pool{
 		New: func() any {
-			dec, _ := zstd.NewReader(nil)
+			// WithDecoderMaxMemory 限制单次解压内存，防 zstd 炸弹在大小检查前 OOM。
+			dec, _ := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(MaxDecompressedSize))
 			return dec
 		},
 	}
@@ -218,8 +223,7 @@ func compress(c corepb.Compression, src []byte) ([]byte, error) {
 		w := gzipWriterPool.Get().(*gzip.Writer)
 		w.Reset(&buf)
 		if _, err := w.Write(src); err != nil {
-			_ = w.Close() // best-effort cleanup；返回的 write error 优先
-			gzipWriterPool.Put(w)
+			_ = w.Close() // best-effort cleanup；writer 可能处于损坏状态，不放回 pool
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip compress", err)
 		}
 		if err := w.Close(); err != nil {
@@ -274,14 +278,21 @@ func decompress(c corepb.Compression, src []byte) ([]byte, error) {
 	case corepb.Compression_COMPRESSION_ZSTD:
 		dec := zstdDecoderPool.Get().(*zstd.Decoder)
 		defer zstdDecoderPool.Put(dec)
-		out, err := dec.DecodeAll(src, make([]byte, 0, len(src)*4))
-		if err != nil {
+		// 用流式 + LimitedReader 防止 zstd 炸弹：DecodeAll 会在大小检查前分配完整解压内容。
+		if err := dec.Reset(bytes.NewReader(src)); err != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "zstd reset", err)
+		}
+		defer dec.Reset(nil)
+		lr := &io.LimitedReader{R: dec.IOReadCloser(), N: MaxDecompressedSize + 1}
+		var buf bytes.Buffer
+		buf.Grow(len(src) * 4)
+		if _, err := io.Copy(&buf, lr); err != nil {
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "zstd decompress", err)
 		}
-		if len(out) > MaxDecompressedSize {
+		if lr.N == 0 {
 			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
 		}
-		return out, nil
+		return buf.Bytes(), nil
 	case corepb.Compression_COMPRESSION_LZ4:
 		r := lz4.NewReader(bytes.NewReader(src))
 		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}

@@ -14,7 +14,7 @@ import (
 	v1 "github.com/iuboy/mbta-go/v1"
 )
 
-// demoSink 是一个简单的 EventSink 实现，将接收到的信号打印到控制台。
+// demoSink is a simple EventSink implementation that prints received signals to the console.
 type demoSink struct{}
 
 func (d *demoSink) OnSignalBatch(_ context.Context, agentID string, batch *core.SignalBatch) error {
@@ -40,8 +40,11 @@ func main() {
 			"my-secret-token": "example-agent",
 		})),
 		mbtago.WithV1(v1.QUICServerConfig{
-			Address:     "0.0.0.0:7400",
-			Credentials: nil, // 生产环境应配置 TLS 证书
+			Address: "0.0.0.0:7400",
+			Credentials: &v1.ServerCredentials{
+				CertFile: "../../testdata/certificates/server.crt",
+				KeyFile:  "../../testdata/certificates/server.key",
+			},
 		}),
 	)
 	if err != nil {
@@ -51,6 +54,7 @@ func main() {
 
 	fmt.Println("starting MBTA server on :7400...")
 	if err := server.Start(ctx); err != nil {
+		server.Close() // 确保 listener/goroutine 清理后再 Fatal（log.Fatalf 会 os.Exit 跳过 defer）
 		log.Fatalf("server error: %v", err)
 	}
 }

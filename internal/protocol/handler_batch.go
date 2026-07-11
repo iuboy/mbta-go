@@ -155,8 +155,8 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 // codecForUnmarshal 返回服务端解码 SignalBatch 应使用的 codec：优先协商结果，
 // 否则回退到 HandlerConfig.Policy.DefaultCodec。
 func (h *CoreHandler) codecForUnmarshal() corepb.Codec {
-	if h.negotiated != nil {
-		return h.negotiated.Codec
+	if n := h.negotiated.Load(); n != nil {
+		return n.Codec
 	}
 	return h.config.Policy.DefaultCodec
 }
@@ -204,20 +204,21 @@ func (h *CoreHandler) decodeSignalBatch(batchMsg *corepb.BatchMessage) (*core.Si
 // 任一不一致即拒绝——防止客户端单方面降级或注入未协商算法（defense-in-depth，
 // 即使 HMAC 通过也不允许 wire 字段与权威协商结果不符）。返回 true 表示已发 NACK，调用方中止。
 func (h *CoreHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
-	if h.negotiated == nil {
+	n := h.negotiated.Load()
+	if n == nil {
 		return false
 	}
-	if env.Compression != h.negotiated.Compression {
+	if env.Compression != n.Compression {
 		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
 			"compression not negotiated", false)
 		return true
 	}
-	if env.Codec != h.negotiated.Codec {
+	if env.Codec != n.Codec {
 		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
 			"codec not negotiated", false)
 		return true
 	}
-	if env.CipherSuite != h.negotiated.CipherSuite {
+	if env.CipherSuite != n.CipherSuite {
 		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
 			"cipher suite not negotiated", false)
 		return true
@@ -276,6 +277,9 @@ func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteRe
 		*ackMode = corepb.AckMode_ACK_MODE_DURABLE
 		h.replay.Update(agentID, chunkID, core.ReplayDurable)
 	case core.ACKStatusThrottle:
+		// 重置 replay entry 为 Processing，允许客户端重试时重新投递（否则 replay 仍为 Accepted，
+		// 客户端重试会收到 ACK_ACCEPTED 但 batch 从未真正处理，造成静默数据丢失）。
+		h.replay.Update(agentID, chunkID, core.ReplayProcessing)
 		h.sendThrottle(ctx, throttleRetryMs, "queue_pressure", "queue pressure critical, retry later")
 		return true
 	default:

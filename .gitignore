@@ -33,3 +33,9 @@ Thumbs.db
 
 go.work
 go.work.sum
+
+# 测试证书产物（防止私钥意外提交）
+/testdata/certificates/*.key
+/testdata/certificates/*.crt
+/testdata/certificates/*.csr
+/testdata/certificates/*.srl

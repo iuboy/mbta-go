@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -93,12 +94,16 @@ func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 	}
 
 	switch cfg.ClientAuth {
+	case "", "none":
+		tlsCfg.ClientAuth = tls.NoClientCert
 	case "request":
 		tlsCfg.ClientAuth = tls.RequestClientCert
 	case "require-and-verify":
 		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 	default:
-		tlsCfg.ClientAuth = tls.NoClientCert
+		// fail-closed：未识别的 ClientAuth 值报错，而非静默降级到 NoClientCert（禁用 mTLS）。
+		return nil, core.WrapError(core.NumConfig, core.CodeConfig,
+			fmt.Sprintf("invalid ClientAuth value: %q", cfg.ClientAuth), nil)
 	}
 
 	return tlsCfg, nil
@@ -169,7 +174,9 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 		InitialConnectionReceiveWindow: initialConnectionWnd,
 		MaxStreamReceiveWindow:         maxStreamWnd,
 		MaxConnectionReceiveWindow:     maxConnectionWnd,
-		Allow0RTT:                      true, // 接受 0-RTT resumption（core spec §11.6）
+		Allow0RTT: true, // 接受 0-RTT resumption（core spec §11.6）。
+		// 0-RTT 重放防护由应用层提供：(1) handler_handshake.go 票据单次使用（Get 后 Delete）；
+		// (2) processBatch 的 ReplayCache 按 chunk_id 去重。传输层 Allow0RTT 依赖这两道防线。
 		EnableDatagrams:                true, // SupportsDatagram()=true 的前置条件（RFC 9221，§11.4）
 	}
 
@@ -232,11 +239,22 @@ func (l *Listener) Addr() net.Addr {
 }
 
 // OpenControlStream opens the control stream. Must be called before OpenDataStream.
+//
+// 先获取锁并检查 controlClaimed，避免两个并发调用各自 OpenStreamSync 导致协议错位
+// （对端只把第一个 AcceptStream 当 control stream）。
 func (c *Conn) OpenControlStream(ctx context.Context) (*quic.Stream, error) {
+	c.controlMu.Lock()
+	if c.controlClaimed {
+		c.controlMu.Unlock()
+		return nil, core.NewError(core.NumStream, core.CodeStream, "control stream already opened")
+	}
+	c.controlMu.Unlock()
+
 	s, err := c.QC.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, core.WrapError(core.NumStream, core.CodeStream, "open control stream", err)
 	}
+
 	c.controlMu.Lock()
 	c.controlClaimed = true
 	c.controlMu.Unlock()
@@ -285,7 +303,14 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 
 // DialEarly establishes a 0-RTT QUIC connection for session resumption (core spec §11.6).
 // Requires ClientSessionCache populated from a previous Dial (TLS session ticket).
+//
+// 安全约束：0-RTT 数据在 TLS 握手完成前发送，若配合 InsecureSkipVerify 会使
+// 0-RTT 数据（可能含凭证）发送给未验证身份的服务端。此组合被拒绝。
 func DialEarly(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
+	if cfg.Credentials != nil && cfg.Credentials.InsecureSkipVerify {
+		return nil, core.NewError(core.NumConfig, core.CodeConfig,
+			"DialEarly cannot be used with InsecureSkipVerify: 0-RTT data would be sent without server identity verification")
+	}
 	return dial(ctx, cfg, true)
 }
 

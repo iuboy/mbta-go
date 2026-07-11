@@ -22,19 +22,29 @@ const (
 )
 
 // HMACKeyLen 返回指定套件的 HMAC 密钥长度。
+// 未知套件返回 0（哨兵值），调用方应先校验套件合法性或检查返回值。
 func HMACKeyLen(cs corepb.CipherSuite) int {
-	if cs == corepb.CipherSuite_CIPHER_SUITE_GM {
+	switch cs {
+	case corepb.CipherSuite_CIPHER_SUITE_INTL:
+		return HMACKeyLenIntl
+	case corepb.CipherSuite_CIPHER_SUITE_GM:
 		return HMACKeyLenGM
+	default:
+		return 0 // UNSPECIFIED/未知：不再静默回退 INTL，0 让调用方 fail-fast
 	}
-	return HMACKeyLenIntl
 }
 
 // AEADKeyLen 返回指定套件的 AEAD 密钥长度。
+// 未知套件返回 0（哨兵值），调用方应先校验套件合法性或检查返回值。
 func AEADKeyLen(cs corepb.CipherSuite) int {
-	if cs == corepb.CipherSuite_CIPHER_SUITE_GM {
+	switch cs {
+	case corepb.CipherSuite_CIPHER_SUITE_INTL:
+		return AEADKeyLenIntl
+	case corepb.CipherSuite_CIPHER_SUITE_GM:
 		return AEADKeyLenGM
+	default:
+		return 0 // UNSPECIFIED/未知：不再静默回退 INTL，0 让调用方 fail-fast
 	}
-	return AEADKeyLenIntl
 }
 
 // NewHMAC 按密码套件创建 HMAC hasher。
