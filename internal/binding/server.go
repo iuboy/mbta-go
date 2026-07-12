@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
@@ -65,11 +64,16 @@ func AcceptLoop[C any](
 }
 
 // nextBackoff 计算下一次 accept 退避（指数 5ms→1s）。
+// 用整数比较替代 math.Min 的 float 转换，避免精度与开销问题。
 func nextBackoff(prev time.Duration) time.Duration {
 	if prev == 0 {
 		return 5 * time.Millisecond
 	}
-	return time.Duration(math.Min(float64(prev*2), float64(time.Second)))
+	next := prev * 2
+	if next > time.Second || next <= 0 { // <=0 兼容溢出回绕
+		return time.Second
+	}
+	return next
 }
 
 // sleepCtx 睡眠 d 或直到 ctx 取消；ctx 取消返回 false。

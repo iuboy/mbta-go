@@ -118,6 +118,11 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 		slog.Debug("datagram decode envelope failed", "error", err)
 		return // 静默丢弃
 	}
+	// session 过期检查：与 processBatch 一致，过期会话的 datagram 不应再被处理。
+	if h.expiresAt.Load() > 0 && time.Now().Unix() > h.expiresAt.Load() {
+		slog.Debug("datagram rejected: session expired", "session", string(h.sessionID))
+		return
+	}
 	keys := h.keys.Load()
 	if keys != nil {
 		ok, _ := core.VerifyMAC(keys.HMACKey(), env)
