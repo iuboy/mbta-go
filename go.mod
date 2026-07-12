@@ -5,7 +5,7 @@ go 1.26.5
 require (
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/iuboy/pollux-go v0.1.3
-	github.com/klauspost/compress v1.18.6
+	github.com/klauspost/compress v1.19.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pierrec/lz4/v4 v4.1.27
 	github.com/prometheus/client_golang v1.23.2
