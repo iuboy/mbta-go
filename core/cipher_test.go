@@ -15,7 +15,7 @@ func TestHMACKeyLen(t *testing.T) {
 	}{
 		{"intl", corepb.CipherSuite_CIPHER_SUITE_INTL, HMACKeyLenIntl},
 		{"gm", corepb.CipherSuite_CIPHER_SUITE_GM, HMACKeyLenGM},
-		{"unspecified", corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED, 0},
+		{"unspecified", corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED, -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -34,7 +34,7 @@ func TestAEADKeyLen(t *testing.T) {
 	}{
 		{"intl", corepb.CipherSuite_CIPHER_SUITE_INTL, AEADKeyLenIntl},
 		{"gm", corepb.CipherSuite_CIPHER_SUITE_GM, AEADKeyLenGM},
-		{"unspecified", corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED, 0},
+		{"unspecified", corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED, -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

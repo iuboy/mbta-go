@@ -30,12 +30,15 @@ func TestValidateHelloAck(t *testing.T) {
 }
 
 func TestValidateAuth(t *testing.T) {
-	m := &AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n")}
+	m := &AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n"), Token: "tok"}
 	if err := ValidateAuth(m); err != nil {
 		t.Errorf("valid auth: %v", err)
 	}
-	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s")}); err == nil {
+	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s"), Token: "tok"}); err == nil {
 		t.Error("missing auth_nonce should fail")
+	}
+	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n")}); err == nil {
+		t.Error("missing token should fail")
 	}
 }
 

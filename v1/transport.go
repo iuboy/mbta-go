@@ -240,24 +240,27 @@ func (l *Listener) Addr() net.Addr {
 
 // OpenControlStream opens the control stream. Must be called before OpenDataStream.
 //
-// 先获取锁并检查 controlClaimed，避免两个并发调用各自 OpenStreamSync 导致协议错位
-// （对端只把第一个 AcceptStream 当 control stream）。
+// 持锁检查 controlClaimed 并**在解锁前置位**，再 OpenStreamSync：消除旧实现「检查 → 解锁 →
+// OpenStreamSync → 加锁置位」的 TOCTOU 窗口（两个并发调用都能通过检查，各自 open 一个流，
+// 对端只把第一个 AcceptStream 当 control stream，第二个流协议错位）。
+// OpenStreamSync 在锁内调用是可接受的（控制流仅开一次，无热路径竞争）。
 func (c *Conn) OpenControlStream(ctx context.Context) (*quic.Stream, error) {
 	c.controlMu.Lock()
 	if c.controlClaimed {
 		c.controlMu.Unlock()
 		return nil, core.NewError(core.NumStream, core.CodeStream, "control stream already opened")
 	}
+	c.controlClaimed = true
 	c.controlMu.Unlock()
 
 	s, err := c.QC.OpenStreamSync(ctx)
 	if err != nil {
+		// OpenStreamSync 失败：回退 controlClaimed，允许重试。
+		c.controlMu.Lock()
+		c.controlClaimed = false
+		c.controlMu.Unlock()
 		return nil, core.WrapError(core.NumStream, core.CodeStream, "open control stream", err)
 	}
-
-	c.controlMu.Lock()
-	c.controlClaimed = true
-	c.controlMu.Unlock()
 	return s, nil
 }
 

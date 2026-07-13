@@ -230,5 +230,10 @@ func readVarint(r io.Reader) (uint64, int, error) {
 	if n <= 0 {
 		return 0, 0, errors.New("varint: decode failed")
 	}
+	// 非最短编码检测：与 1-5 字节路径一致（旧 6 字节分支遗漏此校验，
+	// 允许恶意对端用非规范 6 字节编码绕过非最短检测）。
+	if v < (uint64(1) << uint(7*maxVarintLen)) {
+		return 0, 0, errors.New("varint: non-canonical encoding")
+	}
 	return v, n, nil
 }

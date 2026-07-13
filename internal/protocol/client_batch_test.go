@@ -37,8 +37,23 @@ func newTraceTestClient(negotiatedCaps []string) *CoreClient {
 		DefaultCompression: corepb.Compression_COMPRESSION_NONE,
 	})
 	if negotiatedCaps != nil {
-		c.negotiated = &core.NegotiateResult{SelectedCapabilities: negotiatedCaps}
+		c.negotiated.Store(&core.NegotiateResult{SelectedCapabilities: negotiatedCaps})
 	}
+	// reserveInflight 加锁后会重新检查 state（TOCTOU 防护），测试需把状态机推到 Ready。
+	// 状态机从 Disconnected 开始，需依次转换到 Ready。
+	for _, target := range []core.State{
+		core.StateConnecting,
+		core.StateControlStreamOpen,
+		core.StateHelloSent,
+		core.StateHelloAcked,
+		core.StateAuthSent,
+		core.StateReady,
+	} {
+		_ = c.sm.Transition(target)
+	}
+	// Build 现在校验 HMACKey 非空（core spec §5.1），测试客户端需注入会话密钥。
+	hmacKey := make([]byte, core.HMACKeyLenIntl)
+	c.keys.Store(core.NewSessionKeys("test", corepb.CipherSuite_CIPHER_SUITE_INTL, hmacKey))
 	return c
 }
 

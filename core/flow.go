@@ -94,16 +94,24 @@ func (inf *Inflight) Add(events int, bytes int64) {
 }
 
 // Remove decreases inflight counters after receiving a response.
+//
+// 仅对实际出现负值的计数器执行 clampNonNeg，避免在「某个计数器 underflow」时
+// 把并发 Add 写入的合法正值计数器一并清零（旧实现对三个计数器无条件 clamp，
+// 导致 inflight 持续低估，Window.CanSend 允许超额发送）。
 func (inf *Inflight) Remove(events int, bytes int64) {
 	nb := inf.batches.Add(-1)
 	ne := inf.events.Add(int64(-events))
 	nby := inf.bytes.Add(-bytes)
-	if nb < 0 || ne < 0 || nby < 0 {
-		slog.Warn("inflight counter underflow",
-			"batches", nb, "events", ne, "bytes", nby,
-			"removed_events", events, "removed_bytes", bytes)
+	if nb < 0 {
+		slog.Warn("inflight batches underflow", "batches", nb, "removed_events", events, "removed_bytes", bytes)
 		clampNonNeg(&inf.batches)
+	}
+	if ne < 0 {
+		slog.Warn("inflight events underflow", "events", ne, "removed_events", events)
 		clampNonNeg(&inf.events)
+	}
+	if nby < 0 {
+		slog.Warn("inflight bytes underflow", "bytes", nby, "removed_bytes", bytes)
 		clampNonNeg(&inf.bytes)
 	}
 }

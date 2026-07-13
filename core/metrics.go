@@ -1,6 +1,12 @@
 package core
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 const namespace = "mbta"
 
@@ -290,10 +296,21 @@ type noopHistogram struct{}
 func (noopHistogram) Observe(float64) {}
 
 // registerOrExisting 尝试注册 collector；若已注册（重复调用 New），返回已有 collector 而非 panic。
+//
+// 对 ExistingCollector 用 type-switch 兜底而非裸类型断言：若同名指标被注册为不同类型
+// （跨包冲突），are.ExistingCollector.(T) 会 panic 崩溃进程。此处降级为返回新 collector
+// （不再注册）+ warn 日志，保证进程存活。
 func registerOrExisting[T prometheus.Collector](reg prometheus.Registerer, c T) T {
 	if err := reg.Register(c); err != nil {
-		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
-			return are.ExistingCollector.(T)
+		var are prometheus.AlreadyRegisteredError
+		if errors.As(err, &are) {
+			if existing, ok := are.ExistingCollector.(T); ok {
+				return existing
+			}
+			// 同名异类指标冲突：返回新建（未注册）的 collector，避免 panic。
+			slog.Warn("metric registered with different type, returning new unregistered collector",
+				"existing_type", fmt.Sprintf("%T", are.ExistingCollector))
+			return c
 		}
 		// 非重复注册的意外错误：无法恢复，panic 保持与 MustRegister 一致的可观测性。
 		panic(err)

@@ -77,9 +77,15 @@ func nextBackoff(prev time.Duration) time.Duration {
 }
 
 // sleepCtx 睡眠 d 或直到 ctx 取消；ctx 取消返回 false。
+//
+// 用 time.NewTimer + Stop 替代 time.After：后者在 ctx 先触发时，未到期的 timer
+// 仍驻留堆中直到到期才被 GC（Go stdlib 文档明示）。accept loop 回退热路径若频繁
+// ctx 取消（如 rolling restart），会积累大量无法回收的 timer。
 func sleepCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 	select {
-	case <-time.After(d):
+	case <-timer.C:
 		return true
 	case <-ctx.Done():
 		return false
@@ -109,6 +115,14 @@ func handleConn[C any](
 	tr, err := newTransport(ctx, conn)
 	if err != nil {
 		slog.Error("transport setup", "error", err)
+		if closeConn != nil {
+			closeConn(conn)
+		}
+		return
+	}
+	// 防御：newTransport 回调可能返回 (nil, nil)，若直接传给 NewCoreHandler 会 panic。
+	if tr == nil {
+		slog.Error("transport setup returned nil transport")
 		if closeConn != nil {
 			closeConn(conn)
 		}

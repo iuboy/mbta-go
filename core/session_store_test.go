@@ -23,7 +23,7 @@ func TestSessionStore_PutGetDelete(t *testing.T) {
 		t.Fatal("Get before Put should miss")
 	}
 
-	s.Put(ticket, state)
+	_ = s.Put(ticket, state)
 	got, ok := s.Get(ticket)
 	if !ok {
 		t.Fatal("Get after Put should hit")
@@ -44,7 +44,7 @@ func TestSessionStore_ExpiredNotReturned(t *testing.T) {
 	defer s.Close()
 
 	ticket, _ := NewTicket()
-	s.Put(ticket, &SessionState{
+	_ = s.Put(ticket, &SessionState{
 		Keys:    &SessionKeys{KeyID: "k1"},
 		AgentID: "agent-1",
 		Expiry:  time.Now().Add(-time.Minute), // 已过期
@@ -64,11 +64,11 @@ func TestSessionStore_ReaperEvictsExpired(t *testing.T) {
 	freshTicket, _ := NewTicket()
 	expiredTicket, _ := NewTicket()
 
-	s.Put(freshTicket, &SessionState{
+	_ = s.Put(freshTicket, &SessionState{
 		Keys: &SessionKeys{KeyID: "fresh"}, AgentID: "a-fresh",
 		Expiry: time.Now().Add(time.Hour),
 	})
-	s.Put(expiredTicket, &SessionState{
+	_ = s.Put(expiredTicket, &SessionState{
 		Keys: &SessionKeys{KeyID: "expired"}, AgentID: "a-expired",
 		Expiry: time.Now().Add(-time.Minute),
 	})
@@ -119,7 +119,7 @@ func TestSessionStore_ReaperPreservesFresh(t *testing.T) {
 	defer s.Close()
 
 	ticket, _ := NewTicket()
-	s.Put(ticket, &SessionState{
+	_ = s.Put(ticket, &SessionState{
 		Keys: &SessionKeys{KeyID: "k"}, AgentID: "a",
 		Expiry: time.Now().Add(time.Hour),
 	})

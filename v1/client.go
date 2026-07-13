@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
@@ -47,8 +48,8 @@ type Client struct {
 type v1ClientTransport struct {
 	conn       *Conn
 	controlStr *quic.Stream
-	picker     StreamPicker
-	controlMu  sync.Mutex // 串行化 control stream 写
+	picker     atomic.Pointer[StreamPicker] // 原子读写，消除与 postAuth 写的 data race
+	controlMu  sync.Mutex                   // 串行化 control stream 写
 }
 
 func (t *v1ClientTransport) ReadFrame() (core.Frame, error) {
@@ -64,7 +65,13 @@ func (t *v1ClientTransport) WriteFrame(ctx context.Context, typ uint8, flags, ch
 		return core.Write(t.controlStr, core.Version, typ, flags, channel, payload)
 	}
 	// data 通道：picker 选流，ctx 感知写。
-	ds, err := t.picker.Pick("", "") // tag/source 在多流选路中用于 hash 分流；CoreClient 传空
+	// picker 经 atomic 读取（postAuth 在 c.mu 下用 atomic.Pointer.Store 写）。
+	// nil guard 防 postAuth 完成前进入 data 路径的 nil 解引用 panic。
+	pickerPtr := t.picker.Load()
+	if pickerPtr == nil {
+		return core.NewError(core.NumSession, core.CodeSession, "data stream picker not initialized (auth incomplete?)")
+	}
+	ds, err := (*pickerPtr).Pick("", "") // tag/source 在多流选路中用于 hash 分流；CoreClient 传空
 	if err != nil {
 		return core.WrapError(core.NumBatch, core.CodeBatch, "pick stream", err)
 	}
@@ -173,7 +180,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 			c.mu.Lock()
 			c.picker = picker
-			tr.picker = picker
+			tr.picker.Store(&picker)
 			c.mu.Unlock()
 			return nil
 		},

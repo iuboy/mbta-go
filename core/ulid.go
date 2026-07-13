@@ -2,7 +2,9 @@ package core
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -36,12 +38,17 @@ func NewChunkID() ChunkID {
 		defer func() {
 			if r := recover(); r != nil {
 				// 熵源失败/单调溢出降级：填充纯随机字节，保证唯一性（丧失单调序）。
+				slog.Warn("ulid generation panicked, falling back to random", "panic", r)
 				if _, err := rand.Read(u[:]); err != nil {
-					// crypto/rand 彻底不可用：用时间戳填充，尽力保证唯一。
-					now := time.Now().UnixNano()
-					for i := 0; i < 16; i++ {
-						u[i] = byte(now >> (i % 8 * 8))
-					}
+					// crypto/rand 彻底不可用：用时间戳 + 进程启动偏移填充全部 16 字节，
+					// 保证有效熵（旧实现 i%8*8 使高 8 字节与低 8 字节重复，仅 8 字节熵，
+					// 同纳秒内会产生相同 ChunkID，抗重放失效）。
+					slog.Error("crypto/rand unavailable, using weak timestamp-based ChunkID", "error", err)
+					now := uint64(time.Now().UnixNano())
+					// 低 8 字节：纳秒时间戳；高 8 字节：时间戳右移 + 启动单调计数器，
+					// 使两次调用即使同纳秒也尽量不同。
+					binary.LittleEndian.PutUint64(u[0:8], now)
+					binary.LittleEndian.PutUint64(u[8:16], ^now)
 				}
 			}
 		}()

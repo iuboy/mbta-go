@@ -18,17 +18,20 @@ func (h *CoreHandler) sendAck(ctx context.Context, seq uint64, chunkID []byte, c
 	ack := &corepb.AckMessage{Seq: seq, ChunkId: chunkID, Count: int32(count), AckMode: ackMode, ReceivedAtUnixMs: time.Now().UnixMilli()} //nolint:gosec // G115: count bounded by maxBatchEvents
 	p, err := core.Encode(ack)
 	if err != nil {
+		slog.Warn("encode ack failed", "error", err)
 		return
 	}
 	if err := SendControlFrame(ctx, h.tr, core.TypeAck, core.FlagControl, p); err != nil {
 		slog.Warn("write ack failed", "error", err)
 	}
+	h.config.Metrics.BatchesAcked().Inc()
 }
 
 func (h *CoreHandler) sendNack(ctx context.Context, seq uint64, chunkID []byte, code, reason string, retryable bool) {
 	nack := &corepb.NackMessage{Seq: seq, ChunkId: chunkID, Code: code, Reason: reason, Retryable: retryable}
 	p, err := core.Encode(nack)
 	if err != nil {
+		slog.Warn("encode nack failed", "error", err)
 		return
 	}
 	if err := SendControlFrame(ctx, h.tr, core.TypeNack, core.FlagControl, p); err != nil {
@@ -41,6 +44,7 @@ func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code, 
 	t := &corepb.ThrottleMessage{RetryDelayMs: int32(retryDelayMs), Code: code, Reason: reason}
 	p, err := core.Encode(t)
 	if err != nil {
+		slog.Warn("encode throttle failed", "error", err)
 		return
 	}
 	if err := SendControlFrame(ctx, h.tr, core.TypeThrottle, core.FlagControl, p); err != nil {
@@ -57,11 +61,12 @@ func (h *CoreHandler) failAuth(ctx context.Context, code, reason string) {
 	if nonce, err := randBytes(challengeNonceLen); err != nil {
 		slog.Warn("rotate challenge nonce failed, keeping previous", "error", err)
 	} else {
-		h.challengeNonce = nonce
+		h.setChallengeNonce(nonce)
 	}
-	fail := &corepb.AuthFailMessage{Code: code, Reason: reason, Retryable: true, ChallengeNonce: h.challengeNonce}
+	fail := &corepb.AuthFailMessage{Code: code, Reason: reason, Retryable: true, ChallengeNonce: h.getChallengeNonce()}
 	p, err := core.Encode(fail)
 	if err != nil {
+		slog.Warn("encode auth_fail failed", "error", err)
 		return
 	}
 	if err := SendControlFrame(ctx, h.tr, core.TypeAuthFail, core.FlagControl, p); err != nil {
@@ -73,27 +78,37 @@ func (h *CoreHandler) sendAuthFail(ctx context.Context, code, reason string, ret
 	fail := &corepb.AuthFailMessage{Code: code, Reason: reason, Retryable: retryable}
 	p, err := core.Encode(fail)
 	if err != nil {
+		slog.Warn("encode auth_fail failed", "error", err)
 		return
 	}
-	_ = SendControlFrame(ctx, h.tr, core.TypeAuthFail, core.FlagControl, p)
+	if err := SendControlFrame(ctx, h.tr, core.TypeAuthFail, core.FlagControl, p); err != nil {
+		slog.Warn("write auth_fail failed", "error", err)
+	}
+	h.config.Metrics.AuthFailure().Inc()
 }
 
 func (h *CoreHandler) sendError(ctx context.Context, code, reason string, fatal bool) {
 	e := &corepb.ErrorMessage{Code: code, Reason: reason, Fatal: fatal, Retryable: !fatal}
 	p, err := core.Encode(e)
 	if err != nil {
+		slog.Warn("encode error frame failed", "error", err)
 		return
 	}
-	_ = SendControlFrame(ctx, h.tr, core.TypeError, core.FlagControl, p)
+	if err := SendControlFrame(ctx, h.tr, core.TypeError, core.FlagControl, p); err != nil {
+		slog.Warn("write error frame failed", "error", err, "fatal", fatal)
+	}
 }
 
 func (h *CoreHandler) sendWindowUpdate(ctx context.Context, batches, events int, maxBytes int64, reason string) {
 	w := &corepb.WindowMessage{MaxInflightBatches: int32(batches), MaxInflightEvents: int32(events), MaxInflightBytes: maxBytes, Reason: reason}
 	p, err := core.Encode(w)
 	if err != nil {
+		slog.Warn("encode window frame failed", "error", err)
 		return
 	}
-	_ = SendControlFrame(ctx, h.tr, core.TypeWindow, core.FlagControl, p)
+	if err := SendControlFrame(ctx, h.tr, core.TypeWindow, core.FlagControl, p); err != nil {
+		slog.Warn("write window frame failed", "error", err)
+	}
 }
 
 func pressureToWindow(pressure core.PressureState) (batches, events int, maxBytes int64) {

@@ -195,7 +195,11 @@ func (c *Client) Close() error {
 	c.cfg.NTLSCreds = nil
 
 	if c.client != nil {
-		return c.client.Close()
+		err := c.client.Close()
+		// 置 nil 防止 use-after-close：旧实现不置 nil，Close 后 SendBatch/State 仍会
+		// 分发到已关闭的底层客户端。
+		c.client = nil
+		return err
 	}
 	return nil
 }
@@ -213,9 +217,12 @@ func (c *Client) State() string {
 
 // SetACKHandler registers a callback for ACK notifications from the server.
 // The handler will be called with (chunkID, ackMode) when the server acknowledges a batch.
+//
+// 用 Lock（非 RLock）：底层 SetACKHandler 会修改 handler 状态，多个 goroutine 并发
+// 注册会形成数据竞争（RLock 仅防与 Close 的并发，不防并发 Set）。
 func (c *Client) SetACKHandler(handler ACKHandler) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if c.client != nil {
 		c.client.SetACKHandler(handler)
@@ -224,10 +231,10 @@ func (c *Client) SetACKHandler(handler ACKHandler) {
 
 // SetRedirectHandler registers a callback for TypeRedirect notifications
 // (S→C cluster redirect to the HA leader). The handler receives the raw frame
-// payload for the application to decode.
+// payload for the application to decode.语义同 SetACKHandler，用 Lock 保护。
 func (c *Client) SetRedirectHandler(handler RedirectHandler) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if c.client != nil {
 		c.client.SetRedirectHandler(handler)

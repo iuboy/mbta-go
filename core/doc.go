@@ -12,7 +12,8 @@
 //   - capability（capability.go）：stable/deprecated/experimental 能力注册与 Negotiate 协商。
 //   - session（session.go）：会话状态机、NegotiateResult、SessionStore（0-RTT 恢复）。
 //   - auth（auth.go）：challenge-response 认证、SessionKeys 派生。
-//   - delivery（delivery.go）：ReplayCache 重放去重、Inflight/Window 流控、ThrottleState。
+//   - delivery（delivery.go）：ReplayCache 重放去重、SeqGenerator 序号生成。
+//   - flow（flow.go）：Inflight/Window 流控、ThrottleState 节流状态。
 //   - metrics（metrics.go）：协议层可观测性抽象（Counter/Gauge/Histogram + NoOp 回退）。
 //   - errors（errors.go）：结构化 Error（numCode/code/msg），错误码范围见 spec §13。
 //   - ulid（ulid.go）：全局唯一 ChunkID（ULID 16B，并发安全单调熵）。

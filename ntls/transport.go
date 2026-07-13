@@ -49,7 +49,7 @@ type ServerConfig struct {
 	Sink               core.EventSink
 	Metrics            *core.MBTAMetrics
 	RedirectChecker    core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选）
-	ServerID           string               // 服务端标识，回填 HELLO_ACK；空则 NewServer 自动生成 UUID v7
+	ServerID           string               // 服务端标识，回填 HELLO_ACK；空则 NewServer 自动生成 ULID（Crockford base32，26 字符）
 	MaxConcurrentConns int                  // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns (H-3)
 }
 

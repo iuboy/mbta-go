@@ -2,7 +2,9 @@ package core
 
 import (
 	"fmt"
+	"math"
 	"reflect"
+	"strconv"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
 	"google.golang.org/protobuf/proto"
@@ -189,12 +191,19 @@ func anyToProtoValue(v any) *corepb.AnyValue {
 		return &corepb.AnyValue{Value: &corepb.AnyValue_BytesValue{BytesValue: val}}
 	default:
 		// 用 reflect 匹配所有整数/浮点 kind，避免 int32/uint64/float32 等静默降级为 string。
-		if rv := reflect.ValueOf(v); rv.IsValid() && !rv.IsZero() {
+		// 注意：不要用 rv.IsZero() 过滤——零值（int32(0)、uint64(0)）是合法数值，
+		// 必须按数值类型序列化，否则同一字段的 0 与非 0 会落到不同 oneof 分支。
+		if rv := reflect.ValueOf(v); rv.IsValid() {
 			switch rv.Kind() {
 			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 				return &corepb.AnyValue{Value: &corepb.AnyValue_IntValue{IntValue: rv.Int()}}
 			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-				return &corepb.AnyValue{Value: &corepb.AnyValue_IntValue{IntValue: int64(rv.Uint())}}
+				u := rv.Uint()
+				// 超出 int64 范围时回退到字符串，避免溢出为负数导致数据损坏。
+				if u > math.MaxInt64 {
+					return &corepb.AnyValue{Value: &corepb.AnyValue_StringValue{StringValue: strconv.FormatUint(u, 10)}}
+				}
+				return &corepb.AnyValue{Value: &corepb.AnyValue_IntValue{IntValue: int64(u)}}
 			case reflect.Float32, reflect.Float64:
 				return &corepb.AnyValue{Value: &corepb.AnyValue_DoubleValue{DoubleValue: rv.Float()}}
 			default:

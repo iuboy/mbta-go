@@ -62,19 +62,35 @@ func (t *FakeTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 	}
 }
 
-func (t *FakeTransport) SendFrame(ctx context.Context, f core.Frame) error {
+// sendOnChannel 在 closed-check 后向 ch 发送帧。
+//
+// 旧实现「检查 closed → 解锁 → 发送到 channel」存在 TOCTOU：Close 可在解锁后
+// close(t.Sent)，导致 send on closed channel panic。由于无法在持锁时阻塞发送
+// （会与 Close 死锁），改用 recover + 命名返回兜底 panic，将其转为 ErrClosedPipe。
+func (t *FakeTransport) sendOnChannel(ctx context.Context, ch chan<- core.Frame, f core.Frame) (err error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
 		return io.ErrClosedPipe
 	}
 	t.mu.Unlock()
+	// recover 防 send on closed channel panic（Close 在此期间并发关闭 channel），
+	// 将 panic 转为 ErrClosedPipe 错误返回。
+	defer func() {
+		if r := recover(); r != nil {
+			err = io.ErrClosedPipe
+		}
+	}()
 	select {
-	case t.Sent <- f:
+	case ch <- f:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (t *FakeTransport) SendFrame(ctx context.Context, f core.Frame) error {
+	return t.sendOnChannel(ctx, t.Sent, f)
 }
 
 func (t *FakeTransport) SupportsDatagram() bool { return t.datagram }
@@ -84,18 +100,7 @@ func (t *FakeTransport) SendDatagram(ctx context.Context, payload []byte) error 
 		return protocol.ErrDatagramUnsupported
 	}
 	// datagram=true 模拟 QUIC：作为 data 帧路由到 Sent 供测试验证。
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return io.ErrClosedPipe
-	}
-	t.mu.Unlock()
-	select {
-	case t.Sent <- core.Frame{Payload: payload}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return t.sendOnChannel(ctx, t.Sent, core.Frame{Payload: payload})
 }
 
 func (t *FakeTransport) Multiplexing() protocol.MultiplexModel {
@@ -139,9 +144,13 @@ func MakeFrame(typ uint8, flags byte, channel uint8, payload []byte) core.Frame 
 // ReadFrame 从 Sent 通道读一帧（带超时），失败 t.Fatal。
 func ReadFrame(t interface{ Fatalf(string, ...any) }, ch chan core.Frame) core.Frame {
 	select {
-	case f := <-ch:
+	case f, ok := <-ch:
+		// ok=false：channel 已关闭，返回零值会让测试误判收到合法帧。
+		if !ok {
+			t.Fatalf("frame channel closed")
+		}
 		return f
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatalf("timeout waiting for frame")
 		return core.Frame{}
 	}

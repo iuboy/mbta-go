@@ -92,6 +92,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // ctx 仅控制握手阶段（Dial、HELLO/AUTH）的超时与取消。握手成功后，后台 goroutine
 // 运行在独立的 lifecycle ctx 上，不随 ctx 取消而退出；client 生命周期由 Close() 终结。
 func (c *Client) Connect(ctx context.Context) error {
+	// 防重复 Connect：已连接/连接中时拒绝，避免旧连接泄漏（fd 泄漏 + transport 覆盖）。
+	c.mu.Lock()
+	if c.conn != nil {
+		c.mu.Unlock()
+		return core.NewError(core.NumSession, core.CodeSession, "already connected")
+	}
+	c.mu.Unlock()
+
 	tr := &ntlsClientTransport{}
 	err := binding.Handshake(ctx, c.core,
 		// dial: 建立 TCP（TLCP/TLS1.3）连接
@@ -114,13 +122,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		// postAuth: ntls 无 post-auth 工作
 		nil,
 	)
-	// 握手失败兜底：确保 TCP 连接被关闭，避免 fd 泄漏。
+	// 握手失败兜底：binding.Handshake 的 defer 已调用 cc.Close() 关闭 transport（含
+	// tr.conn），此处仅清理 c.conn 引用，不二次 Close（避免 net.Conn 双重关闭；
+	// 某些 TLCP wrapper 非幂等）。同步把 tr.conn 置 nil 防止悬挂引用。
 	if err != nil {
 		c.mu.Lock()
-		if c.conn != nil {
-			_ = c.conn.Close()
-			c.conn = nil
-		}
+		c.conn = nil
+		tr.conn = nil
 		c.mu.Unlock()
 	}
 	return err

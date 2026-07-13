@@ -81,12 +81,11 @@ func (s *Server) Start(ctx context.Context) error {
 		return core.NewError(core.NumSession, core.CodeSession, "server already started")
 	}
 	s.started = true
-	s.mu.Unlock()
 
-	// Initialize all version servers serially to avoid concurrent field writes.
+	// 初始化在锁内完成：initV1Server/initNTLSServer 写 s.v1Server/s.ntlsServer，
+	// 与 Close 的锁内读必须同步，避免 data race（旧实现 init 在锁外写）。
 	if s.cfg.EnableV1 {
 		if err := s.initV1Server(); err != nil {
-			s.mu.Lock()
 			s.started = false
 			s.mu.Unlock()
 			return core.WrapError(core.NumConfig, core.CodeConfig, "init v1", err)
@@ -94,27 +93,35 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	if s.cfg.EnableNTLS {
 		if err := s.initNTLSServer(); err != nil {
-			s.mu.Lock()
+			// initNTLSServer 失败：清理已初始化的 v1Server，避免资源残留。
+			if s.v1Server != nil {
+				_ = s.v1Server.Close()
+				s.v1Server = nil
+			}
 			s.started = false
 			s.mu.Unlock()
 			return core.WrapError(core.NumConfig, core.CodeConfig, "init ntls", err)
 		}
 	}
+	// 捕获子服务器引用，accept-loop goroutine 用局部变量读，避免与 Close 竞态。
+	v1srv := s.v1Server
+	ntlsSrv := s.ntlsServer
+	s.mu.Unlock()
 
 	// Launch accept loops concurrently.
 	g, ctx := errgroup.WithContext(ctx)
 
-	if s.v1Server != nil {
+	if v1srv != nil {
 		g.Go(func() error {
-			if err := s.v1Server.Start(ctx); err != nil {
+			if err := v1srv.Start(ctx); err != nil {
 				return core.WrapError(core.NumTransport, core.CodeTransport, "v1", err)
 			}
 			return nil
 		})
 	}
-	if s.ntlsServer != nil {
+	if ntlsSrv != nil {
 		g.Go(func() error {
-			if err := s.ntlsServer.Start(ctx); err != nil {
+			if err := ntlsSrv.Start(ctx); err != nil {
 				return core.WrapError(core.NumTransport, core.CodeTransport, "ntls", err)
 			}
 			return nil
@@ -122,9 +129,12 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	if err := g.Wait(); err != nil {
+		// errgroup 任一失败：清理已启动的子服务器，避免 goroutine/监听泄漏。
 		s.mu.Lock()
 		s.started = false
 		s.mu.Unlock()
+		// 显式 Close 触发子服务器清理（errgroup cancel 已使 ctx.Done，但 Close 保证资源释放）。
+		_ = s.Close()
 		return core.WrapError(core.NumTransport, core.CodeTransport, "server accept loop", err)
 	}
 

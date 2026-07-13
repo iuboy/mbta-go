@@ -34,10 +34,18 @@ type (
 	AckMode = corepb.AckMode
 )
 
-// ValidateHello 校验 HELLO。agent_id 必填。
+// knownFrameVersions 是当前已知的帧版本集合（用于 HELLO.frame_version 校验）。
+// 新增版本时在此登记，防止服务端接受未声明的版本（降级攻击面）。
+var knownFrameVersions = map[uint32]bool{1: true}
+
+// ValidateHello 校验 HELLO。agent_id 必填；frame_version 必须是已支持的版本。
 func ValidateHello(m *HelloMessage) error {
 	if m == nil || m.GetAgentId() == "" {
 		return NewError(NumValidation, CodeValidation, "agent_id is required")
+	}
+	// 校验 frame_version：0 或未知版本一律拒绝，避免降级攻击或后续编解码异常。
+	if !knownFrameVersions[m.GetFrameVersion()] {
+		return NewError(NumValidation, CodeValidation, fmt.Sprintf("unsupported frame_version: %d", m.GetFrameVersion()))
 	}
 	return nil
 }
@@ -50,7 +58,8 @@ func ValidateHelloAck(m *HelloAckMessage) error {
 	return nil
 }
 
-// ValidateAuth 校验 AUTH。agent_id / session_id / auth_nonce 必填。
+// ValidateAuth 校验 AUTH。agent_id / session_id / auth_nonce / token 必填。
+// token 是客户端身份凭证，空 token 将导致无凭证认证绕过，必须拒绝。
 func ValidateAuth(m *AuthMessage) error {
 	if m == nil {
 		return NewError(NumValidation, CodeValidation, "nil auth message")
@@ -63,6 +72,9 @@ func ValidateAuth(m *AuthMessage) error {
 	}
 	if len(m.GetAuthNonce()) == 0 {
 		return NewError(NumValidation, CodeValidation, "auth_nonce is required")
+	}
+	if m.GetToken() == "" {
+		return NewError(NumValidation, CodeValidation, "token is required")
 	}
 	return nil
 }
@@ -86,10 +98,19 @@ func ValidateBatch(m *BatchMessage) error {
 
 // Encode proto 序列化消息。
 func Encode(m proto.Message) ([]byte, error) {
+	if m == nil {
+		return nil, NewError(NumProtocol, CodeProtocol, "encode: nil message")
+	}
 	return proto.Marshal(m)
 }
 
 // Decode proto 反序列化到 m。
 func Decode(data []byte, m proto.Message) error {
-	return proto.Unmarshal(data, m)
+	if m == nil {
+		return NewError(NumProtocol, CodeProtocol, "decode: nil target message")
+	}
+	if err := proto.Unmarshal(data, m); err != nil {
+		return WrapError(NumProtocol, CodeProtocol, "decode", err)
+	}
+	return nil
 }

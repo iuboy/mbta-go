@@ -59,28 +59,38 @@ func (c *CoreClient) RecvHelloAck() (*core.HelloAckMessage, error) {
 		return nil, err
 	}
 
-	c.negotiated = &core.NegotiateResult{
+	c.negotiated.Store(&core.NegotiateResult{
 		SelectedCapabilities: ack.GetSelectedCapabilities(),
 		Codec:                ack.GetCodec(),
 		Compression:          ack.GetCompression(),
 		CipherSuite:          ack.GetCipherSuite(),
-	}
+	})
 	// 防御性校验：服务端选定的 cipher suite 不能是 UNSPECIFIED，
 	// 否则后续 key 派生会用错误算法（SHA-256 vs SM3）静默失败。
 	if ack.GetCipherSuite() == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
 		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server selected unspecified cipher suite")
 	}
-	c.challengeNonce = ack.GetChallengeNonce()
+	c.challengeNonce.Store(ack.GetChallengeNonce())
 
-	if len(c.challengeNonce) == 0 {
+	challengeNonce := c.getChallengeNonce()
+	if len(challengeNonce) == 0 {
 		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server did not provide challenge_nonce in HELLO_ACK")
 	}
 	return &ack, nil
 }
 
+// getChallengeNonce 返回 challengeNonce 字节（atomic.Value 内为 []byte）。
+func (c *CoreClient) getChallengeNonce() []byte {
+	if v := c.challengeNonce.Load(); v != nil {
+		return v.([]byte)
+	}
+	return nil
+}
+
 // SendAuth 发送 AUTH（challenge-response）。
 func (c *CoreClient) SendAuth() error {
-	if len(c.challengeNonce) == 0 {
+	challengeNonce := c.getChallengeNonce()
+	if len(challengeNonce) == 0 {
 		return core.NewError(core.NumAuth, core.CodeAuth, "server did not provide challenge_nonce in HELLO_ACK, cannot authenticate")
 	}
 
@@ -103,14 +113,14 @@ func (c *CoreClient) SendAuth() error {
 // （spec §8.3：默认套件跟随传输 binding，不应在协议核心硬编码 intl）。
 func (c *CoreClient) buildAuthMessage() *corepb.AuthMessage {
 	cs := c.cfg.DefaultCipherSuite
-	if c.negotiated != nil {
-		cs = c.negotiated.CipherSuite
+	if n := c.negotiated.Load(); n != nil {
+		cs = n.CipherSuite
 	}
 	return &corepb.AuthMessage{
 		Token:     c.cfg.Token,
 		AgentId:   c.cfg.AgentID,
-		SessionId: c.sessionID,
-		AuthNonce: core.ComputeChallengeResponse(c.cfg.Token, string(c.challengeNonce), cs),
+		SessionId: c.getSessionID(),
+		AuthNonce: core.ComputeChallengeResponse(c.cfg.Token, string(c.getChallengeNonce()), cs),
 	}
 }
 
@@ -130,18 +140,25 @@ func (c *CoreClient) RecvAuthResult() error {
 		}
 
 		cs := okMsg.GetCipherSuite()
-		c.keys = core.NewSessionKeys(okMsg.GetKeyId(), cs, okMsg.GetHmacKey())
+		// 安全交叉校验：AUTH_OK 的 cipher suite 必须与 HELLO_ACK 协商结果一致，
+		// 防止恶意/有缺陷的服务端在协商后下发不同套件导致密钥派生用错误算法。
+		if n := c.negotiated.Load(); n != nil && cs != n.CipherSuite {
+			return core.NewError(core.NumProtocol, core.CodeProtocol,
+				fmt.Sprintf("cipher suite mismatch: AUTH_OK=%s vs negotiated=%s", cs, n.CipherSuite))
+		}
+		keys := core.NewSessionKeys(okMsg.GetKeyId(), cs, okMsg.GetHmacKey())
 		// AEAD 密钥按套件下发字段（intl=AesKey, gm=Sm4Key）。
 		// 显式 switch 替代 else 兜底，避免 UNSPECIFIED 静默用空 Sm4Key 导致加密失效。
 		switch cs {
 		case corepb.CipherSuite_CIPHER_SUITE_INTL:
-			c.keys.SetAEADKey(okMsg.GetAesKey())
+			keys.SetAEADKey(okMsg.GetAesKey())
 		case corepb.CipherSuite_CIPHER_SUITE_GM:
-			c.keys.SetAEADKey(okMsg.GetSm4Key())
+			keys.SetAEADKey(okMsg.GetSm4Key())
 		default:
 			return core.NewError(core.NumProtocol, core.CodeProtocol,
 				fmt.Sprintf("unsupported cipher suite in AUTH_OK: %s", cs))
 		}
+		c.keys.Store(keys)
 
 		if okMsg.GetExpiresAtUnix() > 0 {
 			c.expiresAt = time.Unix(okMsg.GetExpiresAtUnix(), 0)
@@ -164,7 +181,7 @@ func (c *CoreClient) RecvAuthResult() error {
 		// 客户端 MUST 用新挑战重算。更新本地 challengeNonce，供上层重试时
 		// buildAuthMessage 使用——旧 challenge 一次性，复用会使重放防护形同虚设。
 		if failMsg.GetRetryable() && len(failMsg.GetChallengeNonce()) > 0 {
-			c.challengeNonce = failMsg.GetChallengeNonce()
+			c.challengeNonce.Store(failMsg.GetChallengeNonce())
 		}
 		return core.NewError(core.NumAuth, core.CodeAuth, fmt.Sprintf("auth failed: %s (%s)", failMsg.GetReason(), failMsg.GetCode()))
 

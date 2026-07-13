@@ -39,3 +39,5 @@ go.work.sum
 /testdata/certificates/*.crt
 /testdata/certificates/*.csr
 /testdata/certificates/*.srl
+# PEM 是 Go crypto/tls / x509 标准库最常用的证书/密钥格式，私钥若意外提交构成安全风险。
+*.pem
