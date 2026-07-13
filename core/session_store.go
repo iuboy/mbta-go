@@ -89,6 +89,7 @@ var ErrSessionStoreFull = fmt.Errorf("session store full")
 // 拒绝条件（返回 error）：
 //   - state 为 nil（防止后续 Get 解引用 panic）
 //   - ticket 为空（无法作为有效 key）
+//   - state.Expiry 为零值（公元 1 年 < 现在，Get 会立即判定过期，ticket 永远无法恢复）
 //   - store 已 Close（reaper 已停止，条目无法回收）
 //   - 条目数已达 maxSize 上限且 ticket 不存在（DoS 防护）
 func (s *SessionStore) Put(ticket []byte, state *SessionState) error {
@@ -97,6 +98,11 @@ func (s *SessionStore) Put(ticket []byte, state *SessionState) error {
 	}
 	if len(ticket) == 0 {
 		return fmt.Errorf("empty session ticket")
+	}
+	if state.Expiry.IsZero() {
+		// 零值 time.Time{} 是公元 1 年，time.Now().After(Expiry) 永远为 true，
+		// 导致 ticket 颁发后立即无法恢复。显式拒绝避免隐性陷阱。
+		return fmt.Errorf("session state Expiry must be set to a future time")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

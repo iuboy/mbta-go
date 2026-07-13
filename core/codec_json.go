@@ -18,7 +18,11 @@ type jsonCodec struct{}
 func (jsonCodec) Codec() corepb.Codec { return corepb.Codec_CODEC_JSON }
 
 func (jsonCodec) Marshal(sb *SignalBatch) ([]byte, error) {
-	return json.Marshal(sb)
+	out, err := json.Marshal(sb)
+	if err != nil {
+		return nil, WrapError(NumValidation, CodeValidation, "marshal signal batch (json)", err)
+	}
+	return out, nil
 }
 
 func (jsonCodec) Unmarshal(data []byte) (*SignalBatch, error) {

@@ -92,6 +92,11 @@ func DefaultLimits() Limits {
 // v1/ntls 传 core.Version(0x01)，v2 传 0x02。这样 wire 层真正反映协议版本，
 // 为 v2 落地扫清障碍（此前 Version 被硬编码为常量，v2 帧无法生成）。
 func Write(w io.Writer, version byte, typ uint8, flags byte, channelID uint8, payload []byte) error {
+	// 写入端 version 白名单：与 Read 端对称校验，避免生成对端无法解析的帧。
+	// 当前支持 v1(0x01) 与计划中的 v2(0x02)。
+	if version != Version && version != 0x02 {
+		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("unsupported frame version 0x%02x", version))
+	}
 	if err := ValidateFlags(flags); err != nil {
 		return err
 	}

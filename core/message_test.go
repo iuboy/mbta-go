@@ -21,11 +21,14 @@ func TestValidateHello(t *testing.T) {
 }
 
 func TestValidateHelloAck(t *testing.T) {
-	if err := ValidateHelloAck(&HelloAckMessage{SessionId: []byte("s")}); err != nil {
+	if err := ValidateHelloAck(&HelloAckMessage{SessionId: make([]byte, 16)}); err != nil {
 		t.Errorf("valid hello_ack: %v", err)
 	}
 	if err := ValidateHelloAck(&HelloAckMessage{SessionId: nil}); err == nil {
 		t.Error("empty session_id should fail")
+	}
+	if err := ValidateHelloAck(&HelloAckMessage{SessionId: []byte("short")}); err == nil {
+		t.Error("non-16-byte session_id should fail")
 	}
 }
 

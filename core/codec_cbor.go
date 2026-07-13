@@ -37,7 +37,11 @@ func init() {
 func (cborCodec) Codec() corepb.Codec { return corepb.Codec_CODEC_CBOR }
 
 func (cborCodec) Marshal(sb *SignalBatch) ([]byte, error) {
-	return cborEncMode.Marshal(sb)
+	out, err := cborEncMode.Marshal(sb)
+	if err != nil {
+		return nil, WrapError(NumValidation, CodeValidation, "marshal signal batch (cbor)", err)
+	}
+	return out, nil
 }
 
 func (cborCodec) Unmarshal(data []byte) (*SignalBatch, error) {

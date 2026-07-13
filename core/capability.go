@@ -127,21 +127,22 @@ func Negotiate(clientCaps []string, policy Policy) (NegotiateResult, error) {
 	}
 	sort.Strings(selected)
 
+	// 提前构造一次 selectedSet，传入三个 pick 函数，避免重复分配（高并发协商场景降低 GC 压力）。
+	selectedSet := toSet(selected)
 	return NegotiateResult{
 		SelectedCapabilities: selected,
-		Codec:                pickCodec(selected, policy.DefaultCodec),
-		Compression:          pickCompression(selected, policy.DefaultCompression),
-		CipherSuite:          pickCipherSuite(selected, policy.CipherSuite),
+		Codec:                pickCodec(selectedSet, policy.DefaultCodec),
+		Compression:          pickCompression(selectedSet, policy.DefaultCompression),
+		CipherSuite:          pickCipherSuite(selectedSet, policy.CipherSuite),
 	}, nil
 }
 
-// pickCodec 从选定 capability 推导 codec。
+// pickCodec 从选定 capability set 推导 codec。
 //
 // 优先级 proto > cbor > json：proto 是 baseline 默认（wire 紧凑、跨语言、OTLP 互通），
 // 双方都支持时优先 proto 以保证最佳互操作与确定性。仅当双方都不支持 proto 但都支持
 // cbor（constrained 场景）或 json（调试）时才降级。三者均未选定时返回 def。
-func pickCodec(selected []string, def corepb.Codec) corepb.Codec {
-	set := toSet(selected)
+func pickCodec(set map[string]bool, def corepb.Codec) corepb.Codec {
 	switch {
 	case set["codec_proto"]:
 		return corepb.Codec_CODEC_PROTO
@@ -153,8 +154,7 @@ func pickCodec(selected []string, def corepb.Codec) corepb.Codec {
 	return def
 }
 
-func pickCompression(selected []string, def corepb.Compression) corepb.Compression {
-	set := toSet(selected)
+func pickCompression(set map[string]bool, def corepb.Compression) corepb.Compression {
 	switch {
 	case set["comp_zstd"]:
 		return corepb.Compression_COMPRESSION_ZSTD
@@ -168,8 +168,7 @@ func pickCompression(selected []string, def corepb.Compression) corepb.Compressi
 	return def
 }
 
-func pickCipherSuite(selected []string, def corepb.CipherSuite) corepb.CipherSuite {
-	set := toSet(selected)
+func pickCipherSuite(set map[string]bool, def corepb.CipherSuite) corepb.CipherSuite {
 	if set["cs_gm"] {
 		return corepb.CipherSuite_CIPHER_SUITE_GM
 	}

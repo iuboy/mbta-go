@@ -228,6 +228,10 @@ var (
 			return dec
 		},
 	}
+
+	// lz4 writer/reader pool：与 gzip/zstd 对齐，避免批量压缩场景每次新建 *lz4.Writer/Reader 的 GC 压力。
+	lz4WriterPool = sync.Pool{New: func() any { return lz4.NewWriter(nil) }}
+	lz4ReaderPool = sync.Pool{New: func() any { return lz4.NewReader(nil) }}
 )
 
 // compress 按算法压缩 src。
@@ -256,14 +260,17 @@ func compress(c corepb.Compression, src []byte) ([]byte, error) {
 		return out, nil
 	case corepb.Compression_COMPRESSION_LZ4:
 		var buf bytes.Buffer
-		w := lz4.NewWriter(&buf)
+		w := lz4WriterPool.Get().(*lz4.Writer)
+		w.Reset(&buf)
 		if _, err := w.Write(src); err != nil {
-			w.Close()
+			_ = w.Close() // writer 可能已损坏，不放回 pool
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 compress", err)
 		}
 		if err := w.Close(); err != nil {
+			_ = w.Close() // Close 失败：writer 可能已损坏，不放回 pool（与 gzip 路径一致）
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 close", err)
 		}
+		lz4WriterPool.Put(w)
 		return buf.Bytes(), nil
 	default:
 		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
@@ -311,13 +318,16 @@ func decompress(c corepb.Compression, src []byte) ([]byte, error) {
 		}
 		return buf.Bytes(), nil
 	case corepb.Compression_COMPRESSION_LZ4:
-		r := lz4.NewReader(bytes.NewReader(src))
+		r := lz4ReaderPool.Get().(*lz4.Reader)
+		r.Reset(bytes.NewReader(src))
 		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
 		var buf bytes.Buffer
 		buf.Grow(len(src) * 4)
 		if _, err := io.Copy(&buf, lr); err != nil {
+			lz4ReaderPool.Put(r)
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 decompress", err)
 		}
+		lz4ReaderPool.Put(r)
 		if lr.N == 0 {
 			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
 		}

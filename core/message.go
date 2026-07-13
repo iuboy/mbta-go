@@ -50,10 +50,13 @@ func ValidateHello(m *HelloMessage) error {
 	return nil
 }
 
-// ValidateHelloAck 校验 HELLO_ACK。session_id 必填。
+// ValidateHelloAck 校验 HELLO_ACK。session_id 必填且为 16 字节（ULID）。
 func ValidateHelloAck(m *HelloAckMessage) error {
-	if m == nil || len(m.GetSessionId()) == 0 {
+	if m == nil {
 		return NewError(NumValidation, CodeValidation, "session_id is required")
+	}
+	if len(m.GetSessionId()) != 16 {
+		return NewError(NumValidation, CodeValidation, fmt.Sprintf("session_id must be exactly 16 bytes (ULID), got %d", len(m.GetSessionId())))
 	}
 	return nil
 }

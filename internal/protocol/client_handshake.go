@@ -70,12 +70,13 @@ func (c *CoreClient) RecvHelloAck(ctx context.Context) (*core.HelloAckMessage, e
 	if ack.GetCipherSuite() == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
 		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server selected unspecified cipher suite")
 	}
-	c.challengeNonce.Store(ack.GetChallengeNonce())
-
-	challengeNonce := c.getChallengeNonce()
-	if len(challengeNonce) == 0 {
+	// 先校验 challengeNonce 非空再 Store：避免「先修改接收者状态后校验」的脆弱模式，
+	// 防止后续重构顺序时意外使用空 nonce。
+	if len(ack.GetChallengeNonce()) == 0 {
 		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server did not provide challenge_nonce in HELLO_ACK")
 	}
+	c.challengeNonce.Store(ack.GetChallengeNonce())
+
 	return &ack, nil
 }
 
@@ -164,11 +165,13 @@ func (c *CoreClient) RecvAuthResult(ctx context.Context) error {
 			c.expiresAt = time.Unix(okMsg.GetExpiresAtUnix(), 0)
 		}
 
-		if c.onAuthed != nil {
-			c.onAuthed(context.Background())
-		}
+		// 先 Transition(StateReady) 再触发 onAuthed：binding 回调（v1 SetAuthed）
+		// 可能检查 StateReady 开放 data stream 门禁，若状态仍为 StateAuthSent 会行为异常。
 		if err := c.sm.Transition(core.StateReady); err != nil {
 			return core.WrapError(core.NumSession, core.CodeSession, "transition to READY", err)
+		}
+		if c.onAuthed != nil {
+			c.onAuthed(context.Background())
 		}
 		return nil
 
