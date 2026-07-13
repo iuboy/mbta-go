@@ -52,9 +52,29 @@ type v1ClientTransport struct {
 	controlMu  sync.Mutex                   // 串行化 control stream 写
 }
 
-func (t *v1ClientTransport) ReadFrame() (core.Frame, error) {
-	return core.Read(t.controlStr, core.DefaultLimits())
+func (t *v1ClientTransport) ReadFrame(ctx context.Context) (core.Frame, error) {
+	// ctx 感知读：通过 SetReadDeadline 让 ctx 取消/超时能中断阻塞读，
+	// 避免对端静默断开时 control loop 永久阻塞（goroutine 泄漏）。
+	if err := ctx.Err(); err != nil {
+		return core.Frame{}, err
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(clientReadDefaultTimeout)
+	}
+	if err := t.controlStr.SetReadDeadline(dl); err != nil {
+		return core.Frame{}, core.WrapError(core.NumStream, core.CodeStream, "set control read deadline", err)
+	}
+	defer func() { _ = t.controlStr.SetReadDeadline(time.Time{}) }()
+	f, err := core.Read(t.controlStr, core.DefaultLimits())
+	if err != nil && ctx.Err() != nil {
+		return core.Frame{}, ctx.Err()
+	}
+	return f, err
 }
+
+// clientReadDefaultTimeout 是客户端 control stream 读在 ctx 无 deadline 时的默认上限。
+const clientReadDefaultTimeout = 5 * time.Minute
 
 // WriteFrame 按 channel 路由：control 走 controlStr（controlMu 串行），
 // data 走 picker 选流 + per-stream ctx 感知写。

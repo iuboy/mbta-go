@@ -13,7 +13,7 @@ import (
 // 均不触达 WriteFrame（门控与校验在 SendBatch 早期返回，reserveInflight 不写帧）。
 type noopClientTransport struct{}
 
-func (noopClientTransport) ReadFrame() (core.Frame, error) {
+func (noopClientTransport) ReadFrame(context.Context) (core.Frame, error) {
 	return core.Frame{}, context.Canceled
 }
 func (noopClientTransport) WriteFrame(context.Context, uint8, uint8, uint8, []byte) error {

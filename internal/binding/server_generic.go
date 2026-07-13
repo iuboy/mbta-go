@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/iuboy/mbta-go/internal/protocol"
 )
@@ -25,12 +26,24 @@ import (
 // 消除 v1/server.go 与 ntls/transport.go 中 Server 结构体、NewServer 默认值、
 // Start 前言（log + ctx-cancel goroutine）、Addr/Close 的 ~40 行重复。
 type Server[L, C any] struct {
-	mu          sync.Mutex
-	listener    L
-	listenerSet bool // 避免类型化 nil 指针（如 *Listener）经 any() 包装后非 nil 的陷阱
-	connSem     chan struct{}
-	hcfg        HandlerConfig
+	mu       sync.Mutex
+	listener L
+	// runState 是原子状态机，替代旧 listenerSet bool，消除 Run 的 TOCTOU：
+	//   stopped(0) → starting(1) → running(2) → stopped(0)
+	// CAS stopped→starting 保证只有一个 goroutine 进入 Listen；若 CAS 失败说明
+	// 另一个 Run 正在进行（旧实现「检查 bool → 解锁 → Listen → 加锁置 bool」
+	// 允许两个并发 Run 都通过检查，各自 Listen 导致 fd/ctx-cancel goroutine 泄漏）。
+	runState atomic.Uint32
+	connSem  chan struct{}
+	hcfg     HandlerConfig
 }
+
+// runState 取值。
+const (
+	runStateStopped  uint32 = 0
+	runStateStarting uint32 = 1
+	runStateRunning  uint32 = 2
+)
 
 // NewServer 构造 Server[L,C]：填充 maxConns 默认值与 connSem。
 func NewServer[L, C any](maxConns int, hcfg HandlerConfig) *Server[L, C] {
@@ -62,23 +75,33 @@ type RunSpec[L, C any] struct {
 // Run 启动 listener 并驱动 AcceptLoop，直到 ctx 取消。阻塞返回。
 //
 // 各 binding 的 Start 只需：校验配置 → 调 NewServer → 调 Run。
+//
+// 并发安全：用 CAS 状态机（stopped→starting→running）保证同一时刻只有一个
+// Run 进入 Listen，消除旧实现「检查 listenerSet → 解锁 → Listen → 加锁置位」
+// 的 TOCTOU 窗口（两个并发 Run 都能通过检查，各自 Listen 导致 fd/goroutine 泄漏）。
 func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
-	// 拒绝重复调用 Run：第二次会覆盖 s.listener 且不关闭旧的，泄漏 fd 和 ctx-cancel goroutine。
-	s.mu.Lock()
-	if s.listenerSet {
-		s.mu.Unlock()
+	// CAS stopped→starting：只有一个 goroutine 能进入 Listen。
+	if !s.runState.CompareAndSwap(runStateStopped, runStateStarting) {
 		return errors.New("binding.Server.Run: already running")
 	}
-	s.mu.Unlock()
+	// 确保异常退出（Listen 失败或 AcceptLoop 返回）时重置状态，允许后续 Run/重启。
+	defer func() {
+		// AcceptLoop 返回（含 ctx 取消的「正常」退出）后回到 stopped。
+		// 用 CAS running→stopped；若仍处于 starting（Listen 失败路径已单独处理）则跳过。
+		s.runState.CompareAndSwap(runStateRunning, runStateStopped)
+	}()
 
 	l, err := spec.Listen(ctx)
 	if err != nil {
+		// Listen 失败：重置 starting→stopped，允许重试。
+		s.runState.Store(runStateStopped)
 		return err
 	}
 	s.mu.Lock()
 	s.listener = l
-	s.listenerSet = true
 	s.mu.Unlock()
+	// Listen 成功后进入 running（此时 AcceptLoop 即将阻塞运行）。
+	s.runState.Store(runStateRunning)
 	slog.Info("MBTA server listening", "addr", spec.AddrOf(l))
 
 	// ctx 取消时关闭 listener：被 Accept 阻塞的循环因此解除并退出。
@@ -100,7 +123,8 @@ func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
 func (s *Server[L, C]) Addr(addrOf func(l L) net.Addr) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.listenerSet {
+	// 仅在 running 态返回地址；starting/stopped 态 listener 未就绪或已关闭。
+	if s.runState.Load() != runStateRunning {
 		return ""
 	}
 	a := addrOf(s.listener)
@@ -111,12 +135,16 @@ func (s *Server[L, C]) Addr(addrOf func(l L) net.Addr) string {
 }
 
 // Close 关闭 listener（幂等：多次调用安全）。
+//
+// 用 CAS running→stopped 保证只有一个 Close 实际关闭 listener；并发 Close 或
+// 在 stopped 态调用直接返回 nil。Run 的 defer 也会 CAS running→stopped，与
+// Close 互斥（任一先执行完成关闭，另一者看到 stopped 返回 nil）。
 func (s *Server[L, C]) Close(closeListener func(l L) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.listenerSet {
+	if !s.runState.CompareAndSwap(runStateRunning, runStateStopped) {
+		// 非 running 态（stopped/starting）：listener 未就绪或已被关闭，幂等返回 nil。
 		return nil
 	}
-	s.listenerSet = false // 标记已关闭，使 Close 真正幂等 + Addr 返回空串
 	return closeListener(s.listener)
 }

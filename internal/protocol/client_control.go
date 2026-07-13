@@ -25,7 +25,7 @@ func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 		default:
 		}
 
-		f, err := c.tr.ReadFrame()
+		f, err := c.tr.ReadFrame(ctx)
 		if err != nil {
 			// 区分临时错误（EAGAIN/EINTR 等可恢复）与致命错误（连接关闭/EOF）。
 			// 临时错误继续循环，仅致命错误退出，避免网络抖动不必要地终止控制帧处理。

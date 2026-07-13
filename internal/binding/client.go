@@ -52,10 +52,10 @@ func Handshake(
 		return err
 	}
 
-	if err := cc.SendHello(); err != nil {
+	if err := cc.SendHello(ctx); err != nil {
 		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello", err)
 	}
-	helloAck, err := cc.RecvHelloAck()
+	helloAck, err := cc.RecvHelloAck(ctx)
 	if err != nil {
 		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello_ack", err)
 	}
@@ -73,10 +73,10 @@ func Handshake(
 		cc.SetHeartbeatInterval(DefaultHeartbeatInterval)
 	}
 
-	if err := cc.SendAuth(); err != nil {
+	if err := cc.SendAuth(ctx); err != nil {
 		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth", err)
 	}
-	if err := cc.RecvAuthResult(); err != nil {
+	if err := cc.RecvAuthResult(ctx); err != nil {
 		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth_result", err)
 	}
 

@@ -35,9 +35,29 @@ type ntlsClientTransport struct {
 	writeMu sync.Mutex
 }
 
-func (t *ntlsClientTransport) ReadFrame() (core.Frame, error) {
-	return core.Read(t.conn, core.DefaultLimits())
+func (t *ntlsClientTransport) ReadFrame(ctx context.Context) (core.Frame, error) {
+	// ctx 感知读：通过 SetReadDeadline 让 ctx 取消/超时能中断阻塞读，
+	// 避免对端静默断开（TCP 无 RST，仅静默丢包）时 control loop 永久阻塞。
+	if err := ctx.Err(); err != nil {
+		return core.Frame{}, err
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(ntlsReadDefaultTimeout)
+	}
+	if err := t.conn.SetReadDeadline(dl); err != nil {
+		return core.Frame{}, core.WrapError(core.NumStream, core.CodeStream, "set read deadline", err)
+	}
+	defer func() { _ = t.conn.SetReadDeadline(time.Time{}) }()
+	f, err := core.Read(t.conn, core.DefaultLimits())
+	if err != nil && ctx.Err() != nil {
+		return core.Frame{}, ctx.Err()
+	}
+	return f, err
 }
+
+// ntlsReadDefaultTimeout 是 NTLS control 读在 ctx 无 deadline 时的默认上限。
+const ntlsReadDefaultTimeout = 5 * time.Minute
 
 // WriteFrame 写一帧。data 通道（ChannelData）受 ctx 约束（设 SetWriteDeadline），
 // control 通道（ChannelControl）调用方传 context.Background() 不受超时约束。

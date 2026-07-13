@@ -24,7 +24,11 @@ import (
 //   - ntls: 所有帧走 writeMu+单 conn。
 type ClientTransport interface {
 	// ReadFrame 阻塞读下一帧（HELLO_ACK / AUTH_OK / ACK / NACK / WINDOW / THROTTLE / PING / CLOSE）。
-	ReadFrame() (core.Frame, error)
+	//
+	// ctx 约束读操作：ctx 取消或超时使阻塞读返回 ctx.Err()，避免对端静默断开时
+	// 读永久阻塞（goroutine 泄漏）。实现应通过 SetReadDeadline 将 ctx.Deadline()
+	// 绑定到底层连接（QUIC stream / net.Conn）。
+	ReadFrame(ctx context.Context) (core.Frame, error)
 
 	// WriteFrame 写一帧。ctx 仅约束 data 通道（ChannelData）的写超时；
 	// control 通道（ChannelControl）调用方通常传 context.Background()。

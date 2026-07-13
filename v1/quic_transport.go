@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/protocol"
@@ -87,27 +88,59 @@ func (t *quicTransport) readDataStream(s *quic.Stream) {
 	}
 }
 
-// RecvControlFrame 读 control stream 下一帧。
+// RecvControlFrame 读 control stream 下一帧，受调用方 ctx 约束。
+//
+// 旧实现忽略 ctx（_ = ctx），shutdown 时 CoreHandler 无法靠 ctx 超时退出 control loop，
+// 只能依赖 transport 关闭触发 stream EOF。现在通过 SetReadDeadline 让 ctx.Deadline()
+// 或 ctx 取消能中断阻塞读。模式对称于 quicStreamWrapper.writeFrameCtx（写路径）。
 func (t *quicTransport) RecvControlFrame(ctx context.Context) (core.Frame, error) {
-	// control stream 读是单 goroutine（CoreHandler control loop），无需 ctx 感知读（关闭时 stream EOF）。
-	_ = ctx
-	return core.Read(t.controlStr, core.DefaultLimits())
+	if err := ctx.Err(); err != nil {
+		return core.Frame{}, err
+	}
+	// ctx 无 deadline 时设默认上限，避免对端静默断开时读永久阻塞（goroutine 泄漏）。
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(controlReadDefaultTimeout)
+	}
+	if err := t.controlStr.SetReadDeadline(dl); err != nil {
+		return core.Frame{}, core.WrapError(core.NumStream, core.CodeStream, "set control read deadline", err)
+	}
+	defer func() { _ = t.controlStr.SetReadDeadline(time.Time{}) }()
+	f, err := core.Read(t.controlStr, core.DefaultLimits())
+	if err != nil {
+		// ctx 取消与 SetReadDeadline 超时都会让 Read 返回错误；区分 ctx 取消以便上层处理。
+		if ctx.Err() != nil {
+			return core.Frame{}, ctx.Err()
+		}
+		return core.Frame{}, err
+	}
+	return f, nil
 }
 
+// controlReadDefaultTimeout 是 control stream 读在 ctx 无 deadline 时的默认上限，
+// 防止对端静默断开（中间防火墙丢包）导致 goroutine 永久阻塞。
+const controlReadDefaultTimeout = 5 * time.Minute
+
 // RecvDataFrame 从聚合 data channel 读下一帧。
+//
+// 修复 default 分支吞错误：旧实现在 dataCh 关闭后用非阻塞 select 读 dataErr，
+// 若 dataErr 已被先前 RecvDataFrame 读过（cap=1），default 分支返回 io.EOF，
+// 丢失真正的 accept 错误。改为阻塞读 dataErr，确保真实错误不丢失。
 func (t *quicTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 	select {
 	case f, ok := <-t.dataCh:
 		if !ok {
-			err := io.EOF
+			// dataCh 关闭：阻塞读 dataErr 拿真实错误（acceptDataStreams 发送）。
+			// 用 ctx 防止永久阻塞（dataErr 可能因竞态未发送）。
 			select {
 			case e := <-t.dataErr:
 				if e != nil {
-					err = e
+					return core.Frame{}, e
 				}
-			default:
+			case <-ctx.Done():
+				return core.Frame{}, ctx.Err()
 			}
-			return core.Frame{}, err
+			return core.Frame{}, io.EOF
 		}
 		return f, nil
 	case <-ctx.Done():
@@ -123,8 +156,16 @@ func (t *quicTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	return core.Write(t.controlStr, f.Header.Version, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
 }
 
-// SupportsDatagram 报告是否支持 QUIC DATAGRAM（需 EnableDatagrams）。
-func (t *quicTransport) SupportsDatagram() bool { return true }
+// SupportsDatagram 报告是否支持 QUIC DATAGRAM。
+//
+// 检查 QUIC 连接实际是否启用了 datagram 扩展（EnableDatagrams），而非硬编码 true。
+// 旧实现无条件返回 true，若未来连接以 EnableDatagrams=false 建立，会误导上层使用
+// 不支持的 datagram 通道。
+func (t *quicTransport) SupportsDatagram() bool {
+	// SupportsDatagrams 是 {Local, Remote} 结构体：本端 + 对端都必须启用。
+	ds := t.conn.QC.ConnectionState().SupportsDatagrams
+	return ds.Local && ds.Remote
+}
 
 // SendDatagram 走 QUIC DATAGRAM 不可靠通道。
 func (t *quicTransport) SendDatagram(ctx context.Context, payload []byte) error {

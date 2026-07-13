@@ -15,8 +15,8 @@ import (
 // 这些方法原在 v1/handshake.go 与 ntls/handshake.go 中逐字重复，现已下沉。
 // 读写均经 c.tr（ClientTransport），消除对 controlStr/conn 的直接依赖。
 
-// SendHello 发送 HELLO（core spec §9.5）。
-func (c *CoreClient) SendHello() error {
+// SendHello 发送 HELLO（core spec §9.5）。ctx 约束写操作超时/取消。
+func (c *CoreClient) SendHello(ctx context.Context) error {
 	hello := &corepb.HelloMessage{
 		AgentId:       c.cfg.AgentID,
 		Hostname:      c.cfg.Hostname,
@@ -30,7 +30,7 @@ func (c *CoreClient) SendHello() error {
 	if err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal hello", err)
 	}
-	if err := c.tr.WriteFrame(context.Background(), core.TypeHello, core.FlagControl, core.ChannelControl, payload); err != nil {
+	if err := c.tr.WriteFrame(ctx, core.TypeHello, core.FlagControl, core.ChannelControl, payload); err != nil {
 		return err
 	}
 	if err := c.sm.Transition(core.StateHelloSent); err != nil {
@@ -39,9 +39,9 @@ func (c *CoreClient) SendHello() error {
 	return nil
 }
 
-// RecvHelloAck 接收 HELLO_ACK，存储协商结果与 challenge nonce。
-func (c *CoreClient) RecvHelloAck() (*core.HelloAckMessage, error) {
-	f, err := c.tr.ReadFrame()
+// RecvHelloAck 接收 HELLO_ACK，存储协商结果与 challenge nonce。ctx 约束读超时/取消。
+func (c *CoreClient) RecvHelloAck(ctx context.Context) (*core.HelloAckMessage, error) {
+	f, err := c.tr.ReadFrame(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -87,8 +87,8 @@ func (c *CoreClient) getChallengeNonce() []byte {
 	return nil
 }
 
-// SendAuth 发送 AUTH（challenge-response）。
-func (c *CoreClient) SendAuth() error {
+// SendAuth 发送 AUTH（challenge-response）。ctx 约束写操作超时/取消。
+func (c *CoreClient) SendAuth(ctx context.Context) error {
 	challengeNonce := c.getChallengeNonce()
 	if len(challengeNonce) == 0 {
 		return core.NewError(core.NumAuth, core.CodeAuth, "server did not provide challenge_nonce in HELLO_ACK, cannot authenticate")
@@ -99,7 +99,7 @@ func (c *CoreClient) SendAuth() error {
 	if err != nil {
 		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal auth", err)
 	}
-	if err := c.tr.WriteFrame(context.Background(), core.TypeAuth, core.FlagControl, core.ChannelControl, payload); err != nil {
+	if err := c.tr.WriteFrame(ctx, core.TypeAuth, core.FlagControl, core.ChannelControl, payload); err != nil {
 		return err
 	}
 	if err := c.sm.Transition(core.StateAuthSent); err != nil {
@@ -125,9 +125,9 @@ func (c *CoreClient) buildAuthMessage() *corepb.AuthMessage {
 }
 
 // RecvAuthResult 接收 AUTH_OK / AUTH_FAIL。AUTH_OK 后调用 onAuthed 钩子（v1 binding
-// 用于 SetAuthed 开放 data stream 门禁；ntls binding 不设置此钩子）。
-func (c *CoreClient) RecvAuthResult() error {
-	f, err := c.tr.ReadFrame()
+// 用于 SetAuthed 开放 data stream 门禁；ntls binding 不设置此钩子）。ctx 约束读超时/取消。
+func (c *CoreClient) RecvAuthResult(ctx context.Context) error {
+	f, err := c.tr.ReadFrame(ctx)
 	if err != nil {
 		return err
 	}
