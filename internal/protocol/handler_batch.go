@@ -132,8 +132,14 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 	}
 	batchPayload, err := core.Open(env, hmacKey, aeadKey)
 	if err != nil {
-		slog.Debug("datagram open failed", "error", err)
-		h.config.Metrics.DecryptFailures().Inc()
+		// 区分 HMAC 失败与解密失败用于 metrics（与 processBatch 对齐），
+		// 避免 HMAC 篡改攻击信号被掩盖为解密失败。
+		if core.GetErrorCodeString(err) == core.CodeHMAC {
+			h.config.Metrics.HMACFailures().Inc()
+		} else {
+			slog.Debug("datagram open failed", "error", err)
+			h.config.Metrics.DecryptFailures().Inc()
+		}
 		return
 	}
 	var batchMsg corepb.DatagramMessage
@@ -264,8 +270,8 @@ func (h *CoreHandler) routeAndACK(ctx context.Context, agentID, chunkID string, 
 		}
 	}
 
+	// BatchesAcked 由 sendAck 内部统一计数，避免正常路径与 replay 路径(第 107 行)重复或遗漏。
 	h.sendAck(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), batchEvents, ackMode)
-	h.config.Metrics.BatchesAcked().Inc()
 }
 
 func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteResult, agentID, chunkID string, ackMode *corepb.AckMode) bool {

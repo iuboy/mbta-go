@@ -194,10 +194,12 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 			AgentID: agentID,
 			Expiry:  time.Unix(h.expiresAt.Load(), 0),
 		}); err != nil {
-			// session store 已满或已关闭：不阻塞 AUTH_OK，但记录告警便于运维定位。
-			slog.Warn("session store put failed", "error", err)
+			// session store 已满或已关闭：不阻塞 AUTH_OK，但不下发 ticket——
+			// 否则客户端保存后用于 0-RTT 恢复时会静默失败（store 找不到该 ticket）。
+			slog.Warn("session store put failed, disabling 0-RTT ticket", "error", err)
+		} else {
+			okMsg.SessionTicket = ticket
 		}
-		okMsg.SessionTicket = ticket
 	}
 	okPayload, err := core.Encode(okMsg)
 	if err != nil {
@@ -228,9 +230,12 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 				"leaderId":   info.LeaderID,
 			})
 			if err := SendControlFrame(ctx, h.tr, core.TypeRedirect, core.FlagControl, payload); err != nil {
-				// redirect 帧发送失败视为致命错误：AUTH_OK 已发但客户端未收到 redirect，
-				// 将在 follower 上发数据导致路由错误/数据丢失。返回 error 触发连接清理。
-				return core.WrapError(core.NumStream, core.CodeStream, "write redirect frame", err)
+				// redirect 帧发送失败为非致命：AUTH_OK 已发，客户端 session 有效，
+				// redirect 仅是 HA 路由指导（best-effort）。记录告警并返回 ErrRedirected
+				// 使 binding/server.go 的 errors.Is 判定为正常 HA 流程（Debug 级日志），
+				// 而非被当作普通 handler error 误记为 ERROR 级。
+				slog.Warn("send redirect frame failed", "error", err, "agent", core.SanitizeForLog(agentID))
+				return core.ErrRedirected
 			}
 			slog.Info("redirected client to leader", "agent", core.SanitizeForLog(agentID), "leader", info.LeaderAddr)
 			return core.ErrRedirected

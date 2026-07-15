@@ -106,6 +106,11 @@ func (t *quicTransport) RecvControlFrame(ctx context.Context) (core.Frame, error
 		return core.Frame{}, core.WrapError(core.NumStream, core.CodeStream, "set control read deadline", err)
 	}
 	defer func() { _ = t.controlStr.SetReadDeadline(time.Time{}) }()
+	// 二次检查 ctx 取消：缩小 ctx.Err() 检查与 SetReadDeadline 之间的 TOCTOU 窗口，
+	// 避免 ctx 在窗口内被取消后 Read 仍阻塞至 deadline（rolling restart 场景下影响显著）。
+	if err := ctx.Err(); err != nil {
+		return core.Frame{}, err
+	}
 	f, err := core.Read(t.controlStr, core.DefaultLimits())
 	if err != nil {
 		// ctx 取消与 SetReadDeadline 超时都会让 Read 返回错误；区分 ctx 取消以便上层处理。

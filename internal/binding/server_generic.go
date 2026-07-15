@@ -87,21 +87,25 @@ func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
 	// 确保异常退出（Listen 失败或 AcceptLoop 返回）时重置状态，允许后续 Run/重启。
 	defer func() {
 		// AcceptLoop 返回（含 ctx 取消的「正常」退出）后回到 stopped。
-		// 用 CAS running→stopped；若仍处于 starting（Listen 失败路径已单独处理）则跳过。
-		s.runState.CompareAndSwap(runStateRunning, runStateStopped)
+		// 优先 CAS running→stopped（正常退出路径）；若仍处于 starting（Listen panic
+		// 导致状态滞留）则兜底 Store stopped，保证任何退出路径都能恢复状态机。
+		if !s.runState.CompareAndSwap(runStateRunning, runStateStopped) {
+			s.runState.Store(runStateStopped)
+		}
 	}()
 
 	l, err := spec.Listen(ctx)
 	if err != nil {
-		// Listen 失败：重置 starting→stopped，允许重试。
+		// Listen 失败：重置 starting→stopped，允许重试（defer 也会兜底）。
 		s.runState.Store(runStateStopped)
 		return err
 	}
+	// listener 赋值与状态转换 runState=running 必须在同一锁内原子完成，
+	// 否则 Addr() 可能读到 starting 态返回空串、Close() CAS 失败导致 listener 泄漏。
 	s.mu.Lock()
 	s.listener = l
-	s.mu.Unlock()
-	// Listen 成功后进入 running（此时 AcceptLoop 即将阻塞运行）。
 	s.runState.Store(runStateRunning)
+	s.mu.Unlock()
 	slog.Info("MBTA server listening", "addr", spec.AddrOf(l))
 
 	// ctx 取消时关闭 listener：被 Accept 阻塞的循环因此解除并退出。

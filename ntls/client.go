@@ -128,7 +128,15 @@ func (c *Client) Connect(ctx context.Context) error {
 			if err != nil {
 				return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
 			}
+			// dial 回调内二次检查：消除「入口 c.conn==nil 检查」与「此处赋值」之间的
+			// TOCTOU 窗口——两个并发 Connect 可能同时通过入口检查，后者覆盖前者致 fd 泄漏。
 			c.mu.Lock()
+			if c.conn != nil {
+				// 另一个并发 Connect 已设置连接，关闭当前 conn 避免泄漏。
+				c.mu.Unlock()
+				_ = conn.Close()
+				return core.NewError(core.NumSession, core.CodeSession, "already connected (race)")
+			}
 			c.conn = conn
 			tr.conn = conn
 			c.mu.Unlock()
@@ -142,12 +150,15 @@ func (c *Client) Connect(ctx context.Context) error {
 		// postAuth: ntls 无 post-auth 工作
 		nil,
 	)
-	// 握手失败兜底：binding.Handshake 的 defer 已调用 cc.Close() 关闭 transport（含
-	// tr.conn），此处仅清理 c.conn 引用，不二次 Close（避免 net.Conn 双重关闭；
-	// 某些 TLCP wrapper 非幂等）。同步把 tr.conn 置 nil 防止悬挂引用。
+	// 握手失败兜底：binding.Handshake 的 defer 调用 cc.Close() 仅在 transport 已注册
+	// (setupTransport 成功) 时才关闭 tr.conn。若 dial 成功但 setupTransport 之前/之中失败，
+	// cc.Close() 不会关闭 c.conn，必须在此显式关闭以避免 fd 泄漏。
 	if err != nil {
 		c.mu.Lock()
-		c.conn = nil
+		if c.conn != nil {
+			_ = c.conn.Close()
+			c.conn = nil
+		}
 		tr.conn = nil
 		c.mu.Unlock()
 	}
