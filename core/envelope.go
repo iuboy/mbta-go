@@ -248,7 +248,7 @@ func compress(c corepb.Compression, src []byte) ([]byte, error) {
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip compress", err)
 		}
 		if err := w.Close(); err != nil {
-			_ = w.Close() // Close 失败意味着 writer 可能已损坏，不放回 pool（与 Write 错误路径一致）
+			// Close 失败：writer 可能已损坏，不放回 pool（与 Write 错误路径一致）。
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip close", err)
 		}
 		gzipWriterPool.Put(w)
@@ -267,7 +267,7 @@ func compress(c corepb.Compression, src []byte) ([]byte, error) {
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 compress", err)
 		}
 		if err := w.Close(); err != nil {
-			_ = w.Close() // Close 失败：writer 可能已损坏，不放回 pool（与 gzip 路径一致）
+			// Close 失败：writer 可能已损坏，不放回 pool（与 gzip 路径一致）。
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 close", err)
 		}
 		lz4WriterPool.Put(w)

@@ -75,7 +75,11 @@ func (c *CoreClient) RecvHelloAck(ctx context.Context) (*core.HelloAckMessage, e
 	if len(ack.GetChallengeNonce()) == 0 {
 		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server did not provide challenge_nonce in HELLO_ACK")
 	}
-	c.challengeNonce.Store(ack.GetChallengeNonce())
+	// 防御性拷贝：GetChallengeNonce 返回 proto 内部 slice 引用，直接 Store 会在
+	// proto 消息被复用/pool 化时被静默篡改，影响 HMAC 计算安全性。
+	nonce := make([]byte, len(ack.GetChallengeNonce()))
+	copy(nonce, ack.GetChallengeNonce())
+	c.challengeNonce.Store(nonce)
 
 	return &ack, nil
 }
@@ -184,7 +188,9 @@ func (c *CoreClient) RecvAuthResult(ctx context.Context) error {
 		// 客户端 MUST 用新挑战重算。更新本地 challengeNonce，供上层重试时
 		// buildAuthMessage 使用——旧 challenge 一次性，复用会使重放防护形同虚设。
 		if failMsg.GetRetryable() && len(failMsg.GetChallengeNonce()) > 0 {
-			c.challengeNonce.Store(failMsg.GetChallengeNonce())
+			nonce := make([]byte, len(failMsg.GetChallengeNonce()))
+			copy(nonce, failMsg.GetChallengeNonce())
+			c.challengeNonce.Store(nonce)
 		}
 		return core.NewError(core.NumAuth, core.CodeAuth, fmt.Sprintf("auth failed: %s (%s)", failMsg.GetReason(), failMsg.GetCode()))
 

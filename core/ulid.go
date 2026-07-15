@@ -45,8 +45,9 @@ func NewChunkID() ChunkID {
 					// 同纳秒内会产生相同 ChunkID，抗重放失效）。
 					slog.Error("crypto/rand unavailable, using weak timestamp-based ChunkID", "error", err)
 					now := uint64(time.Now().UnixNano())
-					// 低 8 字节：纳秒时间戳；高 8 字节：时间戳右移 + 启动单调计数器，
-					// 使两次调用即使同纳秒也尽量不同。
+					// 低 8 字节：纳秒时间戳；高 8 字节：时间戳按位取反。
+					// 同纳秒两次调用结果相同（此为极端降级路径，crypto/rand 不可用），
+					// 但高低 8 字节互补保证 16 字节整体有有效熵。
 					binary.LittleEndian.PutUint64(u[0:8], now)
 					binary.LittleEndian.PutUint64(u[8:16], ^now)
 				}

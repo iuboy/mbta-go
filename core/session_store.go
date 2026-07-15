@@ -181,11 +181,13 @@ func (s *SessionStore) Close() {
 		s.mu.Unlock()
 		return
 	}
+	// 先在锁内置 closed：消除「close(stopCh) 后、closed 置位前」的窗口，
+	// 否则 reaper 已退出但 Put 仍可写入永不被回收的条目。
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	s.closeOnce.Do(func() {
 		close(s.stopCh)
 	})
 	<-s.doneCh
-	s.mu.Lock()
-	s.closed = true
-	s.mu.Unlock()
 }

@@ -43,10 +43,10 @@ func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatc
 
 	// --- 锁外：无状态前置检查 + marshal SignalBatch ---
 	if c.sm.State() != core.StateReady {
-		return "", fmt.Errorf("not ready, state=%s", c.sm.State())
+		return "", core.NewError(core.NumSession, core.CodeSession, fmt.Sprintf("not ready, state=%s", c.sm.State()))
 	}
 	if c.throttle.Active() {
-		return "", fmt.Errorf("throttled, retry after %v", c.throttle.WaitDuration())
+		return "", core.NewError(core.NumThrottle, core.CodeThrottle, fmt.Sprintf("throttled, retry after %v", c.throttle.WaitDuration()))
 	}
 
 	batchJSON, err := core.MarshalSignalBatchCodec(c.codecForMarshal(), signalBatch)

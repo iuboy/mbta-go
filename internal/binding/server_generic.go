@@ -143,6 +143,10 @@ func (s *Server[L, C]) Addr(addrOf func(l L) net.Addr) string {
 // 用 CAS running→stopped 保证只有一个 Close 实际关闭 listener；并发 Close 或
 // 在 stopped 态调用直接返回 nil。Run 的 defer 也会 CAS running→stopped，与
 // Close 互斥（任一先执行完成关闭，另一者看到 stopped 返回 nil）。
+//
+// 注意：若在 starting 态调用 Close（listener 尚未就绪），Close 返回 nil 且
+// 不关闭任何资源，也不阻止 Run 继续执行。调用方应确保在 Run 返回后调用 Close，
+// 或通过 ctx 取消来终止运行中的 Run。
 func (s *Server[L, C]) Close(closeListener func(l L) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

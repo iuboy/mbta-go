@@ -189,6 +189,8 @@ func (c *CoreClient) waitGoroutines() {
 		case <-ch:
 			timer.Stop()
 		case <-timer.C:
+			// timer 已触发；Stop() 对已触发 timer 是安全 no-op，保持两分支对称。
+			timer.Stop()
 			slog.Warn("goroutine wait timeout, proceeding with close")
 		}
 	}

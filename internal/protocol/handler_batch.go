@@ -45,6 +45,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	if err != nil {
 		// 区分 HMAC 失败与解密失败用于 metrics。
 		if core.GetErrorCodeString(err) == core.CodeHMAC {
+			slog.Debug("envelope HMAC verification failed", "error", err)
 			h.config.Metrics.HMACFailures().Inc()
 			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "hmac_mismatch", "HMAC verification failed", false)
 		} else {

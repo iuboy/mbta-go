@@ -167,6 +167,10 @@ func (t *quicTransport) SendFrame(ctx context.Context, f core.Frame) error {
 // 旧实现无条件返回 true，若未来连接以 EnableDatagrams=false 建立，会误导上层使用
 // 不支持的 datagram 通道。
 func (t *quicTransport) SupportsDatagram() bool {
+	// 防御：连接尚未完全建立时返回 false（QC 可能在握手完成前为 nil）。
+	if t.conn == nil || t.conn.QC == nil {
+		return false
+	}
 	// SupportsDatagrams 是 {Local, Remote} 结构体：本端 + 对端都必须启用。
 	ds := t.conn.QC.ConnectionState().SupportsDatagrams
 	return ds.Local && ds.Remote

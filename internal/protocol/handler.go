@@ -102,11 +102,11 @@ func (h *CoreHandler) getSessionID() []byte {
 	return cp
 }
 
-// setSessionID 设置 sessionID（并发安全写入）。
+// setSessionID 设置 sessionID（并发安全写入，防御性拷贝与 getter 对称）。
 func (h *CoreHandler) setSessionID(id []byte) {
 	h.handshakeMu.Lock()
 	defer h.handshakeMu.Unlock()
-	h.sessionID = id
+	h.sessionID = append(h.sessionID[:0], id...)
 }
 
 // getChallengeNonce 返回 challengeNonce 的拷贝（并发安全读取）。
@@ -118,11 +118,11 @@ func (h *CoreHandler) getChallengeNonce() []byte {
 	return cp
 }
 
-// setChallengeNonce 设置 challengeNonce（并发安全写入）。
+// setChallengeNonce 设置 challengeNonce（并发安全写入，防御性拷贝与 getter 对称）。
 func (h *CoreHandler) setChallengeNonce(nonce []byte) {
 	h.handshakeMu.Lock()
 	defer h.handshakeMu.Unlock()
-	h.challengeNonce = nonce
+	h.challengeNonce = append(h.challengeNonce[:0], nonce...)
 }
 
 // NewCoreHandler 创建 handler。batchSem 容量按 Multiplexing 选（保留两套并发模型）。
@@ -191,7 +191,7 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 // cleanup 零化会话密钥。仅当 dataExited 为 true（所有 data goroutine 已退出）时执行，
 // 避免与存活的 processBatch goroutine 竞态读 keys。
 func (h *CoreHandler) cleanup(dataExited *bool) {
-	if !*dataExited {
+	if dataExited == nil || !*dataExited {
 		return
 	}
 	if k := h.keys.Load(); k != nil {
