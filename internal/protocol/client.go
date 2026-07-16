@@ -24,7 +24,11 @@ import (
 //   - ntls: 所有帧走 writeMu+单 conn。
 type ClientTransport interface {
 	// ReadFrame 阻塞读下一帧（HELLO_ACK / AUTH_OK / ACK / NACK / WINDOW / THROTTLE / PING / CLOSE）。
-	ReadFrame() (core.Frame, error)
+	//
+	// ctx 约束读操作：ctx 取消或超时使阻塞读返回 ctx.Err()，避免对端静默断开时
+	// 读永久阻塞（goroutine 泄漏）。实现应通过 SetReadDeadline 将 ctx.Deadline()
+	// 绑定到底层连接（QUIC stream / net.Conn）。
+	ReadFrame(ctx context.Context) (core.Frame, error)
 
 	// WriteFrame 写一帧。ctx 仅约束 data 通道（ChannelData）的写超时；
 	// control 通道（ChannelControl）调用方通常传 context.Background()。
@@ -81,12 +85,15 @@ type CoreClient struct {
 	metrics core.Metrics
 	sm      *core.StateMachine
 
-	// 协商结果与密钥（握手后填充）
-	negotiated     *core.NegotiateResult
-	keys           *core.SessionKeys
-	sessionID      []byte
-	challengeNonce []byte    // server challenge from HELLO_ACK
-	expiresAt      time.Time // 会话过期时间，从 AUTH_OK 获取
+	// 协商结果与密钥（握手后填充）。原子化以消除锁外读 / 握手写的数据竞争
+	// （与 CoreHandler 的 negotiated/keys 对齐）。
+	negotiated atomic.Pointer[core.NegotiateResult]
+	keys       atomic.Pointer[core.SessionKeys]
+	// sessionID / challengeNonce 在 Connect 单线程路径写，后台 goroutine 可能读，
+	// 用 atomic.Value（Pointer 不支持 []byte）保证可见性。
+	sessionID      atomic.Value // []byte
+	challengeNonce atomic.Value // []byte
+	expiresAt      time.Time    // 会话过期时间，从 AUTH_OK 获取
 
 	// 发送追踪
 	seq      *core.SeqGenerator
@@ -165,26 +172,35 @@ func NewCoreClient(tr ClientTransport, cfg CoreClientConfig) *CoreClient {
 	}
 }
 
-// waitGoroutines 等待所有后台 goroutine 退出或超时（5s），防止 Close 无限挂起。
+// waitGoroutines 等待所有后台 goroutine 退出或超时（每个 goroutine 独立 5s 预算），
+// 防止 Close 无限挂起。
+//
+// 旧实现共享单个 5s timer：若第一个 goroutine 耗尽预算，剩余 goroutine 不会被等待，
+// 导致 close() 后续清理（pendingAcks 清零、keys 零化）与存活 goroutine 竞态。
+// 改为每个通道独立 timer，避免单 goroutine 拖垮整体。
 func (c *CoreClient) waitGoroutines() {
 	const waitTimeout = 5 * time.Second
-	deadline := time.NewTimer(waitTimeout)
-	defer deadline.Stop()
 	for _, ch := range []<-chan struct{}{c.ackDone, c.reaperDone, c.heartbeatDone, c.ackWorkerDone} {
 		if ch == nil {
 			continue // 防御：未初始化的 channel 跳过（从 nil channel 接收会永久阻塞）
 		}
+		timer := time.NewTimer(waitTimeout)
 		select {
 		case <-ch:
-		case <-deadline.C:
+			timer.Stop()
+		case <-timer.C:
+			// timer 已触发；Stop() 对已触发 timer 是安全 no-op，保持两分支对称。
+			timer.Stop()
 			slog.Warn("goroutine wait timeout, proceeding with close")
-			return
 		}
 	}
 }
 
 // Close sends a CLOSE frame, drains pending ACKs, and shuts down.
 // Idempotent: subsequent calls return the error from the first close.
+//
+// sync.Once.Do 提供 happens-before 保证：Do 返回后，f() 中的所有写（含 connErr 赋值）
+// 对所有调用 Do 的 goroutine 可见，故此处 Do 外读 connErr 是安全的。
 func (c *CoreClient) Close() error {
 	c.closeOnce.Do(c.close)
 	return c.connErr
@@ -247,9 +263,9 @@ func (c *CoreClient) close() {
 	// 8. 清零密钥（sendMu 保证无并发 SendBatch 读取）。
 	c.sendMu.Lock()
 	c.inflight.Reset()
-	if c.keys != nil {
-		c.keys.Zero()
-		c.keys = nil
+	if k := c.keys.Load(); k != nil {
+		k.Zero()
+		c.keys.Store(nil)
 	}
 	c.sendMu.Unlock()
 }
@@ -259,12 +275,21 @@ func (c *CoreClient) State() core.State {
 	return c.sm.State()
 }
 
+// getSessionID 返回 sessionID 字节（atomic.Value 内为 []byte，nil 安全）。
+func (c *CoreClient) getSessionID() []byte {
+	if v := c.sessionID.Load(); v != nil {
+		return v.([]byte)
+	}
+	return nil
+}
+
 // SessionID 返回握手后分配的会话 ID（十六进制）。
 func (c *CoreClient) SessionID() string {
-	if len(c.sessionID) == 0 {
+	sid := c.getSessionID()
+	if len(sid) == 0 {
 		return ""
 	}
-	if cid, err := core.ChunkIDFromBytes(c.sessionID); err == nil {
+	if cid, err := core.ChunkIDFromBytes(sid); err == nil {
 		return cid.String()
 	}
 	return ""
@@ -325,7 +350,7 @@ func (c *CoreClient) SetTransport(tr ClientTransport) {
 
 // SetSessionID 设置握手后分配的会话 ID。
 func (c *CoreClient) SetSessionID(id []byte) {
-	c.sessionID = id
+	c.sessionID.Store(id)
 }
 
 // UpdateWindow 更新流控窗口（从 HELLO_ACK 的 initial_window）。

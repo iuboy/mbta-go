@@ -130,11 +130,22 @@ type SessionKeys struct {
 	aeadKey     []byte // len = AEADKeyLen(cs)：intl=32 AES-256, gm=16 SM4
 }
 
-// HMACKey 返回 HMAC 密钥的只读 view。调用方不应修改返回的 slice。
-func (k *SessionKeys) HMACKey() []byte { return k.hmacKey }
+// HMACKey 返回 HMAC 密钥的拷贝。
+//
+// 返回拷贝（而非内部切片引用）以防止调用方意外修改密钥材料破坏会话密钥，
+// 并保证 Zero() 能彻底清除所有副本（旧实现返回引用，外部副本无法被 Zero 清除）。
+func (k *SessionKeys) HMACKey() []byte {
+	cp := make([]byte, len(k.hmacKey))
+	copy(cp, k.hmacKey)
+	return cp
+}
 
-// AEADKey 返回 AEAD 密钥的只读 view。调用方不应修改返回的 slice。
-func (k *SessionKeys) AEADKey() []byte { return k.aeadKey }
+// AEADKey 返回 AEAD 密钥的拷贝。语义同 HMACKey，防御性拷贝。
+func (k *SessionKeys) AEADKey() []byte {
+	cp := make([]byte, len(k.aeadKey))
+	copy(cp, k.aeadKey)
+	return cp
+}
 
 // SetAEADKey 设置 AEAD 密钥（用于 AUTH_OK 后从服务端响应更新）。
 // 防御性拷贝：key 可能来自 protobuf getter（返回底层切片引用），

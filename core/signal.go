@@ -113,6 +113,11 @@ func validateSignalType(i int, s *SignalRecord) error {
 		if s.TraceID == "" {
 			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: trace_id is required for span type", i))
 		}
+		// W3C Trace Context：span 必须同时具备 trace_id 和 span_id 才构成合法 span。
+		// validateHexID 对空串放行（视为「不参与 trace」），故此处对 span 类型显式要求非空。
+		if s.SpanID == "" {
+			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: span_id is required for span type", i))
+		}
 	case SignalTypeLog:
 		if s.Body == nil {
 			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: body is required for log type", i))

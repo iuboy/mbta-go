@@ -25,32 +25,34 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 		return
 	}
 
-	// Verify HMAC（在解密/解码前）。keys 经 atomic 读取，避免与 handleAuth 颁发新 keys 竞态（0-RTT）。
+	// Open envelope（强制 HMAC 校验 + 解密 + 解压）。
+	// keys 经 atomic 读取，避免与 handleAuth 颁发新 keys 竞态（0-RTT）。
+	// Open 内部在解密前执行 VerifyMAC（core spec §5.1），HMAC 失败立即返回错误，
+	// 杜绝调用方遗漏 VerifyMAC 的安全绕过。
 	keys := h.keys.Load()
+	var hmacKey, aeadKey []byte
 	if keys != nil {
-		ok, verr := core.VerifyMAC(keys.HMACKey(), env)
-		if verr != nil || !ok {
-			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "hmac_mismatch", "HMAC verification failed", false)
-			h.config.Metrics.HMACFailures().Inc()
-			return
-		}
+		hmacKey = keys.HMACKey()
+		aeadKey = keys.AEADKey()
 	}
 
-	// 算法一致性复核（依据权威协商结果）。
+	// 算法一致性复核（依据权威协商结果），在 Open 之前。
 	if h.verifyEnvelopeAlgo(env) {
 		return
 	}
 
-	// Open envelope（解密+解压）。
-	var aeadKey []byte
-	if keys != nil {
-		aeadKey = keys.AEADKey()
-	}
-	batchPayload, err := core.Open(env, aeadKey)
+	batchPayload, err := core.Open(env, hmacKey, aeadKey)
 	if err != nil {
-		slog.Debug("envelope open failed", "error", err)
-		h.config.Metrics.DecryptFailures().Inc()
-		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "envelope_open_error", "envelope could not be opened", true)
+		// 区分 HMAC 失败与解密失败用于 metrics。
+		if core.GetErrorCodeString(err) == core.CodeHMAC {
+			slog.Debug("envelope HMAC verification failed", "error", err)
+			h.config.Metrics.HMACFailures().Inc()
+			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "hmac_mismatch", "HMAC verification failed", false)
+		} else {
+			slog.Debug("envelope open failed", "error", err)
+			h.config.Metrics.DecryptFailures().Inc()
+			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "envelope_open_error", "envelope could not be opened", true)
+		}
 		return
 	}
 	if len(batchPayload) > maxBatchBytes {
@@ -96,7 +98,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	h.inflight.Add(batchEvents, batchBytes)
 
 	// Replay 去重。
-	if existing := h.replay.SeenOrAdd(h.agentID, chunkIDText); existing != nil {
+	if existing := h.replay.SeenOrAdd(h.getAgentID(), chunkIDText); existing != nil {
 		h.config.Metrics.ReplayCacheHits().Inc()
 		h.inflight.Remove(batchEvents, batchBytes)
 		ackMode := corepb.AckMode_ACK_MODE_ACCEPTED
@@ -107,8 +109,8 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 		return
 	}
 
-	h.replay.Update(h.agentID, chunkIDText, core.ReplayAccepted)
-	h.routeAndACK(ctx, h.agentID, chunkIDText, &batchMsg, signalBatchPtr, batchEvents, batchBytes)
+	h.replay.Update(h.getAgentID(), chunkIDText, core.ReplayAccepted)
+	h.routeAndACK(ctx, h.getAgentID(), chunkIDText, &batchMsg, signalBatchPtr, batchEvents, batchBytes)
 }
 
 // processDatagram 处理 unreliable DATAGRAM：at-most-once，无 ACK/spool（core spec §11.4）。
@@ -120,25 +122,26 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 	}
 	// session 过期检查：与 processBatch 一致，过期会话的 datagram 不应再被处理。
 	if h.expiresAt.Load() > 0 && time.Now().Unix() > h.expiresAt.Load() {
-		slog.Debug("datagram rejected: session expired", "session", string(h.sessionID))
+		slog.Debug("datagram rejected: session expired", "session", string(h.getSessionID()))
 		return
 	}
 	keys := h.keys.Load()
+	var hmacKey, aeadKey []byte
 	if keys != nil {
-		ok, _ := core.VerifyMAC(keys.HMACKey(), env)
-		if !ok {
-			slog.Debug("datagram hmac failed")
-			return // HMAC 失败静默丢弃
-		}
-	}
-	var aeadKey []byte
-	if keys != nil {
+		hmacKey = keys.HMACKey()
 		aeadKey = keys.AEADKey()
 	}
-	batchPayload, err := core.Open(env, aeadKey)
+	batchPayload, err := core.Open(env, hmacKey, aeadKey)
 	if err != nil {
-		slog.Debug("datagram open failed", "error", err)
-		h.config.Metrics.DecryptFailures().Inc()
+		// 区分 HMAC 失败与解密失败用于 metrics（与 processBatch 对齐），
+		// 避免 HMAC 篡改攻击信号被掩盖为解密失败。
+		if core.GetErrorCodeString(err) == core.CodeHMAC {
+			slog.Debug("datagram HMAC verification failed", "error", err)
+			h.config.Metrics.HMACFailures().Inc()
+		} else {
+			slog.Debug("datagram open failed", "error", err)
+			h.config.Metrics.DecryptFailures().Inc()
+		}
 		return
 	}
 	var batchMsg corepb.DatagramMessage
@@ -150,7 +153,7 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 	if h.config.Sink != nil {
 		if rawSink, ok := h.config.Sink.(core.RawEventSink); ok {
 			slog.Debug("datagram delivering to raw sink", "events", batchMsg.GetEventsCount())
-			_, _ = rawSink.OnRawBatch(ctx, h.agentID, int(batchMsg.GetEventsCount()), batchMsg.GetBatch())
+			_, _ = rawSink.OnRawBatch(ctx, h.getAgentID(), int(batchMsg.GetEventsCount()), batchMsg.GetBatch())
 		} else {
 			slog.Debug("datagram sink is not RawEventSink")
 		}
@@ -247,30 +250,30 @@ func (h *CoreHandler) routeAndACK(ctx context.Context, agentID, chunkID string, 
 
 	if h.config.Sink != nil {
 		if rawSink, ok := h.config.Sink.(core.RawEventSink); ok && signalBatch == nil {
-			result, err := rawSink.OnRawBatch(ctx, h.agentID, batchEvents, batchMsg.GetBatch())
+			result, err := rawSink.OnRawBatch(ctx, h.getAgentID(), batchEvents, batchMsg.GetBatch())
 			if err != nil {
 				slog.Warn("raw routing failed", "error", err)
 			} else if h.applyRouteResult(ctx, result, agentID, chunkID, &ackMode) {
 				return
 			}
 		} else if durable, ok := h.config.Sink.(core.DurableEventSink); ok {
-			result, err := durable.OnSignalBatchWithResult(ctx, h.agentID, signalBatch)
+			result, err := durable.OnSignalBatchWithResult(ctx, h.getAgentID(), signalBatch)
 			if err != nil {
 				slog.Warn("durable routing failed", "error", err)
 			} else if h.applyRouteResult(ctx, result, agentID, chunkID, &ackMode) {
 				return
 			}
 		} else {
-			if err := h.config.Sink.OnSignalBatch(ctx, h.agentID, signalBatch); err != nil {
+			if err := h.config.Sink.OnSignalBatch(ctx, h.getAgentID(), signalBatch); err != nil {
 				slog.Warn("event routing failed", "error", err)
 			}
-			pressure := h.config.Sink.OnPressure(h.agentID)
+			pressure := h.config.Sink.OnPressure(h.getAgentID())
 			h.applyPressure(ctx, pressure)
 		}
 	}
 
+	// BatchesAcked 由 sendAck 内部统一计数，避免正常路径与 replay 路径(第 107 行)重复或遗漏。
 	h.sendAck(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), batchEvents, ackMode)
-	h.config.Metrics.BatchesAcked().Inc()
 }
 
 func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteResult, agentID, chunkID string, ackMode *corepb.AckMode) bool {

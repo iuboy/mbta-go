@@ -31,7 +31,8 @@ func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatc
 	// 与协议「未协商 stable capability 不允许静默吞掉」惯例一致）。negotiated==nil 时
 	// IsCapabilitySelected 返回 false → 报错（保守正确：握手前不应发送）。
 	if sc.TraceContext != nil {
-		if !c.negotiated.IsCapabilitySelected(core.CapW3CTraceContext) {
+		n := c.negotiated.Load()
+		if n == nil || !n.IsCapabilitySelected(core.CapW3CTraceContext) {
 			return "", core.NewError(core.NumBatch, core.CodeBatch,
 				"trace_context requires negotiated w3c_trace_context capability")
 		}
@@ -42,10 +43,10 @@ func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatc
 
 	// --- 锁外：无状态前置检查 + marshal SignalBatch ---
 	if c.sm.State() != core.StateReady {
-		return "", fmt.Errorf("not ready, state=%s", c.sm.State())
+		return "", core.NewError(core.NumSession, core.CodeSession, fmt.Sprintf("not ready, state=%s", c.sm.State()))
 	}
 	if c.throttle.Active() {
-		return "", fmt.Errorf("throttled, retry after %v", c.throttle.WaitDuration())
+		return "", core.NewError(core.NumThrottle, core.CodeThrottle, fmt.Sprintf("throttled, retry after %v", c.throttle.WaitDuration()))
 	}
 
 	batchJSON, err := core.MarshalSignalBatchCodec(c.codecForMarshal(), signalBatch)
@@ -83,6 +84,16 @@ func (c *CoreClient) SendBatch(ctx context.Context, signalBatch *core.SignalBatc
 func (c *CoreClient) reserveInflight(tag, source string, batchJSON []byte, batchEvents int, traceContext *corepb.TraceContext) (uint64, core.ChunkID, []byte, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
+
+	// TOCTOU 防护：SendBatch 在锁外已检查 state/throttle，但 marshal 期间状态可能变化
+	// （连接断开 → state 非 Ready，或服务端下发 THROTTLE）。加锁后必须重新检查，
+	// 否则 batch 仍会被登记到 inflight/pending 并发送，违反状态机约束或逃过节流。
+	if c.sm.State() != core.StateReady {
+		return 0, core.ChunkID{}, nil, core.NewError(core.NumSession, core.CodeSession, "client not ready")
+	}
+	if c.throttle.Active() {
+		return 0, core.ChunkID{}, nil, core.NewError(core.NumThrottle, core.CodeThrottle, "throttled")
+	}
 
 	seq := c.seq.Next()
 	chunkID := core.NewChunkID()
@@ -122,8 +133,8 @@ func (c *CoreClient) reserveInflight(tag, source string, batchJSON []byte, batch
 // codecForMarshal 返回当前应使用的 SignalBatch 编码 codec：优先协商结果，
 // 否则回退到 binding 注入的 cfg.DefaultCodec。
 func (c *CoreClient) codecForMarshal() corepb.Codec {
-	if c.negotiated != nil {
-		return c.negotiated.Codec
+	if n := c.negotiated.Load(); n != nil {
+		return n.Codec
 	}
 	return c.cfg.DefaultCodec
 }
@@ -134,13 +145,13 @@ func (c *CoreClient) buildAndSend(ctx context.Context, seq uint64, chunkID core.
 	cs := c.cfg.DefaultCipherSuite
 	codec := c.cfg.DefaultCodec
 	comp := c.cfg.DefaultCompression
-	if c.negotiated != nil {
-		cs = c.negotiated.CipherSuite
-		codec = c.negotiated.Codec
-		comp = c.negotiated.Compression
+	if n := c.negotiated.Load(); n != nil {
+		cs = n.CipherSuite
+		codec = n.Codec
+		comp = n.Compression
 	}
 	params := core.BuildParams{
-		SessionID:    c.sessionID,
+		SessionID:    c.getSessionID(),
 		Seq:          seq,
 		ChunkID:      chunkID,
 		Codec:        codec,
@@ -149,10 +160,10 @@ func (c *CoreClient) buildAndSend(ctx context.Context, seq uint64, chunkID core.
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
 	}
-	if c.keys != nil {
-		params.KeyID = c.keys.KeyID
-		params.HMACKey = c.keys.HMACKey()
-		params.AEADKey = c.keys.AEADKey()
+	if k := c.keys.Load(); k != nil {
+		params.KeyID = k.KeyID
+		params.HMACKey = k.HMACKey()
+		params.AEADKey = k.AEADKey()
 	}
 	params.BatchPayload = batchPayload
 	env, err := core.Build(params)

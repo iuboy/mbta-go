@@ -64,16 +64,20 @@ func (s State) String() string {
 }
 
 // validTransitions defines which state can transition to which.
+//
+// StateClosed → StateDisconnected：允许客户端在握手失败/连接终止后重置回初始态，
+// 以便重新 Connect（旧实现 StateClosed 无出边，导致握手失败后无法重连）。
+// StateAuthSent 自环：允许 AUTH_FAIL(retryable) 后重试 SendAuth 而无需回退状态。
 var validTransitions = map[State][]State{
 	StateDisconnected:      {StateConnecting},
 	StateConnecting:        {StateControlStreamOpen, StateDisconnected},
 	StateControlStreamOpen: {StateHelloSent, StateDisconnected},
 	StateHelloSent:         {StateHelloAcked, StateDisconnected},
 	StateHelloAcked:        {StateAuthSent, StateDisconnected},
-	StateAuthSent:          {StateReady, StateDisconnected},
+	StateAuthSent:          {StateReady, StateDisconnected, StateAuthSent},
 	StateReady:             {StateDraining, StateClosed, StateDisconnected},
 	StateDraining:          {StateClosed},
-	StateClosed:            {},
+	StateClosed:            {StateDisconnected},
 }
 
 // ServerState represents the server-side session state.

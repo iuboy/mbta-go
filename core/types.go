@@ -42,7 +42,7 @@ const (
 
 	FlagControlDataMask byte = 0x06 // Control 与 Data 互斥校验
 	FlagFlowClassMask   byte = 0xC0
-	FlagFlowClassShift       = 6
+	FlagFlowClassShift  byte = 6
 
 	// FlowClass 取值（占 bit6–7）。值 3（reserved）MUST 拒绝。
 	FlowClassNormal     byte = 0x00 << FlagFlowClassShift
@@ -51,11 +51,11 @@ const (
 	FlowClassReserved   byte = 0x03 << FlagFlowClassShift
 )
 
-// FlowClassOf 从 flags 提取 FlowClass（返回 0/1/2；3 为 reserved，由 ValidateFlags 拒绝）。
+// FlowClassOf 从 flags 提取 FlowClass（返回 0/1/2/3；3 为 reserved，
+// 调用方应在跳过 ValidateFlags 的场景自行拒绝返回值 3）。
 func FlowClassOf(flags byte) byte { return (flags & FlagFlowClassMask) >> FlagFlowClassShift }
 
 // Stream roles.
-// r2 capability 标识与算法枚举由 corepb（proto enum）与 core/capability.go（registry）承载，
 const (
 	StreamRoleControl = "control"
 	StreamRoleData    = "data"

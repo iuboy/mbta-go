@@ -35,9 +35,29 @@ type ntlsClientTransport struct {
 	writeMu sync.Mutex
 }
 
-func (t *ntlsClientTransport) ReadFrame() (core.Frame, error) {
-	return core.Read(t.conn, core.DefaultLimits())
+func (t *ntlsClientTransport) ReadFrame(ctx context.Context) (core.Frame, error) {
+	// ctx 感知读：通过 SetReadDeadline 让 ctx 取消/超时能中断阻塞读，
+	// 避免对端静默断开（TCP 无 RST，仅静默丢包）时 control loop 永久阻塞。
+	if err := ctx.Err(); err != nil {
+		return core.Frame{}, err
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(ntlsReadDefaultTimeout)
+	}
+	if err := t.conn.SetReadDeadline(dl); err != nil {
+		return core.Frame{}, core.WrapError(core.NumStream, core.CodeStream, "set read deadline", err)
+	}
+	defer func() { _ = t.conn.SetReadDeadline(time.Time{}) }()
+	f, err := core.Read(t.conn, core.DefaultLimits())
+	if err != nil && ctx.Err() != nil {
+		return core.Frame{}, ctx.Err()
+	}
+	return f, err
 }
+
+// ntlsReadDefaultTimeout 是 NTLS control 读在 ctx 无 deadline 时的默认上限。
+const ntlsReadDefaultTimeout = 5 * time.Minute
 
 // WriteFrame 写一帧。data 通道（ChannelData）受 ctx 约束（设 SetWriteDeadline），
 // control 通道（ChannelControl）调用方传 context.Background() 不受超时约束。
@@ -92,7 +112,18 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // ctx 仅控制握手阶段（Dial、HELLO/AUTH）的超时与取消。握手成功后，后台 goroutine
 // 运行在独立的 lifecycle ctx 上，不随 ctx 取消而退出；client 生命周期由 Close() 终结。
 func (c *Client) Connect(ctx context.Context) error {
+	// 防重复 Connect：已连接/连接中时拒绝，避免旧连接泄漏（fd 泄漏 + transport 覆盖）。
+	c.mu.Lock()
+	if c.conn != nil {
+		c.mu.Unlock()
+		return core.NewError(core.NumSession, core.CodeSession, "already connected")
+	}
+	c.mu.Unlock()
+
 	tr := &ntlsClientTransport{}
+	// connSet 标记本协程是否实际设置了 c.conn。并发 Connect 时，失败协程必须仅关闭
+	// 自己设置的连接——若用 c.conn != nil 判断会错误关闭胜出协程的连接。
+	var connSet bool
 	err := binding.Handshake(ctx, c.core,
 		// dial: 建立 TCP（TLCP/TLS1.3）连接
 		func(ctx context.Context) error {
@@ -100,9 +131,18 @@ func (c *Client) Connect(ctx context.Context) error {
 			if err != nil {
 				return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
 			}
+			// dial 回调内二次检查：消除「入口 c.conn==nil 检查」与「此处赋值」之间的
+			// TOCTOU 窗口——两个并发 Connect 可能同时通过入口检查，后者覆盖前者致 fd 泄漏。
 			c.mu.Lock()
+			if c.conn != nil {
+				// 另一个并发 Connect 已设置连接，关闭当前 conn 避免泄漏。
+				c.mu.Unlock()
+				_ = conn.Close()
+				return core.NewError(core.NumSession, core.CodeSession, "already connected (race)")
+			}
 			c.conn = conn
 			tr.conn = conn
+			connSet = true
 			c.mu.Unlock()
 			return nil
 		},
@@ -114,13 +154,17 @@ func (c *Client) Connect(ctx context.Context) error {
 		// postAuth: ntls 无 post-auth 工作
 		nil,
 	)
-	// 握手失败兜底：确保 TCP 连接被关闭，避免 fd 泄漏。
+	// 握手失败兜底：binding.Handshake 的 defer 调用 cc.Close() 仅在 transport 已注册
+	// (setupTransport 成功) 时才关闭 tr.conn。若 dial 成功但 setupTransport 之前/之中失败，
+	// cc.Close() 不会关闭 c.conn，必须在此显式关闭以避免 fd 泄漏。
+	// 仅当本协程设置了 c.conn 时才关闭——并发竞态中失败协程不能关闭胜出协程的连接。
 	if err != nil {
 		c.mu.Lock()
-		if c.conn != nil {
+		if connSet {
 			_ = c.conn.Close()
 			c.conn = nil
 		}
+		tr.conn = nil
 		c.mu.Unlock()
 	}
 	return err

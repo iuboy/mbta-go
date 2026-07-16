@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -24,10 +25,16 @@ func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 		default:
 		}
 
-		f, err := c.tr.ReadFrame()
+		f, err := c.tr.ReadFrame(ctx)
 		if err != nil {
+			// 区分临时错误（EAGAIN/EINTR 等可恢复）与致命错误（连接关闭/EOF）。
+			// 临时错误继续循环，仅致命错误退出，避免网络抖动不必要地终止控制帧处理。
+			if isTemporaryError(err) && ctx.Err() == nil {
+				slog.Debug("control loop temporary read error, continuing", "error", err)
+				continue
+			}
 			if ctx.Err() == nil {
-				slog.Warn("control loop read error", "error", err)
+				slog.Warn("control loop read error, exiting", "error", err)
 			}
 			return
 		}
@@ -72,7 +79,13 @@ func (c *CoreClient) handleAck(payload []byte) {
 		return
 	}
 
-	chunkID := ulidText(ack.GetChunkId())
+	chunkID, valid := ulidText(ack.GetChunkId())
+	if !valid {
+		// chunk_id 非 ULID：服务端返回了无法解析的 chunk_id，pendingAcks 无法匹配，
+		// 记录告警便于定位（不递减 pendingCount，避免与 pendingAcks 不一致）。
+		slog.Warn("ack chunk_id not valid ULID, cannot match pending batch", "len", len(ack.GetChunkId()))
+		return
+	}
 	if val, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
 		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
@@ -95,7 +108,11 @@ func (c *CoreClient) handleNack(payload []byte) {
 		return
 	}
 
-	chunkID := ulidText(nack.GetChunkId())
+	chunkID, valid := ulidText(nack.GetChunkId())
+	if !valid {
+		slog.Warn("nack chunk_id not valid ULID, cannot match pending batch", "len", len(nack.GetChunkId()))
+		return
+	}
 	if val, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
 		c.pendingCount.Add(-1)
 		if pb, ok := val.(*pendingBatch); ok {
@@ -187,9 +204,22 @@ func ackModeString(m corepb.AckMode) string {
 }
 
 // ulidText 把 wire chunk_id（ULID 16B）转为文本，匹配 pendingAcks key。
-func ulidText(chunkID []byte) string {
+// 第二个返回值 ok 表示 chunk_id 是否为合法 ULID；ok=false 时调用方不应调整 pendingCount
+// （fallback 字符串与存储 key 不匹配，LoadAndDelete 必返回 ok=false），
+// 避免 pendingCount 持续正向漂移与 pendingAcks 条目泄漏。
+func ulidText(chunkID []byte) (text string, ok bool) {
 	if c, err := core.ChunkIDFromBytes(chunkID); err == nil {
-		return c.String()
+		return c.String(), true
 	}
-	return string(chunkID)
+	return string(chunkID), false
+}
+
+// isTemporaryError 报告错误是否为可恢复的临时 I/O 错误（如 EAGAIN/EINTR）。
+// 对此类错误应继续循环而非终止控制帧读取。
+func isTemporaryError(err error) bool {
+	var ne interface{ Temporary() bool }
+	if errors.As(err, &ne) {
+		return ne.Temporary()
+	}
+	return false
 }

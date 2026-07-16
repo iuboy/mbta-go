@@ -1,5 +1,9 @@
 package core
 
+import (
+	"google.golang.org/protobuf/proto"
+)
+
 // SendConfig 承载 per-call 发送选项，是变参 SendOption 的聚合目标。
 // 仅含可选字段，零值即「不启用任何选项」，与不传 opts 的旧行为完全一致。
 type SendConfig struct {
@@ -24,7 +28,16 @@ type SendOption func(*SendConfig)
 //
 // 需对端握手协商 w3c_trace_context，否则发送端在门控阶段显式报错（不静默丢弃）。
 func WithTraceContext(tc *TraceContext) SendOption {
-	return func(sc *SendConfig) { sc.TraceContext = tc }
+	// 防御性拷贝：TraceContext 经 ApplySendOptions → SendBatch → reserveInflight 最终
+	// 设到 BatchMessage.TraceContext（protobuf 字段）。在 QUIC streams/goroutines 高并发
+	// 环境下，若共享调用方的指针，调用方并发修改字段会造成 data race 与语义错误。
+	return func(sc *SendConfig) {
+		if tc == nil {
+			sc.TraceContext = nil
+			return
+		}
+		sc.TraceContext = proto.Clone(tc).(*TraceContext)
+	}
 }
 
 // ApplySendOptions 聚合变参为 SendConfig，供各发送层统一解析。

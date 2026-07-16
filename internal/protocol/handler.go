@@ -60,13 +60,16 @@ type CoreHandler struct {
 	window     *core.Window
 	inflight   *core.Inflight
 
+	// 握手字段：controlLoop（handleHello/handleAuth）写，dataLoop/processBatch（0-RTT）读。
+	// 用 handshakeMu 保护，避免 0-RTT 场景下 agentID/sessionID 的数据竞争。
 	agentID        string
 	sessionID      []byte
 	challengeNonce []byte
 	authAttempts   int
+	handshakeMu    sync.RWMutex
 	expiresAt      atomic.Int64
 	closeTimeout   time.Duration // 优雅关闭 drain 超时（从 CloseMessage.close_timeout_ms 协商，默认 5s）
-	earlyData      bool          // 0-RTT resumption：HELLO 恢复 keys 后置位，dataLoop early 启动
+	earlyData      atomic.Bool   // 0-RTT resumption：HELLO 恢复 keys 后置位，dataLoop early 启动
 	lastPressure   atomic.Value
 	pressureMu     sync.Mutex // 保护 lastPressure 的"比较-更新-下发"序列（§9.2 避免同值重复 WINDOW）
 
@@ -74,6 +77,52 @@ type CoreHandler struct {
 	dataWG         sync.WaitGroup     // 跟踪 data frame 处理 goroutine
 	batchSem       chan struct{}      // data frame 并发上限（QUIC=64 / TCP=8）
 	cancelDataLoop context.CancelFunc // 取消 dataLoop 派生 context，使 processBatch 尽快退出
+}
+
+// getAgentID 返回当前 agentID（并发安全读取，供 processBatch 等读路径使用）。
+func (h *CoreHandler) getAgentID() string {
+	h.handshakeMu.RLock()
+	defer h.handshakeMu.RUnlock()
+	return h.agentID
+}
+
+// setAgentID 设置 agentID（并发安全写入，供 controlLoop 握手写路径使用）。
+func (h *CoreHandler) setAgentID(id string) {
+	h.handshakeMu.Lock()
+	defer h.handshakeMu.Unlock()
+	h.agentID = id
+}
+
+// getSessionID 返回 sessionID 的拷贝（并发安全读取）。
+func (h *CoreHandler) getSessionID() []byte {
+	h.handshakeMu.RLock()
+	defer h.handshakeMu.RUnlock()
+	cp := make([]byte, len(h.sessionID))
+	copy(cp, h.sessionID)
+	return cp
+}
+
+// setSessionID 设置 sessionID（并发安全写入，防御性拷贝与 getter 对称）。
+func (h *CoreHandler) setSessionID(id []byte) {
+	h.handshakeMu.Lock()
+	defer h.handshakeMu.Unlock()
+	h.sessionID = append(h.sessionID[:0], id...)
+}
+
+// getChallengeNonce 返回 challengeNonce 的拷贝（并发安全读取）。
+func (h *CoreHandler) getChallengeNonce() []byte {
+	h.handshakeMu.RLock()
+	defer h.handshakeMu.RUnlock()
+	cp := make([]byte, len(h.challengeNonce))
+	copy(cp, h.challengeNonce)
+	return cp
+}
+
+// setChallengeNonce 设置 challengeNonce（并发安全写入，防御性拷贝与 getter 对称）。
+func (h *CoreHandler) setChallengeNonce(nonce []byte) {
+	h.handshakeMu.Lock()
+	defer h.handshakeMu.Unlock()
+	h.challengeNonce = append(h.challengeNonce[:0], nonce...)
 }
 
 // NewCoreHandler 创建 handler。batchSem 容量按 Multiplexing 选（保留两套并发模型）。
@@ -104,7 +153,12 @@ func NewCoreHandler(tr Transport, cfg HandlerConfig) *CoreHandler {
 
 // Handle 运行连接生命周期：control loop → READY 后启动 data loop。
 func (h *CoreHandler) Handle(ctx context.Context) error {
-	defer h.cleanup()
+	// dataExited 标记所有 data goroutine 是否在 drain 超时前退出。
+	// cleanup 依据此标记决定是否零化 keys：仅在确认无 data goroutine 读 keys 时才清零，
+	// 否则保留 keys（由 GC 在连接生命周期结束后回收），避免 cleanup 把 keys 置 nil
+	// 后存活的 processBatch 跳过 HMAC 校验（安全绕过）。
+	dataExited := false
+	defer h.cleanup(&dataExited)
 	// 进入 CONTROL_WAIT（server 状态机初始为 Accepted）。
 	if err := h.sm.Transition(core.ServerStateControlWait); err != nil {
 		return core.WrapError(core.NumSession, core.CodeSession, "transition to CONTROL_WAIT", err)
@@ -125,13 +179,21 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 	go func() { h.dataWG.Wait(); close(done) }()
 	select {
 	case <-done:
+		dataExited = true
 	case <-time.After(drainTimeout):
-		slog.Warn("data frame goroutines did not exit within drain timeout", "session", string(h.sessionID), "timeout", drainTimeout)
+		// 超时：仍有 data goroutine 存活，cleanup 不会零化 keys，避免存活的
+		// processBatch 因 keys==nil 跳过 HMAC 校验（安全绕过）。keys 由 GC 回收。
+		slog.Warn("data frame goroutines did not exit within drain timeout; keeping keys to avoid HMAC bypass", "session", string(h.getSessionID()), "timeout", drainTimeout)
 	}
 	return err
 }
 
-func (h *CoreHandler) cleanup() {
+// cleanup 零化会话密钥。仅当 dataExited 为 true（所有 data goroutine 已退出）时执行，
+// 避免与存活的 processBatch goroutine 竞态读 keys。
+func (h *CoreHandler) cleanup(dataExited *bool) {
+	if dataExited == nil || !*dataExited {
+		return
+	}
 	if k := h.keys.Load(); k != nil {
 		k.Zero()
 		h.keys.Store(nil)
@@ -177,7 +239,7 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 		}
 
 		// READY 或 0-RTT early_data 后启动 data loop（exactly once）
-		if h.sm.State() == core.ServerStateReady || h.earlyData {
+		if h.sm.State() == core.ServerStateReady || h.earlyData.Load() {
 			h.dataOnce.Do(func() {
 				// 派生可取消 context：controlLoop 退出后 Handle 调 cancelDataLoop，
 				// 使阻塞在 sink 的 processBatch goroutine 收到取消信号尽快退出。
@@ -197,7 +259,7 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 func (h *CoreHandler) handleClose(payload []byte) {
 	var closeMsg core.CloseMessage
 	if derr := core.Decode(payload, &closeMsg); derr != nil {
-		slog.Warn("failed to decode close message", "session", string(h.sessionID), "error", derr)
+		slog.Warn("failed to decode close message", "session", string(h.getSessionID()), "error", derr)
 	}
 	if closeMsg.GetCloseTimeoutMs() > 0 {
 		// 强制上限防止恶意客户端发 MaxUint32 导致 goroutine 长期占用资源（DoS）。
@@ -207,7 +269,7 @@ func (h *CoreHandler) handleClose(payload []byte) {
 		}
 		h.closeTimeout = requested
 	}
-	slog.Info("close received", "session", string(h.sessionID), "drain_timeout", h.closeTimeout)
+	slog.Info("close received", "session", string(h.getSessionID()), "drain_timeout", h.closeTimeout)
 }
 
 // dataLoop 读 BATCH 帧并发处理（batchSem 限流）。
@@ -215,7 +277,7 @@ func (h *CoreHandler) dataLoop(ctx context.Context) {
 	for {
 		f, err := h.tr.RecvDataFrame(ctx)
 		if err != nil {
-			slog.Debug("data frame stream ended", "session", string(h.sessionID), "error", err)
+			slog.Debug("data frame stream ended", "session", string(h.getSessionID()), "error", err)
 			return
 		}
 		switch f.Header.Type {

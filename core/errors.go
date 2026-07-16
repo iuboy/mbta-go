@@ -113,6 +113,49 @@ const (
 	CodeForbiddenEvent        = "ERR_FORBIDDEN_EVENT"
 )
 
+// wireCodeToNum 将线缆错误码（ErrorMessage.Code）映射到对应的 NumCode。
+//
+// 旧实现中这些线缆错误码没有任何 NumCode 关联：当被包装为 *Error 时 NumCode 默认为 0，
+// 导致 GetErrorCode 返回 0（switch 无法匹配）、Error.Is 返回 false（t.NumCode != 0 守卫）。
+// 通过此映射表，WrapWireError 能自动填入正确的 NumCode，使程序化错误匹配生效。
+var wireCodeToNum = map[string]int{
+	CodeUnsupportedVersion:    NumVersion,
+	CodeUnsupportedCapability: NumProtocol,
+	CodeUnsupportedMessage:    NumProtocol,
+	CodeUnsupportedFlag:       NumProtocol,
+	CodeInvalidMagic:          NumProtocol,
+	CodeInvalidFrame:          NumProtocol,
+	CodeFrameTooLarge:         NumProtocol,
+	CodeCRCMismatch:           NumProtocol,
+	CodeDecodeFailed:          NumProtocol,
+	CodeAuthRequired:          NumAuth,
+	CodeAuthFailed:            NumAuth,
+	CodeSessionExpired:        NumSession,
+	CodeHMACFailed:            NumHMAC,
+	CodeDecryptFailed:         NumEnvelope,
+	CodeDecompressFailed:      NumEnvelope,
+	CodeBatchTooLarge:         NumBatch,
+	CodeEventTooLarge:         NumBatch,
+	CodeRateLimited:           NumThrottle,
+	CodeServerOverloaded:      NumThrottle,
+	CodeDuplicateChunk:        NumBatch,
+	CodeDuplicateInflight:     NumBatch,
+	CodeEnvelopeMismatch:      NumEnvelope,
+	CodeForbiddenTag:          NumValidation,
+	CodeForbiddenSource:       NumValidation,
+	CodeForbiddenEvent:        NumValidation,
+}
+
+// WrapWireError 用线缆错误码构造 *Error，自动查 wireCodeToNum 填入 NumCode。
+// 未知线缆码 fallback 到 NumProtocol。msg 为人类可读描述，err 为可选被包装错误。
+func WrapWireError(code, msg string, err error) error {
+	num, ok := wireCodeToNum[code]
+	if !ok {
+		num = NumProtocol
+	}
+	return &Error{NumCode: num, Code: code, Message: msg, Err: err}
+}
+
 // ---------------------------------------------------------------------------
 // Error 类型 — MBTA 库的标准错误
 // ---------------------------------------------------------------------------

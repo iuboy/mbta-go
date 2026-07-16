@@ -23,15 +23,16 @@ func TestStateMachineTransition(t *testing.T) {
 		{StateHelloAcked, StateDisconnected, false},
 		{StateAuthSent, StateReady, false},
 		{StateAuthSent, StateDisconnected, false},
+		{StateAuthSent, StateAuthSent, false}, // 自环：AUTH_FAIL retryable 后重试
 		{StateReady, StateDraining, false},
 		{StateReady, StateClosed, false},
 		{StateReady, StateDisconnected, false},
 		{StateDraining, StateClosed, false},
+		{StateClosed, StateDisconnected, false}, // 重连：握手失败后重置回 Disconnected
 		// Invalid transitions
 		{StateDisconnected, StateReady, true},
 		{StateDisconnected, StateClosed, true},
 		{StateReady, StateConnecting, true},
-		{StateClosed, StateDisconnected, true},
 		{StateClosed, StateReady, true},
 	}
 

@@ -60,6 +60,11 @@ func Build(p BuildParams) (*SecureEnvelope, error) {
 	if p.Codec == corepb.Codec_CODEC_UNSPECIFIED {
 		return nil, NewError(NumEnvelope, CodeEnvelope, "codec unspecified")
 	}
+	// 提前校验 HMACKey：非空是规范要求（core spec §5.1），空 key 会在 NewHMAC 深处
+	// 才暴露错误，降低可诊断性，并可能引发 nil key 的 panic。
+	if len(p.HMACKey) == 0 {
+		return nil, NewError(NumEnvelope, CodeEnvelope, "HMAC key is required")
+	}
 
 	env := &SecureEnvelope{
 		EnvelopeVersion: EnvelopeVersion,
@@ -108,8 +113,11 @@ func Build(p BuildParams) (*SecureEnvelope, error) {
 }
 
 // Open 解析、校验 HMAC、解密、解压 SecureEnvelope，返回 SignalBatch 编码字节。
-// HMAC MUST 在解密/解压前校验（core spec §5.1）。
-func Open(env *SecureEnvelope, aeadKey []byte) ([]byte, error) {
+// HMAC MUST 在解密/解压前校验（core spec §5.1）。传入非空 hmacKey 时，Open 会在
+// 解密前强制 VerifyMAC；校验失败立即返回错误，杜绝调用方遗漏 VerifyMAC 的安全绕过。
+// 传空 hmacKey 时跳过 HMAC 校验（仅用于显式选择明文/无 MAC 的诊断场景），生产路径
+// 必须传非空 hmacKey。
+func Open(env *SecureEnvelope, hmacKey, aeadKey []byte) ([]byte, error) {
 	if env == nil {
 		return nil, NewError(NumEnvelope, CodeEnvelope, "nil envelope")
 	}
@@ -130,8 +138,17 @@ func Open(env *SecureEnvelope, aeadKey []byte) ([]byte, error) {
 		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", env.Compression))
 	}
 
-	// HMAC 校验需要 key，但 Open 不收 HMAC key 参数 —— 改为 VerifyMAC 单独校验。
-	// 这里仅做解密 + 解压。调用方须先 VerifyMAC。
+	// 强制 HMAC 校验：在解密/解压前。空 hmacKey 视为显式跳过（仅诊断场景）。
+	if len(hmacKey) > 0 {
+		ok, verr := VerifyMAC(hmacKey, env)
+		if verr != nil {
+			return nil, WrapError(NumEnvelope, CodeEnvelope, "HMAC verify", verr)
+		}
+		if !ok {
+			return nil, NewError(NumHMAC, CodeHMAC, "HMAC verification failed")
+		}
+	}
+
 	raw := env.Payload
 
 	// Decrypt
@@ -211,6 +228,10 @@ var (
 			return dec
 		},
 	}
+
+	// lz4 writer/reader pool：与 gzip/zstd 对齐，避免批量压缩场景每次新建 *lz4.Writer/Reader 的 GC 压力。
+	lz4WriterPool = sync.Pool{New: func() any { return lz4.NewWriter(nil) }}
+	lz4ReaderPool = sync.Pool{New: func() any { return lz4.NewReader(nil) }}
 )
 
 // compress 按算法压缩 src。
@@ -227,7 +248,7 @@ func compress(c corepb.Compression, src []byte) ([]byte, error) {
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip compress", err)
 		}
 		if err := w.Close(); err != nil {
-			gzipWriterPool.Put(w)
+			// Close 失败：writer 可能已损坏，不放回 pool（与 Write 错误路径一致）。
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip close", err)
 		}
 		gzipWriterPool.Put(w)
@@ -239,14 +260,17 @@ func compress(c corepb.Compression, src []byte) ([]byte, error) {
 		return out, nil
 	case corepb.Compression_COMPRESSION_LZ4:
 		var buf bytes.Buffer
-		w := lz4.NewWriter(&buf)
+		w := lz4WriterPool.Get().(*lz4.Writer)
+		w.Reset(&buf)
 		if _, err := w.Write(src); err != nil {
-			w.Close()
+			_ = w.Close() // writer 可能已损坏，不放回 pool
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 compress", err)
 		}
 		if err := w.Close(); err != nil {
+			// Close 失败：writer 可能已损坏，不放回 pool（与 gzip 路径一致）。
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 close", err)
 		}
+		lz4WriterPool.Put(w)
 		return buf.Bytes(), nil
 	default:
 		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
@@ -294,13 +318,16 @@ func decompress(c corepb.Compression, src []byte) ([]byte, error) {
 		}
 		return buf.Bytes(), nil
 	case corepb.Compression_COMPRESSION_LZ4:
-		r := lz4.NewReader(bytes.NewReader(src))
+		r := lz4ReaderPool.Get().(*lz4.Reader)
+		r.Reset(bytes.NewReader(src))
 		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
 		var buf bytes.Buffer
 		buf.Grow(len(src) * 4)
 		if _, err := io.Copy(&buf, lr); err != nil {
+			lz4ReaderPool.Put(r)
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 decompress", err)
 		}
+		lz4ReaderPool.Put(r)
 		if lr.N == 0 {
 			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
 		}

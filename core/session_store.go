@@ -25,7 +25,9 @@ type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*SessionState
 
+	maxSize        int           // <= 0 表示无上限（仅靠 reaper 回收）
 	reaperInterval time.Duration // <= 0 表示不启用后台清理
+	closed         bool          // Close 后拒绝 Put/Get
 	stopCh         chan struct{} // 关闭 reaper goroutine（nil 表示无 reaper）
 	doneCh         chan struct{} // reaper 退出信号（nil 表示无 reaper）
 	closeOnce      sync.Once     // 保证 Close 幂等，消除 recover-as-control-flow
@@ -39,6 +41,16 @@ type SessionStoreOption func(*SessionStore)
 func WithReaperInterval(d time.Duration) SessionStoreOption {
 	return func(s *SessionStore) {
 		s.reaperInterval = d
+	}
+}
+
+// WithMaxSize 设置 store 容量上限。Put 时若条目数已达上限且新 ticket 不存在，
+// 返回错误（拒绝写入）。n <= 0 表示无上限（默认）。
+//
+// 用于防御恶意/异常客户端不断获取新 ticket 导致服务端内存耗尽（DoS）。
+func WithMaxSize(n int) SessionStoreOption {
+	return func(s *SessionStore) {
+		s.maxSize = n
 	}
 }
 
@@ -66,20 +78,52 @@ func NewTicket() ([]byte, error) {
 	return t, nil
 }
 
-// Put 存储 ticket → state。nil state 被静默拒绝以防后续 Get panic。
-func (s *SessionStore) Put(ticket []byte, state *SessionState) {
+// ErrSessionStoreClosed 在 Close 后调用 Put/Get 时返回。
+var ErrSessionStoreClosed = fmt.Errorf("session store closed")
+
+// ErrSessionStoreFull 在达到 maxSize 上限且新 ticket 不属于已有条目时返回。
+var ErrSessionStoreFull = fmt.Errorf("session store full")
+
+// Put 存储 ticket → state。
+//
+// 拒绝条件（返回 error）：
+//   - state 为 nil（防止后续 Get 解引用 panic）
+//   - ticket 为空（无法作为有效 key）
+//   - state.Expiry 为零值（公元 1 年 < 现在，Get 会立即判定过期，ticket 永远无法恢复）
+//   - store 已 Close（reaper 已停止，条目无法回收）
+//   - 条目数已达 maxSize 上限且 ticket 不存在（DoS 防护）
+func (s *SessionStore) Put(ticket []byte, state *SessionState) error {
 	if state == nil {
-		return
+		return fmt.Errorf("nil session state")
+	}
+	if len(ticket) == 0 {
+		return fmt.Errorf("empty session ticket")
+	}
+	if state.Expiry.IsZero() {
+		// 零值 time.Time{} 是公元 1 年，time.Now().After(Expiry) 永远为 true，
+		// 导致 ticket 颁发后立即无法恢复。显式拒绝避免隐性陷阱。
+		return fmt.Errorf("session state Expiry must be set to a future time")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sessions[string(ticket)] = state
+	if s.closed {
+		return ErrSessionStoreClosed
+	}
+	key := string(ticket)
+	if _, exists := s.sessions[key]; !exists && s.maxSize > 0 && len(s.sessions) >= s.maxSize {
+		return ErrSessionStoreFull
+	}
+	s.sessions[key] = state
+	return nil
 }
 
-// Get 查找 ticket（未过期返回 state + true）。
+// Get 查找 ticket（未过期返回 state + true）。Close 后返回 false。
 func (s *SessionStore) Get(ticket []byte) (*SessionState, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.closed {
+		return nil, false
+	}
 	state, ok := s.sessions[string(ticket)]
 	if !ok || time.Now().After(state.Expiry) {
 		return nil, false
@@ -131,8 +175,17 @@ func (s *SessionStore) reapLoop(interval time.Duration) {
 // 允许多次调用：第二次及以后为 no-op。
 func (s *SessionStore) Close() {
 	if s.stopCh == nil {
+		// 即使无 reaper，也标记 closed 以拒绝后续 Put/Get。
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
 		return
 	}
+	// 先在锁内置 closed：消除「close(stopCh) 后、closed 置位前」的窗口，
+	// 否则 reaper 已退出但 Put 仍可写入永不被回收的条目。
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	s.closeOnce.Do(func() {
 		close(s.stopCh)
 	})

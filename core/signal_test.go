@@ -59,7 +59,7 @@ func TestSignalBatchValidate(t *testing.T) {
 				Signals: []*SignalRecord{
 					{SignalType: "log", Body: "msg"},
 					{SignalType: "counter", MetricName: "req_total"},
-					{SignalType: "span", Name: "GET /api", TraceID: "0123456789abcdef0123456789abcdef"},
+					{SignalType: "span", Name: "GET /api", TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef"},
 				},
 			},
 			wantErr: false,
@@ -339,7 +339,7 @@ func TestSignalBatchWithMultipleSignals(t *testing.T) {
 		Signals: []*SignalRecord{
 			{SignalType: "log", EventID: "evt-1", Body: "msg1"},
 			{SignalType: "counter", EventID: "evt-2", MetricName: "m1"},
-			{SignalType: "span", EventID: "evt-3", Name: "s1", TraceID: "0123456789abcdef0123456789abcdef"},
+			{SignalType: "span", EventID: "evt-3", Name: "s1", TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef"},
 			{SignalType: "log", EventID: "evt-4", Body: "msg4"},
 		},
 	}

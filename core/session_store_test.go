@@ -23,7 +23,7 @@ func TestSessionStore_PutGetDelete(t *testing.T) {
 		t.Fatal("Get before Put should miss")
 	}
 
-	s.Put(ticket, state)
+	_ = s.Put(ticket, state)
 	got, ok := s.Get(ticket)
 	if !ok {
 		t.Fatal("Get after Put should hit")
@@ -44,7 +44,7 @@ func TestSessionStore_ExpiredNotReturned(t *testing.T) {
 	defer s.Close()
 
 	ticket, _ := NewTicket()
-	s.Put(ticket, &SessionState{
+	_ = s.Put(ticket, &SessionState{
 		Keys:    &SessionKeys{KeyID: "k1"},
 		AgentID: "agent-1",
 		Expiry:  time.Now().Add(-time.Minute), // 已过期
@@ -64,11 +64,11 @@ func TestSessionStore_ReaperEvictsExpired(t *testing.T) {
 	freshTicket, _ := NewTicket()
 	expiredTicket, _ := NewTicket()
 
-	s.Put(freshTicket, &SessionState{
+	_ = s.Put(freshTicket, &SessionState{
 		Keys: &SessionKeys{KeyID: "fresh"}, AgentID: "a-fresh",
 		Expiry: time.Now().Add(time.Hour),
 	})
-	s.Put(expiredTicket, &SessionState{
+	_ = s.Put(expiredTicket, &SessionState{
 		Keys: &SessionKeys{KeyID: "expired"}, AgentID: "a-expired",
 		Expiry: time.Now().Add(-time.Minute),
 	})
@@ -119,7 +119,7 @@ func TestSessionStore_ReaperPreservesFresh(t *testing.T) {
 	defer s.Close()
 
 	ticket, _ := NewTicket()
-	s.Put(ticket, &SessionState{
+	_ = s.Put(ticket, &SessionState{
 		Keys: &SessionKeys{KeyID: "k"}, AgentID: "a",
 		Expiry: time.Now().Add(time.Hour),
 	})
@@ -128,6 +128,82 @@ func TestSessionStore_ReaperPreservesFresh(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	if _, ok := s.Get(ticket); !ok {
 		t.Fatal("fresh ticket evicted by reaper")
+	}
+}
+
+// TestSessionStore_PutRejectsInvalid 覆盖 Put 的边界拒绝路径：
+// nil state、空 ticket、零值 Expiry、Close 后 Put/Get。
+func TestSessionStore_PutRejectsInvalid(t *testing.T) {
+	s := NewSessionStore()
+	defer s.Close()
+
+	validTicket, _ := NewTicket()
+	validState := &SessionState{
+		Keys: &SessionKeys{KeyID: "k"}, AgentID: "a",
+		Expiry: time.Now().Add(time.Hour),
+	}
+
+	tests := []struct {
+		name    string
+		ticket  []byte
+		state   *SessionState
+		wantErr bool
+	}{
+		{"nil state", validTicket, nil, true},
+		{"empty ticket", []byte{}, validState, true},
+		{"nil ticket", nil, validState, true},
+		{"zero Expiry", validTicket, &SessionState{Keys: &SessionKeys{KeyID: "k"}, AgentID: "a"}, true},
+		{"valid", validTicket, validState, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := s.Put(tt.ticket, tt.state)
+			if tt.wantErr && err == nil {
+				t.Errorf("Put(%s) expected error, got nil", tt.name)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Put(%s) unexpected error: %v", tt.name, err)
+			}
+		})
+	}
+}
+
+// TestSessionStore_PutAfterClose 验证 Close 后 Put 返回错误、Get 返回未命中。
+func TestSessionStore_PutAfterClose(t *testing.T) {
+	s := NewSessionStore()
+	s.Close() // 不 defer（测试 Close 后行为）
+
+	ticket, _ := NewTicket()
+	if err := s.Put(ticket, &SessionState{
+		Keys: &SessionKeys{KeyID: "k"}, AgentID: "a",
+		Expiry: time.Now().Add(time.Hour),
+	}); err == nil {
+		t.Fatal("Put after Close should return error")
+	}
+	if _, ok := s.Get(ticket); ok {
+		t.Fatal("Get after Close should miss")
+	}
+}
+
+// TestSessionStore_MaxSizeRejects 验证 maxSize 上限：超出时拒绝新 ticket。
+func TestSessionStore_MaxSizeRejects(t *testing.T) {
+	s := NewSessionStore(WithMaxSize(1))
+	defer s.Close()
+
+	t1, _ := NewTicket()
+	if err := s.Put(t1, &SessionState{
+		Keys: &SessionKeys{KeyID: "k"}, AgentID: "a",
+		Expiry: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("first Put failed: %v", err)
+	}
+	// 第二个不同的 ticket 应被拒绝（容量已满）。
+	t2, _ := NewTicket()
+	if err := s.Put(t2, &SessionState{
+		Keys: &SessionKeys{KeyID: "k2"}, AgentID: "a2",
+		Expiry: time.Now().Add(time.Hour),
+	}); err == nil {
+		t.Fatal("Put exceeding maxSize should return error")
 	}
 }
 

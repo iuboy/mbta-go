@@ -273,11 +273,13 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 	store := core.NewSessionStore()
 	resumptionKeys, _ := core.GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
 	ticket, _ := core.NewTicket()
-	store.Put(ticket, &core.SessionState{
+	if err := store.Put(ticket, &core.SessionState{
 		Keys:    resumptionKeys,
 		AgentID: "agent-1",
 		Expiry:  time.Now().Add(time.Hour),
-	})
+	}); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
 
 	tr := NewFakeTransport(false)
 	policy := core.Policy{

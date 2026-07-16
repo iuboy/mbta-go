@@ -7,6 +7,7 @@ package protocol
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/iuboy/mbta-go/core"
 )
@@ -40,10 +41,14 @@ var ErrDatagramUnsupported = errors.New("protocol: unreliable datagram not suppo
 type Transport interface {
 	// RecvControlFrame 阻塞读下一控制帧（HELLO/AUTH/PING/CLOSE 等）。
 	// 已校验 magic/version/flags/length/CRC。
+	//
+	// 并发约定：CoreHandler 会启动独立 goroutine 分别循环调用 RecvControlFrame 与
+	// RecvDataFrame，实现 MUST 支持两者并发调用（或由调用方串行化）。
 	RecvControlFrame(ctx context.Context) (core.Frame, error)
 
 	// RecvDataFrame 阻塞读下一数据帧（BATCH/DATAGRAM）。
 	// QUIC：聚合多 data stream；TCP：单 conn 按 type 分发。
+	// 并发约定同 RecvControlFrame：可与 RecvControlFrame 并发调用。
 	RecvDataFrame(ctx context.Context) (core.Frame, error)
 
 	// SendFrame 写一帧，按 f.Header.ChannelID 路由到 control/data channel。
@@ -60,14 +65,22 @@ type Transport interface {
 	// Multiplexing 报告多路复用模型，CoreHandler 据此选择并发策略分支。
 	Multiplexing() MultiplexModel
 
-	// Close 关闭传输。
+	// Close 关闭传输。MUST 幂等（多次调用安全）。Close 后 Recv*/Send* 可返回错误。
 	Close() error
 }
 
 // SendControlFrame 是 binding/control 写入的便捷构造：构造一个 control channel 帧并发送。
 // server 端所有应答（HELLO_ACK/AUTH_OK/AUTH_FAIL/ACK/NACK/WINDOW/THROTTLE/PONG/ERROR/CLOSE）
 // 都走 control channel（ChannelControl=0）。
+//
+// 安全校验：在构造帧前检查 payload 长度不超过 MaxPayloadSize 且可被 uint32 表示，
+// 避免 uint32 截断导致对端收到与实际 payload 不一致的 Length 字段（旧实现直接 uint32(len)
+// 会静默截断超长 payload）。
 func SendControlFrame(ctx context.Context, tr Transport, typ uint8, flags byte, payload []byte) error {
+	if int64(len(payload)) > int64(core.MaxPayloadSize) {
+		return core.NewError(core.NumProtocol, core.CodeFrameTooLarge,
+			fmt.Sprintf("control frame payload %d exceeds MaxPayloadSize %d", len(payload), core.MaxPayloadSize))
+	}
 	f := core.Frame{
 		Header: core.Header{
 			Version:   core.Version,

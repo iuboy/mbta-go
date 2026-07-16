@@ -51,7 +51,7 @@ func TestBuildOpenRoundTrip_Intl_AESGCM(t *testing.T) {
 		t.Fatalf("VerifyMAC: ok=%v err=%v", ok, err)
 	}
 
-	got, err := Open(env, aeadKey)
+	got, err := Open(env, hmacKey, aeadKey)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestBuildOpenRoundTrip_GM_SM4GCM(t *testing.T) {
 		t.Fatalf("VerifyMAC: ok=%v err=%v", ok, err)
 	}
 
-	got, err := Open(env, aeadKey)
+	got, err := Open(env, hmacKey, aeadKey)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestBuildOpen_Compressions(t *testing.T) {
 			if env.Compression != c {
 				t.Errorf("compression field = %v, want %v", env.Compression, c)
 			}
-			got, err := Open(env, aeadKey)
+			got, err := Open(env, hmacKey, aeadKey)
 			if err != nil {
 				t.Fatalf("Open(%v): %v", c, err)
 			}
@@ -165,7 +165,7 @@ func TestBuild_OpenDecryptionFailure(t *testing.T) {
 
 	wrong := make([]byte, AEADKeyLenIntl)
 	wrong[0] = 1
-	if _, err := Open(env, wrong); err == nil {
+	if _, err := Open(env, hmacKey, wrong); err == nil {
 		t.Error("Open should fail with wrong AEAD key")
 	}
 }
@@ -178,7 +178,7 @@ func TestBuild_LargeAndEmptyPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build empty: %v", err)
 	}
-	got, err := Open(env, aeadKey)
+	got, err := Open(env, hmacKey, aeadKey)
 	if err != nil || len(got) != 0 {
 		t.Errorf("empty payload round trip: got=%v err=%v", got, err)
 	}
@@ -188,7 +188,7 @@ func TestBuild_LargeAndEmptyPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build large: %v", err)
 	}
-	got2, err := Open(env2, aeadKey)
+	got2, err := Open(env2, hmacKey, aeadKey)
 	if err != nil {
 		t.Fatalf("Open large: %v", err)
 	}

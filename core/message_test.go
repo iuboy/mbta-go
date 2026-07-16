@@ -21,21 +21,27 @@ func TestValidateHello(t *testing.T) {
 }
 
 func TestValidateHelloAck(t *testing.T) {
-	if err := ValidateHelloAck(&HelloAckMessage{SessionId: []byte("s")}); err != nil {
+	if err := ValidateHelloAck(&HelloAckMessage{SessionId: make([]byte, 16)}); err != nil {
 		t.Errorf("valid hello_ack: %v", err)
 	}
 	if err := ValidateHelloAck(&HelloAckMessage{SessionId: nil}); err == nil {
 		t.Error("empty session_id should fail")
 	}
+	if err := ValidateHelloAck(&HelloAckMessage{SessionId: []byte("short")}); err == nil {
+		t.Error("non-16-byte session_id should fail")
+	}
 }
 
 func TestValidateAuth(t *testing.T) {
-	m := &AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n")}
+	m := &AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n"), Token: "tok"}
 	if err := ValidateAuth(m); err != nil {
 		t.Errorf("valid auth: %v", err)
 	}
-	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s")}); err == nil {
+	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s"), Token: "tok"}); err == nil {
 		t.Error("missing auth_nonce should fail")
+	}
+	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n")}); err == nil {
+		t.Error("missing token should fail")
 	}
 }
 

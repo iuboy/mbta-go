@@ -71,9 +71,11 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 			return l, nil
 		},
-		Accept:        func(ctx context.Context, l *Listener) (*Conn, error) { return l.Accept(ctx) },
-		NewTransport:  func(ctx context.Context, c *Conn) (protocol.Transport, error) { return newQuicTransport(c) },
-		CloseConn:     func(c *Conn) { _ = c.CloseWithError(0, "transport") },
+		Accept:       func(ctx context.Context, l *Listener) (*Conn, error) { return l.Accept(ctx) },
+		NewTransport: func(ctx context.Context, c *Conn) (protocol.Transport, error) { return newQuicTransport(c) },
+		// CloseConn 用非零 application error code 关闭连接：code 0 在 QUIC 语义中表示
+		// "no error"/正常关闭，会误导对端以为连接是优雅终止而非异常清理。
+		CloseConn:     func(c *Conn) { _ = c.CloseWithError(1, "transport setup failure") },
 		AddrOf:        func(l *Listener) net.Addr { return l.Addr() },
 		CloseListener: func(l *Listener) error { return l.Close() },
 	})

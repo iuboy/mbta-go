@@ -12,6 +12,11 @@ import (
 // 防护与内存放大抑制。
 const MaxSignalFieldLen = 4096
 
+// MaxTraceStateFieldLen 是 W3C tracestate 单个 key/value 的最大字符数（W3C Trace
+// Context 规范）。tracestate 成员用于跨服务传播 trace 厂商信息，长度必须严格符合
+// 规范以保证互操作；旧实现误用 MaxSignalFieldLen(4096) 校验，远超规范上限。
+const MaxTraceStateFieldLen = 256
+
 // hasControlChars 报告 s 是否含非法控制字符。允许 \t \n \r 三种常见空白
 // （status_message 等字段可能合法地含多行文本）。
 func hasControlChars(s string) bool {
@@ -83,9 +88,23 @@ func validateHexID(name, val string, wantBytes int) error {
 	return nil
 }
 
+// validateTraceStateEntryField 校验单个 tracestate key/value 字段：长度上限遵循
+// W3C Trace Context 规范（MaxTraceStateFieldLen=256），且不含控制字符。
+func validateTraceStateEntryField(name, val string) error {
+	if len(val) > MaxTraceStateFieldLen {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("%s exceeds maximum length %d", name, MaxTraceStateFieldLen))
+	}
+	if hasControlChars(val) {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("%s contains control characters", name))
+	}
+	return nil
+}
+
 // validateTraceState 校验 W3C tracestate 成员（spec §6.2.2 / W3C Trace Context）。
-// tracestate 最多 32 个成员，每个 key/value 不超 256 字符且不含控制字符。
-// 多余成员不静默截断——返回错误让调用方显式收敛，避免无声丢语义。
+// tracestate 最多 32 个成员，每个 key/value 不超 256 字符（W3C 规范上限）且不含
+// 控制字符。多余成员不静默截断——返回错误让调用方显式收敛，避免无声丢语义。
 func validateTraceState(entries []*TraceStateEntry) error {
 	if len(entries) > 32 {
 		return NewError(NumValidation, CodeValidation,
@@ -96,10 +115,10 @@ func validateTraceState(entries []*TraceStateEntry) error {
 			return NewError(NumValidation, CodeValidation,
 				fmt.Sprintf("trace_state[%d]: empty key", i))
 		}
-		if err := validateTextField(fmt.Sprintf("trace_state[%d].key", i), e.Key); err != nil {
+		if err := validateTraceStateEntryField(fmt.Sprintf("trace_state[%d].key", i), e.Key); err != nil {
 			return err
 		}
-		if err := validateTextField(fmt.Sprintf("trace_state[%d].value", i), e.Value); err != nil {
+		if err := validateTraceStateEntryField(fmt.Sprintf("trace_state[%d].value", i), e.Value); err != nil {
 			return err
 		}
 	}

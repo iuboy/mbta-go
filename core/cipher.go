@@ -22,7 +22,10 @@ const (
 )
 
 // HMACKeyLen 返回指定套件的 HMAC 密钥长度。
-// 未知套件返回 0（哨兵值），调用方应先校验套件合法性或检查返回值。
+//
+// 未知套件返回 -1（哨兵值，避免被当作合法长度）。调用方 MUST 检查返回值 < 0
+// 或在调用前校验套件合法性；直接 make([]byte, HMACKeyLen(cs)) 对未知套件会
+// panic（负长度），这是有意为之的 fail-fast——旧实现返回 0 会静默生成空密钥。
 func HMACKeyLen(cs corepb.CipherSuite) int {
 	switch cs {
 	case corepb.CipherSuite_CIPHER_SUITE_INTL:
@@ -30,12 +33,11 @@ func HMACKeyLen(cs corepb.CipherSuite) int {
 	case corepb.CipherSuite_CIPHER_SUITE_GM:
 		return HMACKeyLenGM
 	default:
-		return 0 // UNSPECIFIED/未知：不再静默回退 INTL，0 让调用方 fail-fast
+		return -1 // UNSPECIFIED/未知：负值避免被当作合法长度，强制调用方显式处理
 	}
 }
 
-// AEADKeyLen 返回指定套件的 AEAD 密钥长度。
-// 未知套件返回 0（哨兵值），调用方应先校验套件合法性或检查返回值。
+// AEADKeyLen 返回指定套件的 AEAD 密钥长度。语义同 HMACKeyLen，未知套件返回 -1。
 func AEADKeyLen(cs corepb.CipherSuite) int {
 	switch cs {
 	case corepb.CipherSuite_CIPHER_SUITE_INTL:
@@ -43,7 +45,7 @@ func AEADKeyLen(cs corepb.CipherSuite) int {
 	case corepb.CipherSuite_CIPHER_SUITE_GM:
 		return AEADKeyLenGM
 	default:
-		return 0 // UNSPECIFIED/未知：不再静默回退 INTL，0 让调用方 fail-fast
+		return -1 // UNSPECIFIED/未知：负值避免被当作合法长度，强制调用方显式处理
 	}
 }
 
