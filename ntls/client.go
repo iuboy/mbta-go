@@ -121,6 +121,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Unlock()
 
 	tr := &ntlsClientTransport{}
+	// connSet 标记本协程是否实际设置了 c.conn。并发 Connect 时，失败协程必须仅关闭
+	// 自己设置的连接——若用 c.conn != nil 判断会错误关闭胜出协程的连接。
+	var connSet bool
 	err := binding.Handshake(ctx, c.core,
 		// dial: 建立 TCP（TLCP/TLS1.3）连接
 		func(ctx context.Context) error {
@@ -139,6 +142,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 			c.conn = conn
 			tr.conn = conn
+			connSet = true
 			c.mu.Unlock()
 			return nil
 		},
@@ -153,9 +157,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 握手失败兜底：binding.Handshake 的 defer 调用 cc.Close() 仅在 transport 已注册
 	// (setupTransport 成功) 时才关闭 tr.conn。若 dial 成功但 setupTransport 之前/之中失败，
 	// cc.Close() 不会关闭 c.conn，必须在此显式关闭以避免 fd 泄漏。
+	// 仅当本协程设置了 c.conn 时才关闭——并发竞态中失败协程不能关闭胜出协程的连接。
 	if err != nil {
 		c.mu.Lock()
-		if c.conn != nil {
+		if connSet {
 			_ = c.conn.Close()
 			c.conn = nil
 		}

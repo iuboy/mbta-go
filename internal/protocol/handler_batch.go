@@ -136,6 +136,7 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 		// 区分 HMAC 失败与解密失败用于 metrics（与 processBatch 对齐），
 		// 避免 HMAC 篡改攻击信号被掩盖为解密失败。
 		if core.GetErrorCodeString(err) == core.CodeHMAC {
+			slog.Debug("datagram HMAC verification failed", "error", err)
 			h.config.Metrics.HMACFailures().Inc()
 		} else {
 			slog.Debug("datagram open failed", "error", err)
