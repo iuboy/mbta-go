@@ -131,20 +131,9 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 		return err
 	}
 
-	// Challenge-response：HMAC(token, nonce) 验证客户端持有 token。
-	// 安全 fail-closed：challengeNonce/negotiated 缺失属异常状态，必须拒绝认证而非静默跳过。
-	negotiated := h.negotiated.Load()
-	challengeNonce := h.getChallengeNonce()
-	if len(challengeNonce) == 0 || negotiated == nil {
-		slog.Warn("challenge nonce or negotiation result missing", "session", string(h.getSessionID()))
-		h.failAuth(ctx, "internal_error", "challenge nonce or negotiation result missing")
-		return core.NewError(core.NumConfig, core.CodeConfig, "missing challenge nonce or negotiation result")
-	}
-	expected := core.ComputeChallengeResponse(token, string(challengeNonce), negotiated.CipherSuite)
-	if !hmac.Equal(msg.GetAuthNonce(), expected) {
-		slog.Warn("auth challenge mismatch", "session", string(h.getSessionID()))
-		h.failAuth(ctx, "challenge_mismatch", "auth_nonce HMAC verification failed")
-		return core.NewError(core.NumAuth, core.CodeAuth, "challenge nonce mismatch")
+	negotiated, err := h.verifyChallenge(ctx, &msg, token)
+	if err != nil {
+		return err
 	}
 
 	if h.config.Auth != nil {
@@ -242,6 +231,26 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 		}
 	}
 	return nil
+}
+
+// verifyChallenge 校验 challenge-response（HMAC(token, nonce)），确认客户端持有 token。
+// 安全 fail-closed：challengeNonce/negotiated 缺失属异常状态，必须拒绝认证而非静默跳过。
+// 从 handleAuth 抽取以降低认知复杂度。
+func (h *CoreHandler) verifyChallenge(ctx context.Context, msg *corepb.AuthMessage, token string) (*core.NegotiateResult, error) {
+	negotiated := h.negotiated.Load()
+	challengeNonce := h.getChallengeNonce()
+	if len(challengeNonce) == 0 || negotiated == nil {
+		slog.Warn("challenge nonce or negotiation result missing", "session", string(h.getSessionID()))
+		h.failAuth(ctx, "internal_error", "challenge nonce or negotiation result missing")
+		return nil, core.NewError(core.NumConfig, core.CodeConfig, "missing challenge nonce or negotiation result")
+	}
+	expected := core.ComputeChallengeResponse(token, string(challengeNonce), negotiated.CipherSuite)
+	if !hmac.Equal(msg.GetAuthNonce(), expected) {
+		slog.Warn("auth challenge mismatch", "session", string(h.getSessionID()))
+		h.failAuth(ctx, "challenge_mismatch", "auth_nonce HMAC verification failed")
+		return nil, core.NewError(core.NumAuth, core.CodeAuth, "challenge nonce mismatch")
+	}
+	return negotiated, nil
 }
 
 // resolveAuthToken 决定 token 来源（tokenless 反查 vs legacy 明文）。

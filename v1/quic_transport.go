@@ -138,7 +138,7 @@ func (t *quicTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 			// dataCh 关闭：尝试读 dataErr 拿真实错误（acceptDataStreams 发送）。
 			// acceptDataStreams 用非阻塞发送（cap=1），错误可能因缓冲满被丢弃；
 			// 此时 dataErr 为空，用 default 返回 io.EOF 而非永久阻塞
-			//（即使 ctx 是 context.Background() 也不会 goroutine 泄漏）。
+			// （即使 ctx 是 context.Background() 也不会 goroutine 泄漏）。
 			select {
 			case e := <-t.dataErr:
 				if e != nil {
