@@ -34,6 +34,12 @@ Thumbs.db
 go.work
 go.work.sum
 
+AGENTS.md
+CLAUDE.md
+.claude/
+.zcode/
+.gitnexus/
+
 # 测试证书产物（防止私钥意外提交）
 /testdata/certificates/*.key
 /testdata/certificates/*.crt
