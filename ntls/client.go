@@ -59,26 +59,28 @@ func (t *ntlsClientTransport) ReadFrame(ctx context.Context) (core.Frame, error)
 // ntlsReadDefaultTimeout 是 NTLS control 读在 ctx 无 deadline 时的默认上限。
 const ntlsReadDefaultTimeout = 5 * time.Minute
 
-// WriteFrame 写一帧。data 通道（ChannelData）受 ctx 约束（设 SetWriteDeadline），
-// control 通道（ChannelControl）调用方传 context.Background() 不受超时约束。
+// WriteFrame 写一帧。data 和 control 通道均受 ctx 约束（设 SetWriteDeadline），
+// 防止慢速/无响应对端导致写永久阻塞（goroutine 泄漏）。
 func (t *ntlsClientTransport) WriteFrame(ctx context.Context, typ uint8, flags, channel uint8, payload []byte) error {
-	if channel == core.ChannelData {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	// data 帧且 ctx 带 Deadline：设 SetWriteDeadline 实现写超时。
-	// writeMu 保证同一时刻只有一个写者，deadline 不会被并发覆盖。
-	if channel == core.ChannelData {
-		if dl, ok := ctx.Deadline(); ok {
-			_ = t.conn.SetWriteDeadline(dl)
-			defer func() { _ = t.conn.SetWriteDeadline(time.Time{}) }()
-		}
+	// 设写 deadline：ctx 有 Deadline 用之，否则设默认上限（30s）防背压永久阻塞。
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(ntlsWriteDefaultTimeout)
 	}
+	if err := t.conn.SetWriteDeadline(dl); err != nil {
+		return core.WrapError(core.NumStream, core.CodeStream, "set write deadline", err)
+	}
+	defer func() { _ = t.conn.SetWriteDeadline(time.Time{}) }()
 	return core.Write(t.conn, core.Version, typ, flags, channel, payload)
 }
+
+// ntlsWriteDefaultTimeout 是 ctx 无 deadline 时客户端写的默认上限。
+const ntlsWriteDefaultTimeout = 30 * time.Second
 
 func (t *ntlsClientTransport) CloseConn() error {
 	return t.conn.Close()

@@ -40,12 +40,20 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	if ticket := msg.GetSessionTicket(); len(ticket) > 0 && h.config.SessionStore != nil {
 		if state, ok := h.config.SessionStore.Get(ticket); ok {
 			h.config.SessionStore.Delete(ticket)
-			h.keys.Store(state.Keys)
-			// 先写 agentID 再置 earlyData：earlyData 是 dataLoop 启动门控，
-			// 用 atomic.Bool 的 Store 提供 happens-before，保证读端看到 agentID。
-			h.setAgentID(state.AgentID)
-			h.earlyData.Store(true)
-			slog.Info("0-RTT resumption: keys restored from ticket", "agent", core.SanitizeForLog(h.getAgentID()))
+			// 安全校验：0-RTT 恢复的 agentID 必须与 HELLO 中声明的 agentID 一致。
+			// 若不一致说明票据可能被窃取（重放到不同 agent），拒绝恢复。
+			if state.AgentID != msg.GetAgentId() {
+				slog.Warn("0-RTT resumption rejected: agentID mismatch",
+					"ticket_agent", core.SanitizeForLog(state.AgentID),
+					"hello_agent", core.SanitizeForLog(msg.GetAgentId()))
+			} else {
+				h.keys.Store(state.Keys)
+				// 先写 agentID 再置 earlyData：earlyData 是 dataLoop 启动门控，
+				// 用 atomic.Bool 的 Store 提供 happens-before，保证读端看到 agentID。
+				h.setAgentID(state.AgentID)
+				h.earlyData.Store(true)
+				slog.Info("0-RTT resumption: keys restored from ticket", "agent", core.SanitizeForLog(h.getAgentID()))
+			}
 		}
 	}
 
@@ -98,6 +106,12 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 }
 
 // handleAuth 处理 AUTH：challenge-response + token 校验 + 会话密钥（core spec §9.5）。
+//
+// 返回值语义：
+//   - 返回 nil：认证成功，或可重试的认证失败（已发送 AUTH_FAIL 帧，连接保持打开，
+//     允许客户端在同连接上重试，maxAuthAttempts 限制生效）。
+//   - 返回 error：不可恢复的认证失败（达到最大重试次数、致命解码错误），
+//     controlLoop 将终止连接。
 func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	h.handshakeMu.Lock()
 	if h.authAttempts >= maxAuthAttempts {
@@ -115,32 +129,39 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	if err := core.ValidateAuth(&msg); err != nil {
 		slog.Warn("auth validation failed", "session", string(h.getSessionID()), "error", err)
 		h.failAuth(ctx, "invalid_auth", "authentication failed")
-		return err
+		return nil // 可重试：连接保持打开
 	}
 	if msg.GetAgentId() != h.getAgentID() {
 		h.failAuth(ctx, "invalid_auth", "authentication failed")
-		return core.NewError(core.NumAuth, core.CodeAuth, "agent_id mismatch")
+		return nil
 	}
 	if !bytes.Equal(msg.GetSessionId(), h.getSessionID()) {
 		h.failAuth(ctx, "invalid_auth", "authentication failed")
-		return core.NewError(core.NumAuth, core.CodeAuth, "session_id mismatch")
+		return nil
 	}
 
 	token, _, err := h.resolveAuthToken(&msg)
 	if err != nil {
-		return err
+		h.failAuth(ctx, "invalid_token", "token resolution failed")
+		return nil //nolint:nilerr // 可重试：已发 AUTH_FAIL，连接保持打开
+	}
+	// token 必填校验：resolveAuthToken 返回空 token 说明既非 tokenless（无 TokenResolver）
+	// 也非 legacy 明文 token（客户端未传 token）。空 token 不能进行 challenge-response。
+	if token == "" {
+		h.failAuth(ctx, "invalid_token", "token is required")
+		return nil //nolint:nilerr // 可重试
 	}
 
 	negotiated, err := h.verifyChallenge(ctx, &msg, token)
 	if err != nil {
-		return err
+		return nil //nolint:nilerr // verifyChallenge 内部已发 AUTH_FAIL（retryable），连接保持打开
 	}
 
 	if h.config.Auth != nil {
 		if _, err := h.config.Auth.Validate(token); err != nil {
 			h.failAuth(ctx, "invalid_token", "token validation failed")
 			h.config.Metrics.AuthFailure().Inc()
-			return core.WrapError(core.NumAuth, core.CodeAuth, "token validation", err)
+			return nil //nolint:nilerr // 可重试
 		}
 	}
 
@@ -201,7 +222,6 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	if err := h.sm.Transition(core.ServerStateReady); err != nil {
 		return core.WrapError(core.NumSession, core.CodeSession, "transition READY", err)
 	}
-	h.config.Metrics.AuthSuccess().Inc()
 	slog.Info("auth succeeded", "agent", core.SanitizeForLog(agentID), "session", string(sessionID), "key_id", keys.KeyID)
 
 	// HA cluster redirect (§4.17): if this replica is a follower (not the
@@ -230,6 +250,9 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 			return core.ErrRedirected
 		}
 	}
+	// AuthSuccess 在 redirect 检查之后递增：redirect 的会话由 leader 处理，不应在
+	// follower 上计入成功——否则指标虚高（旧实现将 Inc() 放在 redirect 之前）。
+	h.config.Metrics.AuthSuccess().Inc()
 	return nil
 }
 
@@ -279,6 +302,7 @@ func (h *CoreHandler) handlePing(ctx context.Context, payload []byte) {
 	pong := &corepb.PongMessage{TimeUnixMs: time.Now().UnixMilli(), Nonce: msg.GetNonce(), Status: "ok"}
 	p, err := core.Encode(pong)
 	if err != nil {
+		slog.Warn("failed to marshal pong", "error", err)
 		return
 	}
 	if err := SendControlFrame(ctx, h.tr, core.TypePong, core.FlagControl, p); err != nil {

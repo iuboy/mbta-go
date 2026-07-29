@@ -47,7 +47,14 @@ func (c *CoreClient) RecvHelloAck(ctx context.Context) (*core.HelloAckMessage, e
 	}
 	if f.Header.Type == core.TypeError {
 		var errMsg core.ErrorMessage
-		_ = core.Decode(f.Payload, &errMsg)
+		if derr := core.Decode(f.Payload, &errMsg); derr != nil {
+			// 解码失败不静默丢弃：记录原始错误，携带可用的 raw payload 信息辅助排障。
+			slog.Warn("failed to decode TypeError payload, using raw bytes for diagnosis",
+				"decode_error", derr,
+				"raw_payload_len", len(f.Payload))
+			return nil, core.NewError(core.NumHandshake, core.CodeHandshake,
+				fmt.Sprintf("server error (decode failed: %v, raw=%x)", derr, f.Payload))
+		}
 		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, fmt.Sprintf("server error: %s", errMsg.GetReason()))
 	}
 	if f.Header.Type != core.TypeHelloAck {
@@ -59,22 +66,20 @@ func (c *CoreClient) RecvHelloAck(ctx context.Context) (*core.HelloAckMessage, e
 		return nil, err
 	}
 
+	// 先校验再 Store：避免校验失败时脏的 NegotiateResult（含 UNSPECIFIED cipher suite）
+	// 残留在 atomic 指针中，被并发 reader（buildAndSend/codecForMarshal）看到。
+	if ack.GetCipherSuite() == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
+		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server selected unspecified cipher suite")
+	}
+	if len(ack.GetChallengeNonce()) == 0 {
+		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server did not provide challenge_nonce in HELLO_ACK")
+	}
 	c.negotiated.Store(&core.NegotiateResult{
 		SelectedCapabilities: ack.GetSelectedCapabilities(),
 		Codec:                ack.GetCodec(),
 		Compression:          ack.GetCompression(),
 		CipherSuite:          ack.GetCipherSuite(),
 	})
-	// 防御性校验：服务端选定的 cipher suite 不能是 UNSPECIFIED，
-	// 否则后续 key 派生会用错误算法（SHA-256 vs SM3）静默失败。
-	if ack.GetCipherSuite() == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
-		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server selected unspecified cipher suite")
-	}
-	// 先校验 challengeNonce 非空再 Store：避免「先修改接收者状态后校验」的脆弱模式，
-	// 防止后续重构顺序时意外使用空 nonce。
-	if len(ack.GetChallengeNonce()) == 0 {
-		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server did not provide challenge_nonce in HELLO_ACK")
-	}
 	// 防御性拷贝：GetChallengeNonce 返回 proto 内部 slice 引用，直接 Store 会在
 	// proto 消息被复用/pool 化时被静默篡改，影响 HMAC 计算安全性。
 	nonce := make([]byte, len(ack.GetChallengeNonce()))
@@ -165,9 +170,12 @@ func (c *CoreClient) RecvAuthResult(ctx context.Context) error {
 		}
 		c.keys.Store(keys)
 
-		if okMsg.GetExpiresAtUnix() > 0 {
-			c.expiresAt = time.Unix(okMsg.GetExpiresAtUnix(), 0)
+		// 服务端必须指定 session TTL（spec §9.5）。expires_at_unix=0 视为协议错误。
+		if okMsg.GetExpiresAtUnix() <= 0 {
+			return core.NewError(core.NumProtocol, core.CodeProtocol,
+				"AUTH_OK missing session expiry (expires_at_unix must be > 0)")
 		}
+		c.expiresAt.Store(okMsg.GetExpiresAtUnix())
 
 		// 先 Transition(StateReady) 再触发 onAuthed：binding 回调（v1 SetAuthed）
 		// 可能检查 StateReady 开放 data stream 门禁，若状态仍为 StateAuthSent 会行为异常。
@@ -175,14 +183,21 @@ func (c *CoreClient) RecvAuthResult(ctx context.Context) error {
 			return core.WrapError(core.NumSession, core.CodeSession, "transition to READY", err)
 		}
 		if c.onAuthed != nil {
-			c.onAuthed(context.Background())
+			// 使用调用方 ctx 而非 context.Background()：尊重上游超时/取消约束，
+			// 避免 onAuthed 回调在调用方已取消的上下文中无限执行。
+			c.onAuthed(ctx)
 		}
 		return nil
 
 	case core.TypeAuthFail:
 		var failMsg core.AuthFailMessage
 		if uerr := core.Decode(f.Payload, &failMsg); uerr != nil {
-			slog.Debug("failed to decode auth_fail frame", "error", uerr)
+			// AUTH_FAIL 反序列化失败不可静默丢弃（仅 Debug）：retryable 标记与
+			// challenge nonce 均丢失，违反 spec §9.5 重放防护。记录 warn 并携带
+			// raw payload 信息，便于从日志中还原故障上下文。
+			slog.Warn("failed to decode AUTH_FAIL frame, challenge nonce and retry flag lost",
+				"decode_error", uerr,
+				"raw_payload_len", len(f.Payload))
 		}
 		// 重放防护（core spec §9.5）：retryable 时服务端回传新的一次性 challenge，
 		// 客户端 MUST 用新挑战重算。更新本地 challengeNonce，供上层重试时

@@ -18,6 +18,9 @@ type HandlerConfig struct {
 	Metrics         *core.MBTAMetrics
 	ServerID        string
 	RedirectChecker core.RedirectChecker
+	// SessionStore 可选：0-RTT 会话票据存储（single-use ticket 重放防护）。
+	// nil 则禁用 0-RTT resumption（不颁发/不验证 session ticket）。
+	SessionStore *core.SessionStore
 }
 
 // AcceptLoop 是泛型 accept 循环骨架，消除 v1/ntls 的 ~50 行重复。
@@ -128,6 +131,14 @@ func handleConn[C any](
 		}
 		return
 	}
+	// 确保 Handle 返回后（正常或异常）都关闭 transport：
+	// quicTransport.Close/tcpTransport.Close 均幂等，内部已关闭底层 conn，
+	// 因此此处无需再调 closeConn（避免 double-close）。
+	defer func() {
+		if err := tr.Close(); err != nil {
+			slog.Debug("transport close after handle", "error", err)
+		}
+	}()
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
 		Auth:            hcfg.Auth,
 		Policy:          hcfg.Policy,
@@ -135,6 +146,7 @@ func handleConn[C any](
 		Metrics:         hcfg.Metrics,
 		ServerID:        hcfg.ServerID,
 		RedirectChecker: hcfg.RedirectChecker,
+		SessionStore:    hcfg.SessionStore,
 	})
 	if err := h.Handle(ctx); err != nil {
 		// ErrRedirected is normal HA flow (follower steered a client to

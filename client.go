@@ -159,6 +159,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.client == nil {
+		return core.NewError(core.NumSession, core.CodeSession, "client has been closed (cannot reconnect after Close)")
+	}
+
 	slog.Info("connecting", "version", c.cfg.Version, "server", c.cfg.Server)
 
 	if err := c.client.Connect(ctx); err != nil {
@@ -173,16 +177,19 @@ func (c *Client) Connect(ctx context.Context) error {
 // SendBatch sends a batch using the active connection.
 //
 // opts 携带 per-call 发送选项（如 WithTraceContext），不传则与旧行为完全一致。
+//
+// 整个调用在 RLock 保护下执行：防止 Close() 在中间切入将 c.client 置 nil 后
+// 继续调用底层 SendBatch（TOCTOU use-after-close）。Close 的 Lock 会等待
+// RLock 释放，保证 SendBatch 与 Close 串行化。
 func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
 	c.mu.RLock()
-	client := c.client
-	c.mu.RUnlock()
+	defer c.mu.RUnlock()
 
-	if client == nil {
+	if c.client == nil {
 		return "", core.NewError(core.NumSession, core.CodeSession, "not connected (call Connect first)")
 	}
 
-	return client.SendBatch(ctx, batch, tag, source, opts...)
+	return c.client.SendBatch(ctx, batch, tag, source, opts...)
 }
 
 // Close closes the client and releases all resources.

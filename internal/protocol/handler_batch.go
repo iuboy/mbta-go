@@ -36,11 +36,9 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 		aeadKey = keys.AEADKey()
 	}
 
-	// 算法一致性复核（依据权威协商结果），在 Open 之前。
-	if h.verifyEnvelopeAlgo(env) {
-		return
-	}
-
+	// 先执行 HMAC 校验（Open 内部在解密前 VerifyMAC），再做算法一致性复核。
+	// 旧实现在 HMAC 之前执行 verifyEnvelopeAlgo，导致未认证方可通过注入帧探测服务端
+	// 协商算法集（defense-in-depth 仅在认证后有意义）。
 	batchPayload, err := core.Open(env, hmacKey, aeadKey)
 	if err != nil {
 		// 区分 HMAC 失败与解密失败用于 metrics。
@@ -53,6 +51,11 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 			h.config.Metrics.DecryptFailures().Inc()
 			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "envelope_open_error", "envelope could not be opened", true)
 		}
+		return
+	}
+	// 算法一致性复核：在 HMAC 认证通过后执行（defense-in-depth 仅在认证后有意义），
+	// 确保已认证的 envelope wire 字段与权威协商结果一致。
+	if h.verifyEnvelopeAlgo(env) {
 		return
 	}
 	if len(batchPayload) > maxBatchBytes {
@@ -84,7 +87,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 
 	// chunk_id dedup key（ULID 文本）。
 	chunkIDText := chunkIDText(batchMsg.GetChunkId())
-	batchEvents, signalBatchPtr := h.resolveBatchEvents(&batchMsg)
+	batchEvents, signalBatchPtr := h.resolveBatchEvents(ctx, &batchMsg)
 	if batchEvents < 0 {
 		return // 已发 NACK
 	}
@@ -100,6 +103,14 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	// Replay 去重。
 	if existing := h.replay.SeenOrAdd(h.getAgentID(), chunkIDText); existing != nil {
 		h.config.Metrics.ReplayCacheHits().Inc()
+		// ReplayProcessing 表示此前被限流（applyRouteResult 将 entry 重置为 Processing 以允许
+		// 客户端重试）。此时不能短路返回 ACK——否则 batch 永远不会被路由到 sink，造成静默
+		// 数据丢失。必须 fallthrough 到 routeAndACK 重新处理。
+		if existing.Status == core.ReplayProcessing {
+			h.replay.Update(h.getAgentID(), chunkIDText, core.ReplayAccepted)
+			h.routeAndACK(ctx, h.getAgentID(), chunkIDText, &batchMsg, signalBatchPtr, batchEvents, batchBytes)
+			return
+		}
 		h.inflight.Remove(batchEvents, batchBytes)
 		ackMode := corepb.AckMode_ACK_MODE_ACCEPTED
 		if existing.Status == core.ReplayDurable {
@@ -170,38 +181,38 @@ func (h *CoreHandler) codecForUnmarshal() corepb.Codec {
 }
 
 // resolveBatchEvents 解析事件数（RawEventSink 快速路径 vs 完整解码）。batchEvents<0 表示已发 NACK。
-func (h *CoreHandler) resolveBatchEvents(batchMsg *corepb.BatchMessage) (int, *core.SignalBatch) {
+func (h *CoreHandler) resolveBatchEvents(ctx context.Context, batchMsg *corepb.BatchMessage) (int, *core.SignalBatch) {
 	rawSink, _ := h.config.Sink.(core.RawEventSink)
 	if rawSink != nil && batchMsg.GetEventsCount() > 0 {
 		ec := int(batchMsg.GetEventsCount())
 		if ec > maxBatchEvents {
-			h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "too_many_events",
+			h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "too_many_events",
 				fmt.Sprintf("event count %d exceeds limit %d", ec, maxBatchEvents), false)
 			return -1, nil
 		}
 		return ec, nil
 	}
-	sb, ok := h.decodeSignalBatch(batchMsg)
+	sb, ok := h.decodeSignalBatch(ctx, batchMsg)
 	if !ok {
 		return -1, nil
 	}
 	return len(sb.Signals), sb
 }
 
-func (h *CoreHandler) decodeSignalBatch(batchMsg *corepb.BatchMessage) (*core.SignalBatch, bool) {
+func (h *CoreHandler) decodeSignalBatch(ctx context.Context, batchMsg *corepb.BatchMessage) (*core.SignalBatch, bool) {
 	sb, err := core.UnmarshalSignalBatchCodec(h.codecForUnmarshal(), batchMsg.GetBatch())
 	if err != nil {
 		slog.Debug("signal batch decode failed", "error", err)
-		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "invalid_signal_batch", "signal batch could not be decoded", false)
+		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "invalid_signal_batch", "signal batch could not be decoded", false)
 		return nil, false
 	}
 	if err := sb.Validate(); err != nil {
 		slog.Debug("signal validation failed", "error", err)
-		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "signal_validation", "signal batch failed validation", false)
+		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "signal_validation", "signal batch failed validation", false)
 		return nil, false
 	}
 	if len(sb.Signals) > maxBatchEvents {
-		h.sendNack(context.Background(), batchMsg.GetSeq(), batchMsg.GetChunkId(), "too_many_events",
+		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "too_many_events",
 			fmt.Sprintf("event count %d exceeds limit %d", len(sb.Signals), maxBatchEvents), false)
 		return nil, false
 	}
@@ -214,7 +225,11 @@ func (h *CoreHandler) decodeSignalBatch(batchMsg *corepb.BatchMessage) (*core.Si
 func (h *CoreHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
 	n := h.negotiated.Load()
 	if n == nil {
-		return false
+		// negotiated 未设置 = 握手未完成或 0-RTT 降级路径。fail-closed：拒绝而非静默放行，
+		// 防止未认证的 envelope 在无算法一致性校验下被处理。
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+			"negotiation result unavailable", false)
+		return true
 	}
 	if env.Compression != n.Compression {
 		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,

@@ -37,7 +37,7 @@ func TestNewMetrics(t *testing.T) {
 	})
 }
 
-// TestMetricsFields tests that all metric fields are initialized.
+// TestMetricsFields tests that all metric getter methods return non-nil values.
 func TestMetricsFields(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	metrics := New(registry)
@@ -49,7 +49,7 @@ func TestMetricsFields(t *testing.T) {
 		{
 			name: "ConnectionsActive",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.ConnectionsActiveGauge == nil {
+				if m.ConnectionsActive() == nil {
 					t.Error("ConnectionsActive should not be nil")
 				}
 			},
@@ -57,79 +57,79 @@ func TestMetricsFields(t *testing.T) {
 		{
 			name: "AuthSuccessTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.AuthSuccessTotal == nil {
-					t.Error("AuthSuccessTotal should not be nil")
+				if m.AuthSuccess() == nil {
+					t.Error("AuthSuccess should not be nil")
 				}
 			},
 		},
 		{
 			name: "AuthFailureTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.AuthFailureTotal == nil {
-					t.Error("AuthFailureTotal should not be nil")
+				if m.AuthFailure() == nil {
+					t.Error("AuthFailure should not be nil")
 				}
 			},
 		},
 		{
 			name: "BatchesSentTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.BatchesSentTotal == nil {
-					t.Error("BatchesSentTotal should not be nil")
+				if m.BatchesSent() == nil {
+					t.Error("BatchesSent should not be nil")
 				}
 			},
 		},
 		{
 			name: "BatchesAckedTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.BatchesAckedTotal == nil {
-					t.Error("BatchesAckedTotal should not be nil")
+				if m.BatchesAcked() == nil {
+					t.Error("BatchesAcked should not be nil")
 				}
 			},
 		},
 		{
 			name: "BatchesNackedTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.BatchesNackedTotal == nil {
-					t.Error("BatchesNackedTotal should not be nil")
+				if m.BatchesNacked() == nil {
+					t.Error("BatchesNacked should not be nil")
 				}
 			},
 		},
 		{
 			name: "PartialAckTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.PartialAckTotal == nil {
-					t.Error("PartialAckTotal should not be nil")
+				if m.PartialAck() == nil {
+					t.Error("PartialAck should not be nil")
 				}
 			},
 		},
 		{
 			name: "ReplayCacheHitsTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.ReplayCacheHitsTotal == nil {
-					t.Error("ReplayCacheHitsTotal should not be nil")
+				if m.ReplayCacheHits() == nil {
+					t.Error("ReplayCacheHits should not be nil")
 				}
 			},
 		},
 		{
 			name: "HMACFailuresTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.HMACFailuresTotal == nil {
-					t.Error("HMACFailuresTotal should not be nil")
+				if m.HMACFailures() == nil {
+					t.Error("HMACFailures should not be nil")
 				}
 			},
 		},
 		{
 			name: "DecryptFailuresTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.DecryptFailuresTotal == nil {
-					t.Error("DecryptFailuresTotal should not be nil")
+				if m.DecryptFailures() == nil {
+					t.Error("DecryptFailures should not be nil")
 				}
 			},
 		},
 		{
 			name: "WindowCurrentBatches",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.WindowCurrentBatchesGauge == nil {
+				if m.WindowCurrentBatches() == nil {
 					t.Error("WindowCurrentBatches should not be nil")
 				}
 			},
@@ -137,7 +137,7 @@ func TestMetricsFields(t *testing.T) {
 		{
 			name: "WindowCurrentEvents",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.WindowCurrentEventsGauge == nil {
+				if m.WindowCurrentEvents() == nil {
 					t.Error("WindowCurrentEvents should not be nil")
 				}
 			},
@@ -145,7 +145,7 @@ func TestMetricsFields(t *testing.T) {
 		{
 			name: "WindowCurrentBytes",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.WindowCurrentBytesGauge == nil {
+				if m.WindowCurrentBytes() == nil {
 					t.Error("WindowCurrentBytes should not be nil")
 				}
 			},
@@ -153,8 +153,8 @@ func TestMetricsFields(t *testing.T) {
 		{
 			name: "ThrottleSecondsTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.ThrottleSecondsTotal == nil {
-					t.Error("ThrottleSecondsTotal should not be nil")
+				if m.ThrottleSeconds() == nil {
+					t.Error("ThrottleSeconds should not be nil")
 				}
 			},
 		},
@@ -169,8 +169,6 @@ func TestMetricsFields(t *testing.T) {
 
 // TestMetricsNamespace tests that metrics use the correct namespace.
 func TestMetricsNamespace(t *testing.T) {
-	// The namespace is defined as "mbta" in the metrics.go file
-	// We can verify this by checking metric descriptions or registered metrics
 	registry := prometheus.NewRegistry()
 	New(registry)
 
@@ -183,7 +181,6 @@ func TestMetricsNamespace(t *testing.T) {
 		t.Error("Expected metrics to be registered")
 	}
 
-	// Verify namespace in metric names
 	for _, mf := range metricFamilies {
 		name := mf.GetName()
 		if name == "" {
@@ -202,13 +199,6 @@ func TestMetricsCount(t *testing.T) {
 		t.Fatalf("Gather() error: %v", err)
 	}
 
-	// Expected metrics count (based on MBTAMetrics struct)
-	// 20 metrics: ConnectionsActive, AuthSuccessTotal, AuthFailureTotal,
-	// BatchesSentTotal, BatchesAckedTotal, BatchesNackedTotal, ThrottledTotal,
-	// PartialAckTotal, ReplayCacheHitsTotal, ReplayCacheEvictionsTotal,
-	// HMACFailuresTotal, DecryptFailuresTotal, WindowCurrentBatches,
-	// WindowCurrentEvents, WindowCurrentBytes, ThrottleSecondsTotal,
-	// BatchLatencySeconds, BatchSizeEvents, BatchSizeBytes, ConnectionDuration
 	expectedCount := 20
 	if len(metricFamilies) != expectedCount {
 		t.Errorf("Expected %d metrics, got %d", expectedCount, len(metricFamilies))
@@ -220,28 +210,26 @@ func TestMetricsMetricTypes(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	metrics := New(registry)
 
-	// Test that Gauges and Counters are properly typed
-	// This is a compile-time check, but we can verify non-nil
 	t.Run("Gauge metrics exist", func(t *testing.T) {
-		if metrics.ConnectionsActiveGauge == nil ||
-			metrics.WindowCurrentBatchesGauge == nil ||
-			metrics.WindowCurrentEventsGauge == nil ||
-			metrics.WindowCurrentBytesGauge == nil {
+		if metrics.ConnectionsActive() == nil ||
+			metrics.WindowCurrentBatches() == nil ||
+			metrics.WindowCurrentEvents() == nil ||
+			metrics.WindowCurrentBytes() == nil {
 			t.Error("One or more Gauge metrics are nil")
 		}
 	})
 
 	t.Run("Counter metrics exist", func(t *testing.T) {
-		if metrics.AuthSuccessTotal == nil ||
-			metrics.AuthFailureTotal == nil ||
-			metrics.BatchesSentTotal == nil ||
-			metrics.BatchesAckedTotal == nil ||
-			metrics.BatchesNackedTotal == nil ||
-			metrics.PartialAckTotal == nil ||
-			metrics.ReplayCacheHitsTotal == nil ||
-			metrics.HMACFailuresTotal == nil ||
-			metrics.DecryptFailuresTotal == nil ||
-			metrics.ThrottleSecondsTotal == nil {
+		if metrics.AuthSuccess() == nil ||
+			metrics.AuthFailure() == nil ||
+			metrics.BatchesSent() == nil ||
+			metrics.BatchesAcked() == nil ||
+			metrics.BatchesNacked() == nil ||
+			metrics.PartialAck() == nil ||
+			metrics.ReplayCacheHits() == nil ||
+			metrics.HMACFailures() == nil ||
+			metrics.DecryptFailures() == nil ||
+			metrics.ThrottleSeconds() == nil {
 			t.Error("One or more Counter metrics are nil")
 		}
 	})

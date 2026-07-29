@@ -74,25 +74,19 @@ func TestReplayKey(t *testing.T) {
 			name:    "basic key generation",
 			agentID: "agent-123",
 			chunkID: "chunk-456",
-			want:    "9:agent-123chunk-456",
+			want:    "agent-123\x00chunk-456",
 		},
 		{
 			name:    "empty chunkID",
 			agentID: "agent-123",
 			chunkID: "",
-			want:    "9:agent-123",
-		},
-		{
-			name:    "chunkID with null byte",
-			agentID: "agent-123",
-			chunkID: "chunk\x00456",
-			want:    "9:agent-123chunk\x00456",
+			want:    "agent-123\x00",
 		},
 		{
 			name:    "both empty",
 			agentID: "",
 			chunkID: "",
-			want:    "0:",
+			want:    "\x00",
 		},
 	}
 
@@ -122,12 +116,13 @@ func TestReplayKey(t *testing.T) {
 		}
 	})
 
-	t.Run("No collision with null bytes in input (length-prefix encoding)", func(t *testing.T) {
-		// 旧编码 agentID+"\x00"+chunkID 对含 \x00 的输入会碰撞；长度前缀编码不会。
-		k1 := replayKey("a\x00b", "c")
-		k2 := replayKey("a", "b\x00c")
+	t.Run("No collision for valid inputs (\\x00 separator safe by validation)", func(t *testing.T) {
+		// \x00 分隔符安全性依赖 validateAgentID（拒绝 <0x20 含 \x00）和 chunkID
+		// hex 校验（仅 [0-9a-f]）的不变量。此处测试合法输入不碰撞。
+		k1 := replayKey("agent-a", "01")
+		k2 := replayKey("agent", "a01") // 不同分割
 		if k1 == k2 {
-			t.Error("length-prefix encoding should not collide for inputs containing \\x00")
+			t.Error("different valid inputs should not collide")
 		}
 	})
 }

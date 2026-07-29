@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 const namespace = "mbta"
@@ -13,6 +14,9 @@ const namespace = "mbta"
 // Counter 是单调递增计数器的最小接口（对应 prometheus.Counter 语义）。
 // 抽象出此接口使 protocol 层不直接依赖 prometheus 具体类型，支持注入
 // NoOp 实现（无 metrics 场景）或未来其他后端（如 OpenTelemetry）。
+//
+// Add 必须传入非负值：prometheus.Counter.Add 对负值 panic（进程崩溃）。
+// 若调用方无法保证入参非负，建议使用 NewGuardedCounter 包装。
 type Counter interface {
 	Inc()
 	Add(float64)
@@ -77,64 +81,66 @@ type Metrics interface {
 
 // MBTAMetrics 是 Metrics 的 prometheus 后端实现。
 //
-// 字段直接持有 prometheus 指标（向后兼容：现有代码若直接访问字段仍可工作），
-// 同时实现 Metrics 接口供 protocol 层使用。New(reg) 返回的 *MBTAMetrics 可直接
-// 赋值给 Metrics 类型的配置字段，零迁移成本。
+// 所有字段为非导出（小写）：外部必须通过 Metrics 接口的 getter 方法访问，
+// Counter 类方法返回 guardedCounter 包装，防止负值 Add 触发 prometheus panic。
+// New(reg) 返回的 *MBTAMetrics 可直接赋值给 Metrics 类型的配置字段。
 type MBTAMetrics struct {
-	ConnectionsActiveGauge prometheus.Gauge
-	AuthSuccessTotal       prometheus.Counter
-	AuthFailureTotal       prometheus.Counter
+	connectionsActiveGauge prometheus.Gauge
+	authSuccessTotal       prometheus.Counter
+	authFailureTotal       prometheus.Counter
 
-	BatchesSentTotal   prometheus.Counter
-	BatchesAckedTotal  prometheus.Counter
-	BatchesNackedTotal prometheus.Counter
-	ThrottledTotal     prometheus.Counter
-	PartialAckTotal    prometheus.Counter
+	batchesSentTotal   prometheus.Counter
+	batchesAckedTotal  prometheus.Counter
+	batchesNackedTotal prometheus.Counter
+	throttledTotal     prometheus.Counter
+	partialAckTotal    prometheus.Counter
 
-	ReplayCacheHitsTotal prometheus.Counter
+	replayCacheHitsTotal prometheus.Counter
 
-	ReplayCacheEvictionsTotal prometheus.Counter
+	replayCacheEvictionsTotal prometheus.Counter
 
-	HMACFailuresTotal    prometheus.Counter
-	DecryptFailuresTotal prometheus.Counter
+	hmacFailuresTotal    prometheus.Counter
+	decryptFailuresTotal prometheus.Counter
 
-	WindowCurrentBatchesGauge prometheus.Gauge
-	WindowCurrentEventsGauge  prometheus.Gauge
-	WindowCurrentBytesGauge   prometheus.Gauge
+	windowCurrentBatchesGauge prometheus.Gauge
+	windowCurrentEventsGauge  prometheus.Gauge
+	windowCurrentBytesGauge   prometheus.Gauge
 
-	ThrottleSecondsTotal prometheus.Counter
+	throttleSecondsTotal prometheus.Counter
 
 	// Key SLI histograms
-	BatchLatencySeconds   prometheus.Histogram // SendBatch → ACK latency
-	BatchSizeEventsHist   prometheus.Histogram // events per batch distribution
-	BatchSizeBytesHist    prometheus.Histogram // bytes per batch distribution
-	ConnectionDurationSec prometheus.Histogram // connection lifetime
+	batchLatencySeconds   prometheus.Histogram // SendBatch → ACK latency
+	batchSizeEventsHist   prometheus.Histogram // events per batch distribution
+	batchSizeBytesHist    prometheus.Histogram // bytes per batch distribution
+	connectionDurationSec prometheus.Histogram // connection lifetime
 }
 
 // 接口实现：MBTAMetrics 满足 Metrics。每个方法返回底层 prometheus 指标
 // （prometheus.Gauge/Counter/Histogram 已满足对应的最小接口）。
-// 字段名加后缀（Gauge/Total/Hist/Sec）避免与方法名冲突。
+// Counter 类方法统一返回 guardedCounter，防御负值 Add panic。
 
-func (m *MBTAMetrics) ConnectionsActive() Gauge      { return m.ConnectionsActiveGauge }
-func (m *MBTAMetrics) AuthSuccess() Counter          { return m.AuthSuccessTotal }
-func (m *MBTAMetrics) AuthFailure() Counter          { return m.AuthFailureTotal }
-func (m *MBTAMetrics) BatchesSent() Counter          { return m.BatchesSentTotal }
-func (m *MBTAMetrics) BatchesAcked() Counter         { return m.BatchesAckedTotal }
-func (m *MBTAMetrics) BatchesNacked() Counter        { return m.BatchesNackedTotal }
-func (m *MBTAMetrics) Throttled() Counter            { return m.ThrottledTotal }
-func (m *MBTAMetrics) PartialAck() Counter           { return m.PartialAckTotal }
-func (m *MBTAMetrics) ReplayCacheHits() Counter      { return m.ReplayCacheHitsTotal }
-func (m *MBTAMetrics) ReplayCacheEvictions() Counter { return m.ReplayCacheEvictionsTotal }
-func (m *MBTAMetrics) HMACFailures() Counter         { return m.HMACFailuresTotal }
-func (m *MBTAMetrics) DecryptFailures() Counter      { return m.DecryptFailuresTotal }
-func (m *MBTAMetrics) WindowCurrentBatches() Gauge   { return m.WindowCurrentBatchesGauge }
-func (m *MBTAMetrics) WindowCurrentEvents() Gauge    { return m.WindowCurrentEventsGauge }
-func (m *MBTAMetrics) WindowCurrentBytes() Gauge     { return m.WindowCurrentBytesGauge }
-func (m *MBTAMetrics) ThrottleSeconds() Counter      { return m.ThrottleSecondsTotal }
-func (m *MBTAMetrics) BatchLatency() Histogram       { return m.BatchLatencySeconds }
-func (m *MBTAMetrics) BatchSizeEvents() Histogram    { return m.BatchSizeEventsHist }
-func (m *MBTAMetrics) BatchSizeBytes() Histogram     { return m.BatchSizeBytesHist }
-func (m *MBTAMetrics) ConnectionDuration() Histogram { return m.ConnectionDurationSec }
+func (m *MBTAMetrics) ConnectionsActive() Gauge { return m.connectionsActiveGauge }
+func (m *MBTAMetrics) AuthSuccess() Counter     { return guardedCounter{m.authSuccessTotal} }
+func (m *MBTAMetrics) AuthFailure() Counter     { return guardedCounter{m.authFailureTotal} }
+func (m *MBTAMetrics) BatchesSent() Counter     { return guardedCounter{m.batchesSentTotal} }
+func (m *MBTAMetrics) BatchesAcked() Counter    { return guardedCounter{m.batchesAckedTotal} }
+func (m *MBTAMetrics) BatchesNacked() Counter   { return guardedCounter{m.batchesNackedTotal} }
+func (m *MBTAMetrics) Throttled() Counter       { return guardedCounter{m.throttledTotal} }
+func (m *MBTAMetrics) PartialAck() Counter      { return guardedCounter{m.partialAckTotal} }
+func (m *MBTAMetrics) ReplayCacheHits() Counter { return guardedCounter{m.replayCacheHitsTotal} }
+func (m *MBTAMetrics) ReplayCacheEvictions() Counter {
+	return guardedCounter{m.replayCacheEvictionsTotal}
+}
+func (m *MBTAMetrics) HMACFailures() Counter         { return guardedCounter{m.hmacFailuresTotal} }
+func (m *MBTAMetrics) DecryptFailures() Counter      { return guardedCounter{m.decryptFailuresTotal} }
+func (m *MBTAMetrics) WindowCurrentBatches() Gauge   { return m.windowCurrentBatchesGauge }
+func (m *MBTAMetrics) WindowCurrentEvents() Gauge    { return m.windowCurrentEventsGauge }
+func (m *MBTAMetrics) WindowCurrentBytes() Gauge     { return m.windowCurrentBytesGauge }
+func (m *MBTAMetrics) ThrottleSeconds() Counter      { return guardedCounter{m.throttleSecondsTotal} }
+func (m *MBTAMetrics) BatchLatency() Histogram       { return m.batchLatencySeconds }
+func (m *MBTAMetrics) BatchSizeEvents() Histogram    { return m.batchSizeEventsHist }
+func (m *MBTAMetrics) BatchSizeBytes() Histogram     { return m.batchSizeBytesHist }
+func (m *MBTAMetrics) ConnectionDuration() Histogram { return m.connectionDurationSec }
 
 // New creates and registers all MBTA metrics with the given registerer.
 // Pass prometheus.DefaultRegisterer for global registration,
@@ -145,106 +151,106 @@ func New(reg prometheus.Registerer) *MBTAMetrics {
 	}
 
 	m := &MBTAMetrics{
-		ConnectionsActiveGauge: newGauge(reg, prometheus.GaugeOpts{
+		connectionsActiveGauge: newGauge(reg, prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "connections_active",
 			Help:      "Current number of active MBTA connections",
 		}),
-		AuthSuccessTotal: newCounter(reg, prometheus.CounterOpts{
+		authSuccessTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "auth_success_total",
 			Help:      "Total number of successful authentications",
 		}),
-		AuthFailureTotal: newCounter(reg, prometheus.CounterOpts{
+		authFailureTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "auth_failure_total",
 			Help:      "Total number of failed authentications",
 		}),
-		BatchesSentTotal: newCounter(reg, prometheus.CounterOpts{
+		batchesSentTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "batches_sent_total",
 			Help:      "Total number of batches sent by agents",
 		}),
-		BatchesAckedTotal: newCounter(reg, prometheus.CounterOpts{
+		batchesAckedTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "batches_acked_total",
 			Help:      "Total number of batches acknowledged",
 		}),
-		BatchesNackedTotal: newCounter(reg, prometheus.CounterOpts{
+		batchesNackedTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "batches_nacked_total",
 			Help:      "Total number of batches rejected (NACK)",
 		}),
-		ThrottledTotal: newCounter(reg, prometheus.CounterOpts{
+		throttledTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "throttled_total",
 			Help:      "Total number of THROTTLE frames sent to clients",
 		}),
-		PartialAckTotal: newCounter(reg, prometheus.CounterOpts{
+		partialAckTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "partial_ack_total",
 			Help:      "Total number of partial acknowledgements",
 		}),
-		ReplayCacheHitsTotal: newCounter(reg, prometheus.CounterOpts{
+		replayCacheHitsTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "replay_cache_hits_total",
 			Help:      "Total number of replay cache duplicate detections",
 		}),
-		HMACFailuresTotal: newCounter(reg, prometheus.CounterOpts{
+		hmacFailuresTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "hmac_failures_total",
 			Help:      "Total number of HMAC verification failures",
 		}),
-		DecryptFailuresTotal: newCounter(reg, prometheus.CounterOpts{
+		decryptFailuresTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "decrypt_failures_total",
 			Help:      "Total number of decryption failures",
 		}),
-		WindowCurrentBatchesGauge: newGauge(reg, prometheus.GaugeOpts{
+		windowCurrentBatchesGauge: newGauge(reg, prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "window_current_batches",
 			Help:      "Current inflight batches against the flow-control window",
 		}),
-		WindowCurrentEventsGauge: newGauge(reg, prometheus.GaugeOpts{
+		windowCurrentEventsGauge: newGauge(reg, prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "window_current_events",
 			Help:      "Current inflight events against the flow-control window",
 		}),
-		WindowCurrentBytesGauge: newGauge(reg, prometheus.GaugeOpts{
+		windowCurrentBytesGauge: newGauge(reg, prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "window_current_bytes",
 			Help:      "Current inflight bytes against the flow-control window",
 		}),
-		ThrottleSecondsTotal: newCounter(reg, prometheus.CounterOpts{
+		throttleSecondsTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "throttle_seconds_total",
 			Help:      "Total seconds the client has been throttled",
 		}),
-		BatchLatencySeconds: newHistogram(reg, prometheus.HistogramOpts{
+		batchLatencySeconds: newHistogram(reg, prometheus.HistogramOpts{
 			Namespace: namespace,
 			Name:      "batch_latency_seconds",
 			Help:      "Latency from SendBatch to ACK in seconds",
 			Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10},
 		}),
-		BatchSizeEventsHist: newHistogram(reg, prometheus.HistogramOpts{
+		batchSizeEventsHist: newHistogram(reg, prometheus.HistogramOpts{
 			Namespace: namespace,
 			Name:      "batch_size_events",
 			Help:      "Number of events per batch",
 			Buckets:   []float64{1, 5, 10, 50, 100, 500, 1000, 5000, 10000},
 		}),
-		BatchSizeBytesHist: newHistogram(reg, prometheus.HistogramOpts{
+		batchSizeBytesHist: newHistogram(reg, prometheus.HistogramOpts{
 			Namespace: namespace,
 			Name:      "batch_size_bytes",
 			Help:      "Batch size in bytes",
 			Buckets:   []float64{100, 1000, 10000, 100000, 1000000, 10000000},
 		}),
-		ConnectionDurationSec: newHistogram(reg, prometheus.HistogramOpts{
+		connectionDurationSec: newHistogram(reg, prometheus.HistogramOpts{
 			Namespace: namespace,
 			Name:      "connection_duration_seconds",
 			Help:      "Connection lifetime in seconds",
 			Buckets:   []float64{60, 300, 900, 1800, 3600, 21600, 43200, 86400},
 		}),
-		ReplayCacheEvictionsTotal: newCounter(reg, prometheus.CounterOpts{
+		replayCacheEvictionsTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "replay_cache_evictions_total",
 			Help:      "Total number of replay cache evictions",
@@ -294,6 +300,35 @@ func (noopGauge) Add(float64) {}
 type noopHistogram struct{}
 
 func (noopHistogram) Observe(float64) {}
+
+// guardedCounter 包装 prometheus.Counter，防御负值 Add 导致的进程 panic。
+//
+// prometheus.Counter.Add 在入参为负时直接 panic 崩溃进程（Go client 设计约束）。
+// 本包装在 Add 前检查：负值安全丢弃并 warn 日志，保证进程存活。
+// Inc/Desc/Write/Collect/Describe 直接委托底层 Counter，零额外开销。
+type guardedCounter struct {
+	c prometheus.Counter
+}
+
+func (g guardedCounter) Inc() { g.c.Inc() }
+func (g guardedCounter) Add(v float64) {
+	if v < 0 {
+		slog.Warn("counter.Add called with negative value, dropping to prevent panic",
+			"value", v)
+		return
+	}
+	g.c.Add(v)
+}
+func (g guardedCounter) Desc() *prometheus.Desc              { return g.c.Desc() }
+func (g guardedCounter) Write(m *dto.Metric) error           { return g.c.Write(m) }
+func (g guardedCounter) Describe(ch chan<- *prometheus.Desc) { g.c.Describe(ch) }
+func (g guardedCounter) Collect(ch chan<- prometheus.Metric) { g.c.Collect(ch) }
+
+// compile-time assertions: guardedCounter satisfies prometheus.Counter and Counter.
+var (
+	_ prometheus.Counter = guardedCounter{}
+	_ Counter            = guardedCounter{}
+)
 
 // registerOrExisting 尝试注册 collector；若已注册（重复调用 New），返回已有 collector 而非 panic。
 //

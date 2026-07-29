@@ -211,7 +211,13 @@ type ThrottleState struct {
 
 // Apply sets the throttle from a THROTTLE message.
 func (ts *ThrottleState) Apply(retryDelayMs int) {
-	d := max(0, min(time.Duration(retryDelayMs)*time.Millisecond, MaxThrottleDelay))
+	// 负值或零值 retry_delay_ms 视为"不限制"：清除节流而非设置零时长节流，
+	// 避免 Active() 在极短窗口内误返回 true（恶意/有缺陷的服务端发送负值时）。
+	if retryDelayMs <= 0 {
+		ts.until.Store(nil)
+		return
+	}
+	d := min(time.Duration(retryDelayMs)*time.Millisecond, MaxThrottleDelay)
 	deadline := time.Now().Add(d) // time.Now() 含单调时钟，Add 保留
 	ts.until.Store(&deadline)
 }

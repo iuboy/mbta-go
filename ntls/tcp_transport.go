@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/protocol"
@@ -14,12 +15,12 @@ import (
 //
 // 模型（core spec §10 / MultiplexTCPSingleConn）：单连接上 control 帧（HELLO/AUTH/PING/CLOSE）
 // 与 data 帧（BATCH/DATAGRAM）按 ChannelID 分流到两个逻辑通道，供 CoreHandler 的
-// control loop 与 data loop 分别消费。写侧 writeMu 串行化（同连接帧不交错）。
+// control loop 与 data loop 分别消费。写侧 writeSem 串行化（同连接帧不交错）。
 //
 // TCP 不支持不可靠通道：SupportsDatagram()=false，lossy signal 由 CoreHandler 回退 BATCH。
 type tcpTransport struct {
-	conn    net.Conn
-	writeMu sync.Mutex // 同连接写串行化
+	conn     net.Conn
+	writeSem chan struct{} // 容量 1 的信号量，替代 sync.Mutex 支持 ctx 取消
 
 	controlCh chan core.Frame // control 帧（ChannelControl）
 	dataCh    chan core.Frame // data 帧（BATCH/DATAGRAM）
@@ -31,8 +32,12 @@ type tcpTransport struct {
 
 // newTCPTransport 包装一条已握手的 TLCP 连接，启动读循环分发帧。
 func newTCPTransport(conn net.Conn) *tcpTransport {
+	// writeSem 初始持有 1 个 token（空闲），后续 SendFrame 通过 select 获取。
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{}
 	t := &tcpTransport{
 		conn:      conn,
+		writeSem:  sem,
 		controlCh: make(chan core.Frame, 16),
 		dataCh:    make(chan core.Frame, 64),
 		done:      make(chan struct{}),
@@ -95,16 +100,21 @@ func (t *tcpTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 	}
 }
 
-// SendFrame 写帧（按 ChannelID 写单连接，writeMu 串行化）。
-// ctx 用于在获取写锁前检查取消，避免对慢速/无响应对端的写操作永久阻塞。
+// SendFrame 写帧（按 ChannelID 写单连接，writeSem 串行化）。
+//
+// writeSem 为容量 1 的 channel 信号量：获取 token 等价于加锁，归还 token 等价于解锁。
+// select 同时监听 ctx.Done()，使写锁等待过程可被上下文取消——旧实现用 sync.Mutex，
+// Lock 阻塞不可取消，慢速对端会导致发送方 goroutine 泄漏/永久挂起。
 func (t *tcpTransport) SendFrame(ctx context.Context, f core.Frame) error {
+	// 获取写信号量（或响应 ctx 取消）。
 	select {
+	case <-t.writeSem:
+		// 获取到 token，继续写操作
 	case <-ctx.Done():
 		return ctx.Err()
-	default:
 	}
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
+	// 归还 token（等价于解锁）。
+	defer func() { t.writeSem <- struct{}{} }()
 	return core.Write(t.conn, f.Header.Version, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
 }
 
@@ -123,7 +133,8 @@ func (t *tcpTransport) Multiplexing() protocol.MultiplexModel {
 	return protocol.MultiplexTCPSingleConn
 }
 
-// Close 关闭连接。
+// Close 关闭连接，等待 in-flight 写操作完成后再关闭底层 TCP 连接，
+// 避免活跃的 core.Write 被 conn.Close() 中断产生 io.ErrClosedPipe。
 func (t *tcpTransport) Close() error {
 	t.closeMu.Lock()
 	defer t.closeMu.Unlock()
@@ -132,5 +143,16 @@ func (t *tcpTransport) Close() error {
 	}
 	t.closed = true
 	close(t.done) // 唤醒可能阻塞在 channel 发送的 readLoop
+
+	// 等待正在进行的写操作完成（带超时保护，防止写端卡死导致 Close 永久阻塞）。
+	// writeSem 为容量 1 的信号量：drain token 表示无 in-flight 写。
+	// 不归还 token：确保 conn.Close() 期间不会有新的 SendFrame 获取 token 进入 core.Write，
+	// 消除 write-after-close 竞争。
+	select {
+	case <-t.writeSem:
+		// token 已 drain，保持持有——不归还，阻止新写操作。
+	case <-time.After(5 * time.Second):
+		// 超时兜底：写端可能卡在慢速对端，不无限等待。
+	}
 	return t.conn.Close()
 }

@@ -3,7 +3,6 @@ package core
 import (
 	"container/list"
 	"log/slog"
-	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -89,14 +88,20 @@ func NewReplayCacheWithSize(maxSize int) *ReplayCache {
 }
 
 // replayKey builds the dedup key from agentID and chunkID.
-// 长度前缀编码避免输入含 \x00 时碰撞（如 ("a\x00b","c") 与 ("a","b\x00c")）。
+// 使用 \x00 分隔符：agentID 和 chunkID 均经过 validateAgentID/validateHexID 校验，
+// 已拒绝所有控制字符（含 \x00，即 < 0x20），因此 \x00 不可能出现在任一输入中，
+// 可安全用作定界符。比长度前缀更简洁且无歧义。
 func replayKey(agentID, chunkID string) string {
-	return strconv.Itoa(len(agentID)) + ":" + agentID + chunkID
+	return agentID + "\x00" + chunkID
 }
 
 // SetMetrics 注入可观测性接口，用于上报缓存驱逐次数。可选；nil 表示不上报。
-// 必须在缓存进入并发使用前调用，不与 SeenOrAdd/Update/Get 并发。
-func (rc *ReplayCache) SetMetrics(m Metrics) { rc.metrics = m }
+// 线程安全：加锁写入，与 SeenOrAdd/Update/Get 的读取无竞争。
+func (rc *ReplayCache) SetMetrics(m Metrics) {
+	rc.mu.Lock()
+	rc.metrics = m
+	rc.mu.Unlock()
+}
 
 // SeenOrAdd checks if a (agentID, chunkID) pair has been seen. Returns the entry if so.
 // If not seen, creates a new Processing entry and returns nil.

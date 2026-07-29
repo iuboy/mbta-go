@@ -93,7 +93,9 @@ type CoreClient struct {
 	// 用 atomic.Value（Pointer 不支持 []byte）保证可见性。
 	sessionID      atomic.Value // []byte
 	challengeNonce atomic.Value // []byte
-	expiresAt      time.Time    // 会话过期时间，从 AUTH_OK 获取
+	// 会话过期时间（Unix 秒），从 AUTH_OK 获取。原子化以消除握手写 / 后台读的数据竞争
+	// （与 CoreHandler.expiresAt 对齐）。
+	expiresAt atomic.Int64
 
 	// 发送追踪
 	seq      *core.SeqGenerator
@@ -114,6 +116,9 @@ type CoreClient struct {
 
 	// redirectHandler 在收到 TypeRedirect 时回调，接收原始 payload（应用层解码）。
 	redirectHandler atomic.Pointer[func(payload []byte)]
+	// redirectInflight 防止同时运行多个 redirect handler goroutine，
+	// 应对恶意/有缺陷的服务端高频重定向耗尽 goroutine 资源。
+	redirectInflight atomic.Bool
 
 	ackTimeout        time.Duration // max time to wait for ACK (default 5 min)
 	heartbeatInterval time.Duration // PING 发送间隔（从 HELLO_ACK 获取，默认 30s）

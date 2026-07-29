@@ -172,22 +172,22 @@ func (s *SessionStore) reapLoop(interval time.Duration) {
 
 // Close 停止后台 reaper goroutine（如已启动）并等待其退出。
 // 不删除未过期的 session——仅在进程/实例退出或显式释放时调用。
-// 允许多次调用：第二次及以后为 no-op。
+// 允许多次调用：closeOnce 保证仅执行一次关闭逻辑，后续调用为 no-op。
+//
+// 警告：使用 WithReaperInterval 创建的 SessionStore 必须调用 Close，
+// 否则 reaper goroutine 和 ticker 会永久泄漏。不调用 Close 而依赖 GC
+// 回收是资源泄漏——Go runtime 无法回收仍在等待 channel 的 goroutine。
 func (s *SessionStore) Close() {
-	if s.stopCh == nil {
-		// 即使无 reaper，也标记 closed 以拒绝后续 Put/Get。
+	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
 		s.mu.Unlock()
-		return
-	}
-	// 先在锁内置 closed：消除「close(stopCh) 后、closed 置位前」的窗口，
-	// 否则 reaper 已退出但 Put 仍可写入永不被回收的条目。
-	s.mu.Lock()
-	s.closed = true
-	s.mu.Unlock()
-	s.closeOnce.Do(func() {
-		close(s.stopCh)
+		if s.stopCh != nil {
+			close(s.stopCh)
+		}
 	})
-	<-s.doneCh
+	// 等待 reaper 退出（若无 reaper 则跳过）。
+	if s.doneCh != nil {
+		<-s.doneCh
+	}
 }

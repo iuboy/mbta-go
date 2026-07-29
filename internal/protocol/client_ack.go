@@ -31,19 +31,30 @@ func (c *CoreClient) dispatchACK(chunkID, mode string) {
 }
 
 // runACKWorker 消费 ackTask 并在单 goroutine 上调用已注册 handler，保持 ACK 到达顺序。
-// 关闭时先排空队列，使已入队回调仍能投递。
+// 关闭时先排空队列（带超时保护），使已入队回调仍能投递，但不会因 handler 阻塞而永久挂起。
 func (c *CoreClient) runACKWorker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// 排空队列时加超时：用户 handler 可能阻塞，不能让 drain 永久挂住
+			// 否则 ackWorkerDone 不关闭 → waitGoroutines 超时 + goroutine 永久泄漏。
+			drainDeadline := time.NewTimer(5 * time.Second)
+			defer drainDeadline.Stop()
+		drain:
 			for {
 				select {
 				case t := <-c.ackQueue:
 					c.invokeACKHandler(t)
+				case <-drainDeadline.C:
+					if q := len(c.ackQueue); q > 0 {
+						slog.Warn("ACK worker drain timed out, dropping callbacks", "pending", q)
+					}
+					break drain
 				default:
-					return
+					break drain
 				}
 			}
+			return
 		case t := <-c.ackQueue:
 			c.invokeACKHandler(t)
 		}

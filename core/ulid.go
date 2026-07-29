@@ -37,19 +37,28 @@ func NewChunkID() ChunkID {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				// 熵源失败/单调溢出降级：填充纯随机字节，保证唯一性（丧失单调序）。
-				slog.Warn("ulid generation panicked, falling back to random", "panic", r)
-				if _, err := rand.Read(u[:]); err != nil {
-					// crypto/rand 彻底不可用：用时间戳 + 进程启动偏移填充全部 16 字节，
+				// 熵源失败/单调溢出降级：保留 ULID 时间戳结构（前 6 字节），
+				// 后 10 字节填充随机数保证唯一性。旧实现将全部 16 字节填随机数，
+				// 前 6 字节不是标准 ULID 时间戳 → Timestamp() 返回错误且丧失时序可排序性。
+				slog.Warn("ulid generation panicked, falling back to random entropy", "panic", r)
+				now := uint64(time.Now().UnixMilli())
+				u[0] = byte(now >> 40)
+				u[1] = byte(now >> 32)
+				u[2] = byte(now >> 24)
+				u[3] = byte(now >> 16)
+				u[4] = byte(now >> 8)
+				u[5] = byte(now)
+				if _, err := rand.Read(u[6:]); err != nil {
+					// crypto/rand 彻底不可用：用时间戳 + 进程启动偏移填充剩余字节，
 					// 保证有效熵（旧实现 i%8*8 使高 8 字节与低 8 字节重复，仅 8 字节熵，
 					// 同纳秒内会产生相同 ChunkID，抗重放失效）。
 					slog.Error("crypto/rand unavailable, using weak timestamp-based ChunkID", "error", err)
-					now := uint64(time.Now().UnixNano())
+					nowNs := uint64(time.Now().UnixNano())
 					// 低 8 字节：纳秒时间戳；高 8 字节：时间戳按位取反。
 					// 同纳秒两次调用结果相同（此为极端降级路径，crypto/rand 不可用），
 					// 但高低 8 字节互补保证 16 字节整体有有效熵。
-					binary.LittleEndian.PutUint64(u[0:8], now)
-					binary.LittleEndian.PutUint64(u[8:16], ^now)
+					binary.LittleEndian.PutUint64(u[6:14], nowNs)
+					binary.LittleEndian.PutUint64(u[8:16], ^nowNs)
 				}
 			}
 		}()

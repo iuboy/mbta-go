@@ -49,6 +49,7 @@ type ServerConfig struct {
 	Sink               core.EventSink
 	Metrics            *core.MBTAMetrics
 	RedirectChecker    core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选）
+	SessionStore       *core.SessionStore   // 0-RTT 会话票据存储（nil=禁用 0-RTT）
 	ServerID           string               // 服务端标识，回填 HELLO_ACK；空则 NewServer 自动生成 ULID（Crockford base32，26 字符）
 	MaxConcurrentConns int                  // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns (H-3)
 }
@@ -305,6 +306,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		Metrics:         cfg.Metrics,
 		ServerID:        cfg.ServerID,
 		RedirectChecker: cfg.RedirectChecker,
+		SessionStore:    cfg.SessionStore,
 	}
 	return &Server{
 		Server: binding.NewServer[*Listener, net.Conn](cfg.MaxConcurrentConns, hcfg),

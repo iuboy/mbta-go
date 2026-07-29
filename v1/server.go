@@ -18,6 +18,7 @@ type ServerConfig struct {
 	Metrics            *core.MBTAMetrics
 	Sink               core.EventSink       // 上层注入的事件投递接口
 	RedirectChecker    core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选）
+	SessionStore       *core.SessionStore   // 0-RTT 会话票据存储（nil=禁用 0-RTT）
 	MaxConcurrentConns int                  // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns
 }
 
@@ -52,6 +53,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		Metrics:         cfg.Metrics,
 		ServerID:        cfg.ServerID,
 		RedirectChecker: cfg.RedirectChecker,
+		SessionStore:    cfg.SessionStore,
 	}
 	return &Server{
 		Server: binding.NewServer[*Listener, *Conn](cfg.MaxConcurrentConns, hcfg),

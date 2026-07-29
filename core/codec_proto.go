@@ -29,7 +29,16 @@ func (protoCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	if err := proto.Unmarshal(data, &pb); err != nil {
 		return nil, WrapError(NumValidation, CodeValidation, "unmarshal signal batch", err)
 	}
-	return fromProtoSignalBatch(&pb), nil
+	sb := fromProtoSignalBatch(&pb)
+	// 反序列化后校验：proto 文件注释标注 signal_type 必填，空字符串视为无效消息。
+	for i, s := range sb.Signals {
+		if s.SignalType == "" {
+			return nil, WrapError(NumValidation, CodeValidation,
+				fmt.Sprintf("signal[%d]: signal_type is required but empty", i),
+				fmt.Errorf("missing signal_type"))
+		}
+	}
+	return sb, nil
 }
 
 func init() {

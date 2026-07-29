@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash"
+	"sort"
 	"time"
 
 	"github.com/iuboy/pollux-go/sm3"
@@ -78,17 +79,27 @@ type StaticTokenValidator struct {
 
 // NewStaticTokenValidator creates a validator from a token->agentID mapping.
 // It also builds a reverse agentID->token index. When one agentID has multiple
-// tokens, last-write-wins applies (deterministic; production multi-token/agent
-// setups should implement a custom TokenValidator+TokenResolver).
+// tokens, the lexicographically smallest token wins（按 token 排序确保确定性，
+// 消除 map 遍历顺序随机化导致的跨进程启动不一致）。
 //
 // 输入 map 做防御性拷贝：validator 跨连接 goroutine 共享，若调用方后续修改原 map
 // 会引发并发读写 panic。返回的 validator 不可变（无导出的修改方法）。
 func NewStaticTokenValidator(tokens map[string]string) *StaticTokenValidator {
 	internal := make(map[string]string, len(tokens))
 	agents := make(map[string]string, len(tokens))
-	for tok, aid := range tokens {
+	// 按 token 排序遍历：保证同一 agentID 多 token 时选中的是确定性的（最小 token），
+	// 而非 Go map 随机遍历序。
+	sortedTokens := make([]string, 0, len(tokens))
+	for tok := range tokens {
+		sortedTokens = append(sortedTokens, tok)
+	}
+	sort.Strings(sortedTokens)
+	for _, tok := range sortedTokens {
+		aid := tokens[tok]
 		internal[tok] = aid
-		agents[aid] = tok
+		if _, exists := agents[aid]; !exists {
+			agents[aid] = tok // 仅首次（最小 token）写入，后续同 agentID 的 token 不覆盖
+		}
 	}
 	return &StaticTokenValidator{tokens: internal, agents: agents}
 }

@@ -41,6 +41,7 @@ type ServerConfig struct {
 	Sink            core.EventSink
 	Metrics         *core.MBTAMetrics
 	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
+	SessionStore    *core.SessionStore   // 0-RTT 会话票据存储（nil=禁用 0-RTT resumption）
 
 	// V1 specific configuration
 	V1QUIC v1.QUICServerConfig
@@ -177,6 +178,7 @@ func (s *Server) initV1Server() error {
 		Sink:            s.cfg.Sink,
 		Metrics:         s.cfg.Metrics,
 		RedirectChecker: s.cfg.RedirectChecker,
+		SessionStore:    s.cfg.SessionStore,
 	}
 
 	v1srv, err := v1.NewServer(cfg)
@@ -195,6 +197,7 @@ func (s *Server) initNTLSServer() error {
 	cfg.Sink = s.cfg.Sink
 	cfg.Metrics = s.cfg.Metrics
 	cfg.RedirectChecker = s.cfg.RedirectChecker
+	cfg.SessionStore = s.cfg.SessionStore
 
 	server, err := ntls.NewServer(cfg)
 	if err != nil {

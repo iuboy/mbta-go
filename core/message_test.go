@@ -40,8 +40,10 @@ func TestValidateAuth(t *testing.T) {
 	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s"), Token: "tok"}); err == nil {
 		t.Error("missing auth_nonce should fail")
 	}
-	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n")}); err == nil {
-		t.Error("missing token should fail")
+	// token 可以为空：tokenless AUTH 模式下服务端通过 TokenResolver 反查 token。
+	// token 必填校验由 handleAuth 在 resolveAuthToken 之后执行。
+	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n")}); err != nil {
+		t.Errorf("missing token should not fail ValidateAuth (tokenless mode): %v", err)
 	}
 }
 

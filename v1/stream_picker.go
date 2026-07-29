@@ -33,7 +33,11 @@ type singleStream struct {
 }
 
 // NewSingleStream returns a StreamPicker that always routes to the given single stream.
+// 传入 nil 会导致直接 panic；调用方应确保 ds 非 nil。
 func NewSingleStream(ds DataStream) StreamPicker {
+	if ds == nil {
+		panic("NewSingleStream: nil DataStream")
+	}
 	return &singleStream{ds: ds}
 }
 

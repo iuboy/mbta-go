@@ -115,11 +115,26 @@ func Build(p BuildParams) (*SecureEnvelope, error) {
 // Open 解析、校验 HMAC、解密、解压 SecureEnvelope，返回 SignalBatch 编码字节。
 // HMAC MUST 在解密/解压前校验（core spec §5.1）。传入非空 hmacKey 时，Open 会在
 // 解密前强制 VerifyMAC；校验失败立即返回错误，杜绝调用方遗漏 VerifyMAC 的安全绕过。
-// 传空 hmacKey 时跳过 HMAC 校验（仅用于显式选择明文/无 MAC 的诊断场景），生产路径
-// 必须传非空 hmacKey。
+//
+// 密钥组合策略（对标 Build，HMACKey 必填、AEADKey 可选）：
+//   - hmacKey 非空 + aeadKey 非空：生产路径（encrypt-then-MAC）
+//   - hmacKey 非空 + aeadKey 空  ：仅 HMAC 无加密（Build 的调试/明文模式）
+//   - hmacKey 空   + aeadKey 非空：禁止——加密但无 MAC 完整性校验，fail-closed
+//   - 两者都为空              ：禁止——调用方应显式选择明文/生产模式
 func Open(env *SecureEnvelope, hmacKey, aeadKey []byte) ([]byte, error) {
 	if env == nil {
 		return nil, NewError(NumEnvelope, CodeEnvelope, "nil envelope")
+	}
+	// 拒绝"有加密无 MAC"的降级攻击路径（encrypt-without-MAC）。
+	// hmacKey 空 + aeadKey 非空 = 完整性校验完全绕过，不可接受。
+	if len(hmacKey) == 0 && len(aeadKey) > 0 {
+		return nil, NewError(NumEnvelope, CodeEnvelope,
+			"AEAD key present but HMAC key empty (encrypt-without-MAC forbidden)")
+	}
+	// 拒绝两个都空的模糊调用（调用方必须显式选择模式）。
+	if len(hmacKey) == 0 && len(aeadKey) == 0 {
+		return nil, NewError(NumEnvelope, CodeEnvelope,
+			"both HMAC and AEAD keys empty (use explicit mode: production or diagnostics)")
 	}
 	// 版本校验：拒绝不兼容协议版本的 envelope，避免字段被静默误解。
 	if env.EnvelopeVersion != EnvelopeVersion {
@@ -168,6 +183,11 @@ func Open(env *SecureEnvelope, hmacKey, aeadKey []byte) ([]byte, error) {
 			return nil, WrapError(NumEnvelope, CodeEnvelope, "AEAD decrypt", err)
 		}
 		raw = pt
+	} else if len(env.Nonce) > 0 {
+		// 防御：aeadKey 为空（明文模式）但 envelope 携带 Nonce → 发送方加密了但
+		// 接收方未提供解密密钥。直接返回密文到解压器会产生令人困惑的格式错误。
+		return nil, NewError(NumEnvelope, CodeEnvelope,
+			"envelope carries AEAD nonce but no AEAD key was provided (encrypted envelope opened in plaintext mode)")
 	}
 
 	// Decompress

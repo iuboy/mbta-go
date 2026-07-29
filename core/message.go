@@ -38,10 +38,14 @@ type (
 // 新增版本时在此登记，防止服务端接受未声明的版本（降级攻击面）。
 var knownFrameVersions = map[uint32]bool{1: true}
 
-// ValidateHello 校验 HELLO。agent_id 必填；frame_version 必须是已支持的版本。
+// ValidateHello 校验 HELLO。agent_id 必填且须通过长度/控制字符校验；
+// frame_version 必须是已支持的版本。
 func ValidateHello(m *HelloMessage) error {
 	if m == nil || m.GetAgentId() == "" {
 		return NewError(NumValidation, CodeValidation, "agent_id is required")
+	}
+	if err := validateAgentID(m.GetAgentId()); err != nil {
+		return err
 	}
 	// 校验 frame_version：0 或未知版本一律拒绝，避免降级攻击或后续编解码异常。
 	if !knownFrameVersions[m.GetFrameVersion()] {
@@ -61,8 +65,11 @@ func ValidateHelloAck(m *HelloAckMessage) error {
 	return nil
 }
 
-// ValidateAuth 校验 AUTH。agent_id / session_id / auth_nonce / token 必填。
-// token 是客户端身份凭证，空 token 将导致无凭证认证绕过，必须拒绝。
+// ValidateAuth 校验 AUTH。agent_id / session_id / auth_nonce 必填。
+// token 在非 tokenless 模式下必填——但 tokenless 模式（TokenResolver）允许客户端
+// 省略 token，由服务端通过 agent_id 反查。token 必填校验由调用方（handleAuth）
+// 在确认不支持 tokenless 后执行，而非在此处无条件拒绝。
+// agent_id 须通过长度/控制字符校验（日志注入防护）。
 func ValidateAuth(m *AuthMessage) error {
 	if m == nil {
 		return NewError(NumValidation, CodeValidation, "nil auth message")
@@ -70,15 +77,17 @@ func ValidateAuth(m *AuthMessage) error {
 	if m.GetAgentId() == "" {
 		return NewError(NumValidation, CodeValidation, "agent_id is required")
 	}
+	if err := validateAgentID(m.GetAgentId()); err != nil {
+		return err
+	}
 	if len(m.GetSessionId()) == 0 {
 		return NewError(NumValidation, CodeValidation, "session_id is required")
 	}
 	if len(m.GetAuthNonce()) == 0 {
 		return NewError(NumValidation, CodeValidation, "auth_nonce is required")
 	}
-	if m.GetToken() == "" {
-		return NewError(NumValidation, CodeValidation, "token is required")
-	}
+	// 注意：token 必填校验已移至 handleAuth，以支持 tokenless AUTH（TokenResolver）。
+	// handleAuth 在 resolveAuthToken 之后、若 token 仍为空则 failAuth。
 	return nil
 }
 

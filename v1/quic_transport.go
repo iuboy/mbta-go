@@ -28,16 +28,20 @@ type quicTransport struct {
 	done    chan struct{}   // 关闭信号：通知所有 readDataStream 退出，避免向 closed dataCh 发送 panic
 	closeMu sync.Mutex
 	closed  bool
+	wg      sync.WaitGroup // 追踪活跃的 readDataStream goroutine，保证 dataCh 关闭前全部退出
 }
 
 // newQuicTransport accept 第一个 stream 作为 control stream，启动 data accept 循环。
+// 失败时关闭底层 QUIC 连接避免泄漏（调用方可能仅处理 error 而不显式 Close conn）。
 func newQuicTransport(conn *Conn) (*quicTransport, error) {
 	s, role, err := conn.AcceptStream(context.Background())
 	if err != nil {
+		_ = conn.CloseWithError(0, "accept control stream failed")
 		return nil, core.WrapError(core.NumStream, core.CodeStream, "accept control stream", err)
 	}
 	if role != core.StreamRoleControl {
 		_ = s.Close()
+		_ = conn.CloseWithError(0, "first stream not control")
 		return nil, core.NewError(core.NumProtocol, core.CodeProtocol, "first stream must be control")
 	}
 	t := &quicTransport{
@@ -55,13 +59,15 @@ func (t *quicTransport) acceptDataStreams() {
 	for {
 		s, _, err := t.conn.AcceptStream(context.Background())
 		if err != nil {
-			// 先发关闭信号，让所有 readDataManager 退出（避免向即将 close 的 dataCh 发送 panic）。
+			// 先发关闭信号，让所有 readDataStream 退出（避免向即将 close 的 dataCh 发送 panic）。
 			t.closeMu.Lock()
 			if !t.closed {
 				t.closed = true
 				close(t.done)
 			}
 			t.closeMu.Unlock()
+			// 等待所有 readDataStream goroutine 彻底退出后，再安全关闭 dataCh。
+			t.wg.Wait()
 			select {
 			case t.dataErr <- err:
 			default:
@@ -69,12 +75,16 @@ func (t *quicTransport) acceptDataStreams() {
 			close(t.dataCh)
 			return
 		}
+		t.wg.Add(1)
 		go t.readDataStream(s)
 	}
 }
 
 func (t *quicTransport) readDataStream(s *quic.Stream) {
-	defer s.Close()
+	defer func() {
+		s.Close()
+		t.wg.Done()
+	}()
 	for {
 		f, err := core.Read(s, core.DefaultLimits())
 		if err != nil {
@@ -158,10 +168,23 @@ func (t *quicTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 }
 
 // SendFrame 写帧（server 端均走 control stream，按 ChannelID=0）。
+//
+// 旧实现忽略 ctx（_ = ctx），若 QUIC 流控背压导致 Write 阻塞，发送方 goroutine
+// 无法被 ctx 取消而永久挂起。现通过 SetWriteDeadline 实现 ctx 感知写。
 func (t *quicTransport) SendFrame(ctx context.Context, f core.Frame) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(30 * time.Second)
+	}
 	t.controlMu.Lock()
 	defer t.controlMu.Unlock()
+	if err := t.controlStr.SetWriteDeadline(dl); err != nil {
+		return core.WrapError(core.NumStream, core.CodeStream, "set control write deadline", err)
+	}
+	defer func() { _ = t.controlStr.SetWriteDeadline(time.Time{}) }()
 	return core.Write(t.controlStr, f.Header.Version, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
 }
 
@@ -182,7 +205,13 @@ func (t *quicTransport) SupportsDatagram() bool {
 
 // SendDatagram 走 QUIC DATAGRAM 不可靠通道。
 func (t *quicTransport) SendDatagram(ctx context.Context, payload []byte) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// nil guard：连接尚未完全建立时 QC 为 nil（与 SupportsDatagram 防御一致）。
+	if t.conn == nil || t.conn.QC == nil {
+		return core.NewError(core.NumStream, core.CodeStream, "QUIC connection not established")
+	}
 	if err := t.conn.QC.SendDatagram(payload); err != nil {
 		return core.WrapError(core.NumStream, core.CodeStream, "send datagram", err)
 	}

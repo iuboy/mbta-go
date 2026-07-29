@@ -10,7 +10,8 @@ import (
 // 与 protoCodec 不同，CBOR 直接序列化领域类型 core.SignalBatch：
 //   - attributes/body 是 map[string]any / any，CBOR 自描述，无需 AnyValue oneof；
 //   - 受限环境友好：自描述、紧凑、流式；
-//   - fxamacker/cbor 自动复用 struct 的 `json` tag 作为字段名，无需重复标注 cbor tag，
+//   - fxamacker/cbor 自动复用 struct 的 `json` tag 作为字段名（v2 库行为：
+//     优先 cbor tag，其次 json tag，最后 Go 字段名），无需重复标注 cbor tag，
 //     字段名跨 codec 一致。
 //
 // 确定性：编码用 Canonical EncOptions（RFC 7049 §3.9 / RFC 8949 §4.2.1）——map key

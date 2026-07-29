@@ -17,11 +17,45 @@ const MaxSignalFieldLen = 4096
 // 规范以保证互操作；旧实现误用 MaxSignalFieldLen(4096) 校验，远超规范上限。
 const MaxTraceStateFieldLen = 256
 
+// MaxAgentIDLen 是 agent_id 字段的最大字节长度。agent_id 作为 ReplayCache key、
+// metrics label 来源、sink 调用参数及日志标识，须严格限制长度以防 DoS 与日志注入。
+const MaxAgentIDLen = 256
+
+// validateAgentID 校验 agent_id：非空、长度上限、不含控制字符（含 \t \n \r）。
+// agent_id 是客户端自报的服务/实例标识符，若含换行等控制字符可被用于日志注入攻击
+// （syslog/ELK 行伪造），因此使用 hasStrictControlChars 而非 hasControlChars。
+func validateAgentID(agentID string) error {
+	if len(agentID) == 0 {
+		return NewError(NumValidation, CodeValidation, "agent_id must not be empty")
+	}
+	if len(agentID) > MaxAgentIDLen {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("agent_id exceeds maximum length %d", MaxAgentIDLen))
+	}
+	if hasStrictControlChars(agentID) {
+		return NewError(NumValidation, CodeValidation, "agent_id contains control characters")
+	}
+	return nil
+}
+
 // hasControlChars 报告 s 是否含非法控制字符。允许 \t \n \r 三种常见空白
-// （status_message 等字段可能合法地含多行文本）。
+// （status_message 等字段可能合法地含多行文本）。对于 agent_id、key 等标识符字段
+// 应使用 hasStrictControlChars 拒绝全部控制字符（含 \t \n \r）。
 func hasControlChars(s string) bool {
 	for _, r := range s {
 		if (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// hasStrictControlChars 报告 s 是否含任何控制字符（含 \t \n \r 和 DEL）。
+// 用于 agent_id、attribute key、metric field key 等标识符——这些字段会出现在
+// 日志/metrics label/ReplayCache key 中，含换行符可构造日志注入攻击。
+func hasStrictControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
 			return true
 		}
 	}

@@ -33,9 +33,48 @@ const (
 	SignalTypeProfile   = "profile"
 )
 
+// temporality 取值（OTel AggregationTemporality 映射，core spec §6.2）。
+const (
+	TemporalityDelta      = "delta"
+	TemporalityCumulative = "cumulative"
+)
+
+// span kind 取值（OTel SpanKind 映射，core spec §6.2）。
+const (
+	SpanKindUnspecified = ""
+	SpanKindInternal    = "internal"
+	SpanKindServer      = "server"
+	SpanKindClient      = "client"
+	SpanKindProducer    = "producer"
+	SpanKindConsumer    = "consumer"
+)
+
+// validTemporalities 是 spec §6.2 允许的 temporality 值。
+var validTemporalities = map[string]bool{
+	TemporalityDelta: true, TemporalityCumulative: true,
+}
+
+// validSpanKinds 是 spec §6.2 允许的 span kind 值（OTel 有界枚举）。
+var validSpanKinds = map[string]bool{
+	SpanKindUnspecified: true,
+	SpanKindInternal:    true,
+	SpanKindServer:      true,
+	SpanKindClient:      true,
+	SpanKindProducer:    true,
+	SpanKindConsumer:    true,
+}
+
+// MaxSignalAttrs 是单个 signal Record 的 attributes map 最大条目数，
+// 防止畸形消息的内存放大 DoS（每个 entry 含 key/value + map 开销）。
+const MaxSignalAttrs = 128
+
+// MaxSignalAttrKeyLen 是 attribute key 的最大字节长度，抑制日志注入面。
+const MaxSignalAttrKeyLen = 256
+
 // validSignalTypes 是 spec §6.2 允许的 signal_type 闭合集合。
 // 非法值（含历史误用的 "metric"）在 Validate 被拒——协议入口拦截，防止发出后
 // 被合规对端当未知 type 拒绝、且无法映射 OTLP（§15）。
+// 注：此 map 仅在包初始化时赋值，运行时只读——并发安全。
 var validSignalTypes = map[string]bool{
 	SignalTypeLog: true, SignalTypeGauge: true, SignalTypeCounter: true,
 	SignalTypeHistogram: true, SignalTypeSummary: true,
@@ -68,6 +107,10 @@ func (b *SignalBatch) Validate() error {
 	if len(b.Signals) == 0 {
 		return NewError(NumValidation, CodeValidation, "signals must not be empty")
 	}
+	// Resource attributes 同样受条目数/key 长度约束，使用独立前缀避免 signal[-1] 错误消息。
+	if err := validateAttrsMap("resource.attributes", b.Resource.Attributes); err != nil {
+		return err
+	}
 	for i, s := range b.Signals {
 		if s == nil {
 			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: must not be null", i))
@@ -92,7 +135,7 @@ func validateSignal(i int, s *SignalRecord) error {
 }
 
 // validateSignalType 校验 signal_type 必填、闭合枚举（§6.2，拦截 "metric" 等历史/非法值）
-// 以及各 signal_type 的类型特定必填字段。
+// 以及各 signal_type 的类型特定必填字段、合法枚举值（severity/temporality/kind）。
 func validateSignalType(i int, s *SignalRecord) error {
 	if s.SignalType == "" {
 		return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: signal_type is required", i))
@@ -101,10 +144,33 @@ func validateSignalType(i int, s *SignalRecord) error {
 		return NewError(NumValidation, CodeValidation,
 			fmt.Sprintf("signal[%d]: invalid signal_type %q", i, s.SignalType))
 	}
+	// SeverityNumber 必须落在 OTel 规范范围（1-24），0 表示未设置（OK）。
+	// 超出范围的值会破坏下游 Jaeger/Loki 的级别映射。
+	if s.SeverityNumber < 0 || s.SeverityNumber > 24 {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("signal[%d]: severity_number %d out of valid range [0,24]", i, s.SeverityNumber))
+	}
+	// Temporality 非空时必须为合法枚举值。
+	if s.Temporality != "" && !validTemporalities[s.Temporality] {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("signal[%d]: invalid temporality %q (expected delta or cumulative)", i, s.Temporality))
+	}
+	// Span Kind 非空时必须为合法枚举值。Kind 是 OTel SpanKind 的映射，
+	// 仅对 SignalTypeSpan 有意义——非 Span 类型的 Kind 字段语义未定义，
+	// 故仅校验 Span 类型（避免将未来非 Span 扩展的合法值误拒）。
+	if s.SignalType == SignalTypeSpan && s.Kind != "" && !validSpanKinds[s.Kind] {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("signal[%d]: invalid span kind %q", i, s.Kind))
+	}
 	switch s.SignalType {
 	case SignalTypeGauge, SignalTypeCounter, SignalTypeHistogram, SignalTypeSummary:
 		if s.MetricName == "" {
 			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
+		}
+		// Histogram 必须携带 ExpHistogram 载荷（对标 Profile 的 Profile 必填校验）。
+		if s.SignalType == SignalTypeHistogram && s.ExpHistogram == nil {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("signal[%d]: exp_histogram is required for histogram type", i))
 		}
 	case SignalTypeSpan:
 		if s.Name == "" {
@@ -150,7 +216,8 @@ func signalTextFields(s *SignalRecord) []struct{ name, val string } {
 }
 
 // validateSignalFieldLengths 校验非空字符串字段的长度与控制字符约束（L-2）：
-// 在协议入口拒绝异常长输入与日志注入面。
+// 在协议入口拒绝异常长输入与日志注入面。同时校验 Attributes map 和 MetricFields map
+// 的条目数与 key 长度，抑制内存放大 DoS。
 func validateSignalFieldLengths(i int, s *SignalRecord) error {
 	for _, f := range signalTextFields(s) {
 		if f.val == "" {
@@ -158,6 +225,72 @@ func validateSignalFieldLengths(i int, s *SignalRecord) error {
 		}
 		if err := validateTextField(f.name, f.val); err != nil {
 			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+		}
+	}
+	if err := validateSignalAttrs(i, "attributes", s.Attributes); err != nil {
+		return err
+	}
+	if err := validateMetricFields(i, s.MetricFields); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateAttrsMap 校验 resource/scope 等非 signal 级别的 attributes map。
+// 与 validateSignalAttrs 的区别：不使用 signal 索引前缀，直接使用字段名定位。
+func validateAttrsMap(fieldName string, attrs map[string]any) error {
+	if len(attrs) > MaxSignalAttrs {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("%s exceeds max entries %d (got %d)", fieldName, MaxSignalAttrs, len(attrs)))
+	}
+	for k := range attrs {
+		if len(k) > MaxSignalAttrKeyLen {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("%s key %q exceeds max length %d", fieldName, k, MaxSignalAttrKeyLen))
+		}
+		// attribute key 出现在日志/metrics label 中，使用严格控制字符校验防注入。
+		if hasStrictControlChars(k) {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("%s key contains control characters", fieldName))
+		}
+	}
+	return nil
+}
+
+// validateSignalAttrs 校验 signal 级别的 attributes map：条目数上限 + key 长度/控制字符。
+// value 为 any 类型不做递归校验（嵌套深度与内容类型由 codec 层协议约束保证）。
+func validateSignalAttrs(i int, fieldName string, attrs map[string]any) error {
+	if len(attrs) > MaxSignalAttrs {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("signal[%d]: %s exceeds max entries %d (got %d)", i, fieldName, MaxSignalAttrs, len(attrs)))
+	}
+	for k := range attrs {
+		if len(k) > MaxSignalAttrKeyLen {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("signal[%d]: %s key %q exceeds max length %d", i, fieldName, k, MaxSignalAttrKeyLen))
+		}
+		if hasStrictControlChars(k) {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("signal[%d]: %s key contains control characters", i, fieldName))
+		}
+	}
+	return nil
+}
+
+// validateMetricFields 校验 metric_fields map 的条目数上限 + key 合法性（长度 + 严格控制字符）。
+func validateMetricFields(i int, fields map[string]float64) error {
+	if len(fields) > MaxSignalAttrs {
+		return NewError(NumValidation, CodeValidation,
+			fmt.Sprintf("signal[%d]: metric_fields exceeds max entries %d (got %d)", i, MaxSignalAttrs, len(fields)))
+	}
+	for k := range fields {
+		if len(k) > MaxSignalAttrKeyLen {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("signal[%d]: metric_fields key %q exceeds max length %d", i, k, MaxSignalAttrKeyLen))
+		}
+		if hasStrictControlChars(k) {
+			return NewError(NumValidation, CodeValidation,
+				fmt.Sprintf("signal[%d]: metric_fields key contains control characters", i))
 		}
 	}
 	return nil
