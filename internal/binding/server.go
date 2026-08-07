@@ -18,6 +18,7 @@ type HandlerConfig struct {
 	Metrics         *core.MBTAMetrics
 	ServerID        string
 	RedirectChecker core.RedirectChecker
+	OnSession       core.OnSession
 	// SessionStore 可选：0-RTT 会话票据存储（single-use ticket 重放防护）。
 	// nil 则禁用 0-RTT resumption（不颁发/不验证 session ticket）。
 	SessionStore *core.SessionStore
@@ -144,10 +145,11 @@ func handleConn[C any](
 		Policy:          hcfg.Policy,
 		Sink:            hcfg.Sink,
 		Metrics:         hcfg.Metrics,
-		ServerID:        hcfg.ServerID,
-		RedirectChecker: hcfg.RedirectChecker,
-		SessionStore:    hcfg.SessionStore,
-	})
+			ServerID:        hcfg.ServerID,
+			RedirectChecker: hcfg.RedirectChecker,
+			OnSession:       hcfg.OnSession,
+			SessionStore:    hcfg.SessionStore,
+		})
 	if err := h.Handle(ctx); err != nil {
 		// ErrRedirected is normal HA flow (follower steered a client to
 		// the leader), not a handler error — suppress the noisy log.

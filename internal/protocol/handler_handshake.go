@@ -26,6 +26,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	}
 
 	h.setAgentID(msg.GetAgentId())
+	h.setHelloMeta(msg.GetHostname(), msg.GetInstanceId(), msg.GetAgentVersion(), msg.GetOs())
 	h.setSessionID(core.NewChunkID().Bytes())
 	nonce, err := randBytes(challengeNonceLen)
 	if err != nil {
@@ -223,6 +224,27 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 		return core.WrapError(core.NumSession, core.CodeSession, "transition READY", err)
 	}
 	slog.Info("auth succeeded", "agent", core.SanitizeForLog(agentID), "session", string(sessionID), "key_id", keys.KeyID)
+
+	// 会话生命周期回调：在 AUTH_OK 发送、状态机进入 READY 之后触发 CONNECTED。
+	// 放在 RedirectChecker 之前：被重定向（follower→leader）的连接也会先 CONNECTED，
+	// 随后连接关闭时再触发 DISCONNECTED，保证 CONNECTED/DISCONNECTED 严格成对。
+	// 早于任何 BATCH 处理，且此时 dataLoop 尚未启动，回调内不会与数据路径竞争。
+	// 标记已认证：DISCONNECTED 仅对认证成功（到达 READY）的连接触发，与 CONNECTED 严格配对。
+	h.authed.Store(true)
+	// 注意：回调在连接 goroutine 内同步执行，实现必须非阻塞。
+	if h.config.OnSession != nil {
+		hostname, instanceID, agentVersion, osStr := h.helloMeta()
+		h.config.OnSession(core.SessionEvent{
+			Type:         core.SessionConnected,
+			AgentID:      agentID,
+			SessionID:    string(sessionID),
+			Hostname:     hostname,
+			InstanceID:   instanceID,
+			AgentVersion: agentVersion,
+			OS:           osStr,
+			RemoteAddr:   h.tr.RemoteAddr(),
+		})
+	}
 
 	// HA cluster redirect (§4.17): if this replica is a follower (not the
 	// elected leader), steer the client to the leader before data flows. Done

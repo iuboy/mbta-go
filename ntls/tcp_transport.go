@@ -133,6 +133,14 @@ func (t *tcpTransport) Multiplexing() protocol.MultiplexModel {
 	return protocol.MultiplexTCPSingleConn
 }
 
+// RemoteAddr 返回 TCP 对端地址。连接已关闭时返回 nil。
+func (t *tcpTransport) RemoteAddr() net.Addr {
+	if t.conn == nil {
+		return nil
+	}
+	return t.conn.RemoteAddr()
+}
+
 // Close 关闭连接，等待 in-flight 写操作完成后再关闭底层 TCP 连接，
 // 避免活跃的 core.Write 被 conn.Close() 中断产生 io.ErrClosedPipe。
 func (t *tcpTransport) Close() error {

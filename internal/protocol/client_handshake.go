@@ -17,14 +17,21 @@ import (
 
 // SendHello 发送 HELLO（core spec §9.5）。ctx 约束写操作超时/取消。
 func (c *CoreClient) SendHello(ctx context.Context) error {
+	agentVersion := c.cfg.AgentVersion
+	if agentVersion == "" {
+		agentVersion = "0.1.0" // 未显式配置时回退到 mbta-go 内置默认
+	}
 	hello := &corepb.HelloMessage{
 		AgentId:       c.cfg.AgentID,
 		Hostname:      c.cfg.Hostname,
 		FrameVersion:  1,
-		AgentVersion:  "0.1.0",
+		AgentVersion:  agentVersion,
 		Capabilities:  c.cfg.Capabilities,
 		InstanceId:    core.NewChunkID().String(),
 		StartedAtUnix: time.Now().Unix(),
+	}
+	if c.cfg.OS != "" {
+		hello.Os = &c.cfg.OS // optional 字段：仅在配置时发送
 	}
 	payload, err := core.Encode(hello)
 	if err != nil {

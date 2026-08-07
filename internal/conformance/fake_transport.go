@@ -7,6 +7,7 @@ package conformance
 import (
 	"context"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -109,6 +110,10 @@ func (t *FakeTransport) Multiplexing() protocol.MultiplexModel {
 	}
 	return protocol.MultiplexTCPSingleConn
 }
+
+// RemoteAddr 满足 protocol.Transport 接口；FakeTransport 无真实对端，始终返回 nil。
+// 需要测试对端地址的用例可直接设置 t.remoteAddr 字段（若有）——目前无此需求。
+func (t *FakeTransport) RemoteAddr() net.Addr { return nil }
 
 func (t *FakeTransport) Close() error {
 	t.mu.Lock()

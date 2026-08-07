@@ -44,6 +44,7 @@ type HandlerConfig struct {
 	ServerID        string
 	SessionStore    *core.SessionStore   // 0-RTT resumption（可选，nil = 不支持 early_data）
 	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
+	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）：AUTH_OK 后 CONNECTED、连接断开 DISCONNECTED
 }
 
 // CoreHandler 是 server 端协议状态机核心，仅依赖 Transport 接口，
@@ -64,12 +65,19 @@ type CoreHandler struct {
 	// 用 handshakeMu 保护，避免 0-RTT 场景下 agentID/sessionID 的数据竞争。
 	agentID        string
 	sessionID      []byte
+	// helloMeta 保存 HELLO 帧中除 agentID 外的身份字段，供 OnSession CONNECTED 回调读取。
+	// 与 agentID/sessionID 一样在 handleHello 中写入，handshakeMu 保护。
+	hostname     string
+	instanceID   string
+	agentVersion string
+	os           string
 	challengeNonce []byte
 	authAttempts   int
 	handshakeMu    sync.RWMutex
 	expiresAt      atomic.Int64
 	closeTimeout   time.Duration // 优雅关闭 drain 超时（从 CloseMessage.close_timeout_ms 协商，默认 5s）
 	earlyData      atomic.Bool   // 0-RTT resumption：HELLO 恢复 keys 后置位，dataLoop early 启动
+	authed         atomic.Bool   // 是否已认证成功（到达 READY）；决定 DISCONNECTED 是否触发（必须与 CONNECTED 配对）
 	lastPressure   atomic.Value
 	pressureMu     sync.Mutex // 保护 lastPressure 的"比较-更新-下发"序列（§9.2 避免同值重复 WINDOW）
 
@@ -107,6 +115,24 @@ func (h *CoreHandler) setSessionID(id []byte) {
 	h.handshakeMu.Lock()
 	defer h.handshakeMu.Unlock()
 	h.sessionID = append(h.sessionID[:0], id...)
+}
+
+// setHelloMeta 保存 HELLO 帧的身份字段（hostname/instance_id/agent_version/os），
+// 供 AUTH_OK 后构造 SessionEvent 使用。在 handleHello 中一次性写入，handshakeMu 保护。
+func (h *CoreHandler) setHelloMeta(hostname, instanceID, agentVersion, os string) {
+	h.handshakeMu.Lock()
+	defer h.handshakeMu.Unlock()
+	h.hostname = hostname
+	h.instanceID = instanceID
+	h.agentVersion = agentVersion
+	h.os = os
+}
+
+// helloMeta 返回保存的 HELLO 身份字段（并发安全读取）。
+func (h *CoreHandler) helloMeta() (hostname, instanceID, agentVersion, os string) {
+	h.handshakeMu.RLock()
+	defer h.handshakeMu.RUnlock()
+	return h.hostname, h.instanceID, h.agentVersion, h.os
 }
 
 // getChallengeNonce 返回 challengeNonce 的拷贝（并发安全读取）。
@@ -159,6 +185,24 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 	// 后存活的 processBatch 跳过 HMAC 校验（安全绕过）。
 	dataExited := false
 	defer h.cleanup(&dataExited)
+	// 会话生命周期回调：连接结束时触发 DISCONNECTED。
+	// 仅当该连接此前认证成功（agentID 非空）才触发，避免对未通过 HELLO/AUTH 的连接
+	// 误报 DISCONNECTED（无配对的 CONNECTED）。与 CONNECTED 严格成对。
+	// 注意：DISCONNECTED 在 CONNECTED 之后、数据 drain 完成前后都可能；回调实现需容忍。
+	defer func() {
+		if h.config.OnSession == nil {
+			return
+		}
+		if !h.authed.Load() {
+			return // 未认证（或认证失败）的连接：没有配对的 CONNECTED，不报 DISCONNECTED
+		}
+		h.config.OnSession(core.SessionEvent{
+			Type:       core.SessionDisconnected,
+			AgentID:    h.getAgentID(),
+			SessionID:  string(h.getSessionID()),
+			RemoteAddr: h.tr.RemoteAddr(),
+		})
+	}()
 	// 进入 CONTROL_WAIT（server 状态机初始为 Accepted）。
 	if err := h.sm.Transition(core.ServerStateControlWait); err != nil {
 		return core.WrapError(core.NumSession, core.CodeSession, "transition to CONTROL_WAIT", err)

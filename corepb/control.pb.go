@@ -83,6 +83,7 @@ type HelloMessage struct {
 	ConnId        string                 `protobuf:"bytes,9,opt,name=conn_id,json=connId,proto3" json:"conn_id,omitempty"`
 	StartedAtUnix int64                  `protobuf:"varint,10,opt,name=started_at_unix,json=startedAtUnix,proto3" json:"started_at_unix,omitempty"`
 	SessionTicket []byte                 `protobuf:"bytes,11,opt,name=session_ticket,json=sessionTicket,proto3,oneof" json:"session_ticket,omitempty"` // r2 0-RTT：resumption ticket（上次 AUTH_OK 颁发）
+	Os            *string                `protobuf:"bytes,12,opt,name=os,proto3,oneof" json:"os,omitempty"`                                            // agent 操作系统（runtime.GOOS，如 linux/darwin/windows）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -192,6 +193,13 @@ func (x *HelloMessage) GetSessionTicket() []byte {
 		return x.SessionTicket
 	}
 	return nil
+}
+
+func (x *HelloMessage) GetOs() string {
+	if x != nil && x.Os != nil {
+		return *x.Os
+	}
+	return ""
 }
 
 type HelloAckMessage struct {
@@ -1438,7 +1446,7 @@ var File_control_proto protoreflect.FileDescriptor
 
 const file_control_proto_rawDesc = "" +
 	"\n" +
-	"\rcontrol.proto\x12\ambta.v1\x1a\x0eenvelope.proto\x1a\fsignal.proto\"\xcb\x03\n" +
+	"\rcontrol.proto\x12\ambta.v1\x1a\x0eenvelope.proto\x1a\fsignal.proto\"\xe7\x03\n" +
 	"\fHelloMessage\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x1f\n" +
@@ -1453,10 +1461,12 @@ const file_control_proto_rawDesc = "" +
 	"\aconn_id\x18\t \x01(\tR\x06connId\x12&\n" +
 	"\x0fstarted_at_unix\x18\n" +
 	" \x01(\x03R\rstartedAtUnix\x12*\n" +
-	"\x0esession_ticket\x18\v \x01(\fH\x02R\rsessionTicket\x88\x01\x01B\x11\n" +
+	"\x0esession_ticket\x18\v \x01(\fH\x02R\rsessionTicket\x88\x01\x01\x12\x13\n" +
+	"\x02os\x18\f \x01(\tH\x03R\x02os\x88\x01\x01B\x11\n" +
 	"\x0f_resource_classB\x0f\n" +
 	"\r_mem_limit_kbB\x11\n" +
-	"\x0f_session_ticket\"\xe8\x04\n" +
+	"\x0f_session_ticketB\x05\n" +
+	"\x03_os\"\xe8\x04\n" +
 	"\x0fHelloAckMessage\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\fR\tsessionId\x12\x1b\n" +

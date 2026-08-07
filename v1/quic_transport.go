@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -221,6 +222,14 @@ func (t *quicTransport) SendDatagram(ctx context.Context, payload []byte) error 
 // Multiplexing 报告多路复用模型。
 func (t *quicTransport) Multiplexing() protocol.MultiplexModel {
 	return protocol.MultiplexQuicMultiStream
+}
+
+// RemoteAddr 返回 QUIC 对端地址。连接尚未建立或已关闭时返回 nil。
+func (t *quicTransport) RemoteAddr() net.Addr {
+	if t.conn == nil {
+		return nil
+	}
+	return t.conn.RemoteAddr
 }
 
 // Close 关闭传输。

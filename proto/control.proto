@@ -28,6 +28,7 @@ message HelloMessage {
   string conn_id = 9;
   int64 started_at_unix = 10;
   optional bytes session_ticket = 11;   // r2 0-RTT：resumption ticket（上次 AUTH_OK 颁发）
+  optional string os = 12;              // agent 操作系统（runtime.GOOS，如 linux/darwin/windows）
 }
 
 message HelloAckMessage {

@@ -54,6 +54,10 @@ type ClientConfig struct {
 	Hostname string
 	Token    string
 
+	// Agent 元数据（写入 HELLO，供服务端 OnSession 回调读取；空则不发/回退默认）。
+	OS           string // agent 操作系统（runtime.GOOS）
+	AgentVersion string // agent 构建版本（空则回退 mbta-go 内置默认）
+
 	// Version-specific configurations
 	V1Creds   *v1.ClientCredentials
 	NTLSCreds *ntls.ClientCredentials
@@ -266,10 +270,12 @@ func (c *Client) initV1Client() (versionedClient, error) {
 			Server:      c.cfg.Server,
 			Credentials: c.cfg.V1Creds,
 		},
-		AgentID:  c.cfg.AgentID,
-		Hostname: c.cfg.Hostname,
-		Token:    c.cfg.Token,
-		Metrics:  c.cfg.Metrics,
+		AgentID:      c.cfg.AgentID,
+		Hostname:     c.cfg.Hostname,
+		Token:        c.cfg.Token,
+		OS:           c.cfg.OS,
+		AgentVersion: c.cfg.AgentVersion,
+		Metrics:      c.cfg.Metrics,
 	}
 
 	client, err := v1.NewClient(cfg)
@@ -295,12 +301,14 @@ func (c *Client) initNTLSClient() (versionedClient, error) {
 		return nil, core.NewError(core.NumCredential, core.CodeCredential, "ntls credentials not provided")
 	}
 	cfg := ntls.ClientConfig{
-		Server:      c.cfg.Server,
-		Credentials: c.cfg.NTLSCreds,
-		AgentID:     c.cfg.AgentID,
-		Hostname:    c.cfg.Hostname,
-		Token:       c.cfg.Token,
-		Metrics:     c.cfg.Metrics,
+		Server:       c.cfg.Server,
+		Credentials:  c.cfg.NTLSCreds,
+		AgentID:      c.cfg.AgentID,
+		Hostname:     c.cfg.Hostname,
+		Token:        c.cfg.Token,
+		OS:           c.cfg.OS,
+		AgentVersion: c.cfg.AgentVersion,
+		Metrics:      c.cfg.Metrics,
 	}
 	client, err := ntls.NewClient(cfg)
 	if err != nil {
@@ -372,6 +380,16 @@ func WithAgent(agentID, hostname, token string) ClientOption {
 		cc.AgentID = agentID
 		cc.Hostname = hostname
 		cc.Token = token
+		return nil
+	}
+}
+
+// WithAgentMeta sets optional agent metadata (os, version) sent in HELLO. Empty
+// values are ignored (os omitted, version falls back to mbta-go default).
+func WithAgentMeta(os, agentVersion string) ClientOption {
+	return func(cc *ClientConfig) error {
+		cc.OS = os
+		cc.AgentVersion = agentVersion
 		return nil
 	}
 }

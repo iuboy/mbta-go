@@ -49,6 +49,7 @@ type ServerConfig struct {
 	Sink               core.EventSink
 	Metrics            *core.MBTAMetrics
 	RedirectChecker    core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选）
+	OnSession          core.OnSession       // 会话生命周期回调（可选，nil=禁用）
 	SessionStore       *core.SessionStore   // 0-RTT 会话票据存储（nil=禁用 0-RTT）
 	ServerID           string               // 服务端标识，回填 HELLO_ACK；空则 NewServer 自动生成 ULID（Crockford base32，26 字符）
 	MaxConcurrentConns int                  // 并发连接上限，0 = 使用 binding.DefaultMaxConcurrentConns (H-3)
@@ -76,6 +77,9 @@ type ClientConfig struct {
 	Hostname     string
 	Token        string
 	Capabilities []string     // 客户端能力（HELLO 携带，与服务端协商）
+	// OS / AgentVersion 写入 HELLO（空则不发/回退默认）。
+	OS           string
+	AgentVersion string
 	Metrics      core.Metrics // 可选：客户端可观测性指标（nil=NoOp）
 }
 
@@ -306,6 +310,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		Metrics:         cfg.Metrics,
 		ServerID:        cfg.ServerID,
 		RedirectChecker: cfg.RedirectChecker,
+		OnSession:       cfg.OnSession,
 		SessionStore:    cfg.SessionStore,
 	}
 	return &Server{

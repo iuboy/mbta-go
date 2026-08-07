@@ -46,6 +46,10 @@ type CoreClientConfig struct {
 	Hostname     string
 	Token        string
 	Capabilities []string // 客户端能力（HELLO 携带，与服务端协商）
+	// OS / AgentVersion 写入 HELLO 的 os / agent_version 字段。
+	// 空字符串时 OS 字段不发（proto optional），AgentVersion 回退到 mbta-go 内置默认。
+	OS           string
+	AgentVersion string
 
 	// DefaultCodec / DefaultCipherSuite / DefaultCompression：协商前（或 c.negotiated==nil
 	// 兜底路径）使用的算法。由各 binding 在 NewClient 时注入，跟随 binding 合规语境

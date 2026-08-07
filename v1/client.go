@@ -22,6 +22,9 @@ type ClientConfig struct {
 	Capabilities []string         // negotiated capabilities (e.g. gzip, hmac-sha256)
 	PickStrategy string           // stream selection strategy: "single" or "hash"
 	StreamCount  int              // hash 模式下打开的数据流数量（<=0 用 defaultStreamCount）
+	// OS / AgentVersion 写入 HELLO（供服务端 OnSession 回调读取，空则不发/回退默认）。
+	OS           string           // agent 操作系统（如 runtime.GOOS：linux/darwin/windows）
+	AgentVersion string           // agent 构建版本（空则回退 "0.1.0"）
 	Metrics      core.Metrics     // 可选：客户端可观测性指标（nil=NoOp）
 }
 
@@ -146,6 +149,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		Hostname:     cfg.Hostname,
 		Token:        cfg.Token,
 		Capabilities: cfg.Capabilities,
+		OS:           cfg.OS,
+		AgentVersion: cfg.AgentVersion,
 		// binding 默认算法（spec §8.3：跟随传输 binding 合规语境）。
 		// v1 走 QUIC + TLS1.3 → 国际密码套件；codec/compression 用协议 baseline 默认。
 		DefaultCodec:       corepb.Codec_CODEC_PROTO,

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/iuboy/mbta-go/core"
 )
@@ -67,6 +68,10 @@ type Transport interface {
 
 	// Close 关闭传输。MUST 幂等（多次调用安全）。Close 后 Recv*/Send* 可返回错误。
 	Close() error
+
+	// RemoteAddr 返回对端地址（供会话生命周期回调/日志/审计使用）。
+	// 连接已关闭时返回 nil 是允许的（调用方需容忍）。
+	RemoteAddr() net.Addr
 }
 
 // SendControlFrame 是 binding/control 写入的便捷构造：构造一个 control channel 帧并发送。

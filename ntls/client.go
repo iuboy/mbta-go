@@ -96,6 +96,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		Hostname:     cfg.Hostname,
 		Token:        cfg.Token,
 		Capabilities: cfg.Capabilities,
+		OS:           cfg.OS,
+		AgentVersion: cfg.AgentVersion,
 		// binding 默认算法（spec §8.3：跟随传输 binding 合规语境）。
 		// ntls 走 TCP + TLCP/RFC8998 → 国密密码套件；codec/compression 用协议 baseline 默认。
 		DefaultCodec:       corepb.Codec_CODEC_PROTO,

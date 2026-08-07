@@ -41,6 +41,7 @@ type ServerConfig struct {
 	Sink            core.EventSink
 	Metrics         *core.MBTAMetrics
 	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
+	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）：CONNECTED/DISCONNECTED
 	SessionStore    *core.SessionStore   // 0-RTT 会话票据存储（nil=禁用 0-RTT resumption）
 
 	// V1 specific configuration
@@ -178,6 +179,7 @@ func (s *Server) initV1Server() error {
 		Sink:            s.cfg.Sink,
 		Metrics:         s.cfg.Metrics,
 		RedirectChecker: s.cfg.RedirectChecker,
+		OnSession:       s.cfg.OnSession,
 		SessionStore:    s.cfg.SessionStore,
 	}
 
@@ -197,6 +199,7 @@ func (s *Server) initNTLSServer() error {
 	cfg.Sink = s.cfg.Sink
 	cfg.Metrics = s.cfg.Metrics
 	cfg.RedirectChecker = s.cfg.RedirectChecker
+	cfg.OnSession = s.cfg.OnSession
 	cfg.SessionStore = s.cfg.SessionStore
 
 	server, err := ntls.NewServer(cfg)
@@ -276,6 +279,18 @@ func WithMetrics(metrics *core.MBTAMetrics) ServerOption {
 func WithRedirectChecker(checker core.RedirectChecker) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.RedirectChecker = checker
+		return nil
+	}
+}
+
+// WithOnSession sets the session lifecycle callback. The server fires
+// SessionConnected right after AUTH_OK (before any BATCH), and
+// SessionDisconnected when the connection ends (only for connections that
+// authenticated successfully). Nil (default) disables lifecycle observation.
+// The callback runs on the connection goroutine; it must be non-blocking.
+func WithOnSession(fn core.OnSession) ServerOption {
+	return func(sc *ServerConfig) error {
+		sc.OnSession = fn
 		return nil
 	}
 }
