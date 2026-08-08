@@ -93,6 +93,8 @@ server, err := mbta.NewServer(
         },
     }),
     mbta.WithEventSink(mySink),  // 实现 core.EventSink 接口
+    // mbta.WithPolicy(...) 可选：省略时使用默认 Policy
+    // （codec=proto, compression=zstd, cipher 跟随 binding）
     mbta.WithAuth(core.NewStaticTokenValidator(map[string]string{
         "secret-token": "my-agent",
     })),

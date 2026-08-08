@@ -119,6 +119,37 @@ type Policy struct {
 	CipherSuite        corepb.CipherSuite // intl / gm，跟随 binding
 }
 
+// IsZeroPolicy 报告 Policy 是否完全未配置（SupportedCapabilities 为空且所有 enum
+// 为零值）。用于 NewServer 判断「用户未显式配置 Policy」→ 应用 DefaultPolicy。
+// 用户部分配置（如只设 SupportedCapabilities）不算零值，保持用户配置不动。
+func (p Policy) IsZeroPolicy() bool {
+	return len(p.SupportedCapabilities) == 0 &&
+		p.DefaultCodec == corepb.Codec_CODEC_UNSPECIFIED &&
+		p.DefaultCompression == corepb.Compression_COMPRESSION_UNSPECIFIED &&
+		p.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED
+}
+
+// DefaultPolicy 返回服务端的合理默认 Policy。cs 跟随传输 binding 合规语境
+// （v1=INTL，ntls=GM）。SupportedCapabilities 覆盖已实现的核心能力子集，使协商能
+// 与 offer 这些能力的客户端自动取交集；default 值在客户端 offer 空（无对应能力）
+// 时兜底。用户未配置 Policy 时由 NewServer 调用，避免强制要求显式配置。
+func DefaultPolicy(cs corepb.CipherSuite) Policy {
+	return Policy{
+		// 已实现的核心能力：三种 codec + zstd/lz4 压缩 + intl/gm 双 cipher +
+		// dedup（ReplayCache 已实现）。未列入的（如 multi_channel/pmtu_probe 等）
+		// 尚未实现，不声明以免协商选中后无法兑现。
+		SupportedCapabilities: []string{
+			CapCodecProto, CapCodecCbor, CapCodecJson,
+			CapCompZstd, CapCompLz4,
+			CapCSIntl, CapCSGM,
+			CapDedup,
+		},
+		DefaultCodec:       corepb.Codec_CODEC_PROTO,
+		DefaultCompression: corepb.Compression_COMPRESSION_ZSTD,
+		CipherSuite:        cs,
+	}
+}
+
 // NegotiateResult 包含选定 capability 与算法（r2：corepb enum）。
 type NegotiateResult struct {
 	SelectedCapabilities []string

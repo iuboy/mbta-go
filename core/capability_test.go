@@ -1,6 +1,7 @@
 package core
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -127,5 +128,49 @@ func TestPolicyValidate(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestDefaultPolicy 验证默认 Policy 的构造与自洽性：生成的 Policy 必须能通过
+// Validate（default 算法的 capability 在 SupportedCapabilities 中），且包含
+// 核心能力子集。INTL/GM 两个 cipher 变体都验证。
+func TestDefaultPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cs   corepb.CipherSuite
+	}{
+		{"intl", corepb.CipherSuite_CIPHER_SUITE_INTL},
+		{"gm", corepb.CipherSuite_CIPHER_SUITE_GM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := DefaultPolicy(tc.cs)
+			if err := p.Validate(); err != nil {
+				t.Fatalf("default policy failed Validate: %v", err)
+			}
+			if p.CipherSuite != tc.cs {
+				t.Errorf("CipherSuite = %v, want %v", p.CipherSuite, tc.cs)
+			}
+			if p.DefaultCodec != corepb.Codec_CODEC_PROTO {
+				t.Errorf("DefaultCodec = %v, want PROTO", p.DefaultCodec)
+			}
+			// 核心能力必须含：三 codec + zstd + 双 cipher（让 v1/ntls 客户端都能协商）。
+			for _, want := range []string{CapCodecProto, CapCompZstd, CapCSIntl, CapCSGM} {
+				if !slices.Contains(p.SupportedCapabilities, want) {
+					t.Errorf("SupportedCapabilities missing %q: %v", want, p.SupportedCapabilities)
+				}
+			}
+		})
+	}
+}
+
+// TestPolicyIsZeroPolicy 验证零值检测：完全未配置=零值，部分配置≠零值。
+func TestPolicyIsZeroPolicy(t *testing.T) {
+	if !(Policy{}).IsZeroPolicy() {
+		t.Error("Policy{} should be zero")
+	}
+	// 仅设 SupportedCapabilities 不算零值（保持用户配置）。
+	p := Policy{SupportedCapabilities: []string{CapCodecProto}}
+	if p.IsZeroPolicy() {
+		t.Error("Policy with SupportedCapabilities should not be zero")
 	}
 }

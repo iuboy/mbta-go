@@ -13,6 +13,7 @@ import (
 	"net"
 
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 	"github.com/iuboy/mbta-go/internal/binding"
 	"github.com/iuboy/mbta-go/internal/protocol"
 	"github.com/iuboy/mbta-go/internal/tlshelper"
@@ -295,6 +296,10 @@ type Server struct {
 func NewServer(cfg ServerConfig) (*Server, error) {
 	if err := core.ValidateListenAddr(cfg.Address); err != nil {
 		return nil, core.WrapError(core.ErrCodeConfig, "Address", err)
+	}
+	// 用户未配置 Policy 时应用默认（cipher 跟随 ntls = GM）；已配置则保持不动。
+	if cfg.Policy.IsZeroPolicy() {
+		cfg.Policy = core.DefaultPolicy(corepb.CipherSuite_CIPHER_SUITE_GM)
 	}
 	// fail-fast：Auth/Sink/Policy 缺失属严重误配。
 	if cfg.Auth == nil {

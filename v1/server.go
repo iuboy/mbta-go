@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 	"github.com/iuboy/mbta-go/internal/binding"
 	"github.com/iuboy/mbta-go/internal/protocol"
 )
@@ -36,6 +37,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// fail-fast：Address/Auth/Sink/Policy 为空或非法属严重误配，构造时暴露。
 	if err := core.ValidateListenAddr(cfg.Transport.Address); err != nil {
 		return nil, core.WrapError(core.ErrCodeConfig, "Transport.Address", err)
+	}
+	// 用户未配置 Policy 时应用默认（cipher 跟随 v1 = INTL）；已配置则保持不动。
+	if cfg.Policy.IsZeroPolicy() {
+		cfg.Policy = core.DefaultPolicy(corepb.CipherSuite_CIPHER_SUITE_INTL)
 	}
 	if cfg.Auth == nil {
 		return nil, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")

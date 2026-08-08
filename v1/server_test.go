@@ -82,6 +82,14 @@ func TestNewServer_Validation(t *testing.T) {
 			},
 			wantErr: "Sink",
 		},
+		{
+			name: "default policy applied when unset",
+			mutate: func(c ServerConfig) ServerConfig {
+				// 完全不配 Policy：NewServer 应注入默认（INTL cipher），不报错。
+				c.Policy = core.Policy{}
+				return c
+			},
+		},
 	}
 
 	for _, tt := range tests {
