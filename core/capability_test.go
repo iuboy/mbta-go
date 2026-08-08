@@ -179,4 +179,9 @@ func TestPolicyIsZeroPolicy(t *testing.T) {
 	if p.IsZeroPolicy() {
 		t.Error("Policy with SupportedCapabilities should not be zero")
 	}
+	// 仅设枚举字段（DefaultCodec）不算零值——避免误注入默认覆盖用户的部分配置。
+	p2 := Policy{DefaultCodec: corepb.Codec_CODEC_PROTO}
+	if p2.IsZeroPolicy() {
+		t.Error("Policy with DefaultCodec set should not be zero")
+	}
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
 // TestNextBackoff 验证 accept 错误指数退避：5ms 起步，倍增，上限 1s。
@@ -75,5 +77,53 @@ func TestRun_NilRunSpecFields(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "non-nil") {
 		t.Fatalf("error %q does not mention non-nil requirement", err.Error())
+	}
+}
+
+// TestRun_NilRunSpecEachField 验证 6 个 RunSpec 字段逐个为 nil 时都触发错误。
+// 确保复合 nil 检查没有字段被遗漏。
+func TestRun_NilRunSpecEachField(t *testing.T) {
+	noop := func() {} // 占位非 nil func
+	addrOf := func(net.Listener) net.Addr { return nil }
+	// 完整合法 spec 基线（所有字段非 nil），各子测试逐个置 nil。
+	full := func() RunSpec[net.Listener, net.Conn] {
+		return RunSpec[net.Listener, net.Conn]{
+			Listen:        func(context.Context) (net.Listener, error) { return nil, nil },
+			Accept:        func(context.Context, net.Listener) (net.Conn, error) { return nil, nil },
+			NewTransport:  func(context.Context, net.Conn) (protocol.Transport, error) { return nil, nil },
+			CloseConn:     func(net.Conn) { noop() },
+			AddrOf:        addrOf,
+			CloseListener: func(net.Listener) error { return nil },
+		}
+	}
+	// 每个字段名对应一个 mutate，把该字段置 nil。
+	cases := []struct {
+		name   string
+		mutate func(RunSpec[net.Listener, net.Conn]) RunSpec[net.Listener, net.Conn]
+	}{
+		{"Listen nil", func(s RunSpec[net.Listener, net.Conn]) RunSpec[net.Listener, net.Conn] { s.Listen = nil; return s }},
+		{"Accept nil", func(s RunSpec[net.Listener, net.Conn]) RunSpec[net.Listener, net.Conn] { s.Accept = nil; return s }},
+		{"NewTransport nil", func(s RunSpec[net.Listener, net.Conn]) RunSpec[net.Listener, net.Conn] {
+			s.NewTransport = nil
+			return s
+		}},
+		{"CloseConn nil", func(s RunSpec[net.Listener, net.Conn]) RunSpec[net.Listener, net.Conn] { s.CloseConn = nil; return s }},
+		{"AddrOf nil", func(s RunSpec[net.Listener, net.Conn]) RunSpec[net.Listener, net.Conn] { s.AddrOf = nil; return s }},
+		{"CloseListener nil", func(s RunSpec[net.Listener, net.Conn]) RunSpec[net.Listener, net.Conn] {
+			s.CloseListener = nil
+			return s
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewServer[net.Listener, net.Conn](1, HandlerConfig{})
+			err := srv.Run(context.Background(), tc.mutate(full()))
+			if err == nil {
+				t.Fatalf("expected non-nil error when %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), "non-nil") {
+				t.Fatalf("error %q does not mention non-nil requirement", err.Error())
+			}
+		})
 	}
 }

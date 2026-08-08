@@ -95,6 +95,57 @@ func TestNewServer_Validation(t *testing.T) {
 				return c
 			},
 		},
+		{
+			name: "explicit invalid policy rejected",
+			mutate: func(c ServerConfig) ServerConfig {
+				// 部分 Policy（非零值→不注入默认）但含未知 capability→Validate 报错。
+				c.Policy = core.Policy{
+					SupportedCapabilities: []string{core.CapCodecProto, "bogus_cap"},
+					DefaultCodec:          corepb.Codec_CODEC_PROTO,
+					DefaultCompression:    corepb.Compression_COMPRESSION_ZSTD,
+					CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_GM,
+				}
+				return c
+			},
+			wantErr: "Policy",
+		},
+		{
+			name: "tls mode valid",
+			mutate: func(c ServerConfig) ServerConfig {
+				// TLSMode=true（mbta-tls/1）：用 TLS1.3 单证书，清空 SM2 四件套。
+				c.TLSMode = true
+				c.CertFile = "tls.pem"
+				c.KeyFile = "tls.key"
+				c.SignCertFile = ""
+				c.SignKeyFile = ""
+				c.EncCertFile = ""
+				c.EncKeyFile = ""
+				return c
+			},
+		},
+		{
+			name: "tls mode missing cert/key",
+			mutate: func(c ServerConfig) ServerConfig {
+				c.TLSMode = true
+				c.CertFile = "" // 漏 TLS1.3 证书
+				c.KeyFile = ""
+				c.SignCertFile = ""
+				c.SignKeyFile = ""
+				c.EncCertFile = ""
+				c.EncKeyFile = ""
+				return c
+			},
+			wantErr: "TLS1.3 cert/key required",
+		},
+		{
+			name: "tlcp missing dual sm2 certs",
+			mutate: func(c ServerConfig) ServerConfig {
+				// TLCP 模式（默认）：漏掉签名证书，触发 dual SM2 required。
+				c.SignCertFile = ""
+				return c
+			},
+			wantErr: "dual SM2 certificates",
+		},
 	}
 
 	for _, tt := range tests {

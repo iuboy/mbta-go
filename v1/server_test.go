@@ -90,6 +90,21 @@ func TestNewServer_Validation(t *testing.T) {
 				return c
 			},
 		},
+		{
+			name: "explicit invalid policy rejected",
+			mutate: func(c ServerConfig) ServerConfig {
+				// 部分 Policy（非零值→IsZeroPolicy=false，不注入默认）但
+				// SupportedCapabilities 含未知项→Policy.Validate 报错。
+				c.Policy = core.Policy{
+					SupportedCapabilities: []string{core.CapCodecProto, "bogus_cap"},
+					DefaultCodec:          corepb.Codec_CODEC_PROTO,
+					DefaultCompression:    corepb.Compression_COMPRESSION_ZSTD,
+					CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
+				}
+				return c
+			},
+			wantErr: "Policy",
+		},
 	}
 
 	for _, tt := range tests {
