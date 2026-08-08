@@ -45,8 +45,9 @@ type versionedClient interface {
 
 // ClientConfig holds the client configuration.
 type ClientConfig struct {
-	// Protocol version — one of "v1", "v2", "ntls". Required.
-	Version string
+	// Protocol version — one of Version1, Version2, VersionNTLS. Required.
+	// 类型化为 ProtocolVersion，编译期拒绝拼错的版本串。
+	Version ProtocolVersion
 
 	// Connection settings
 	Server   string
@@ -75,26 +76,21 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 
 	for _, opt := range opts {
 		if err := opt(cfg); err != nil {
-			return nil, core.WrapError(core.NumConfig, core.CodeConfig, "client option", err)
+			return nil, core.WrapError(core.ErrCodeConfig, "client option", err)
 		}
 	}
 
-	// Validate version
+	// Validate version：ProtocolVersion 类型已在编译期约束为合法常量之一，
+	// 这里只兜底零值（用户未设置 Version）。
 	if cfg.Version == "" {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "version is required")
-	}
-	switch cfg.Version {
-	case Version1, Version2, VersionNTLS:
-		// valid
-	default:
-		return nil, core.NewError(core.NumVersion, core.CodeVersion, fmt.Sprintf("unsupported version: %s", cfg.Version))
+		return nil, core.NewError(core.ErrCodeConfig, "version is required")
 	}
 
 	if cfg.AgentID == "" {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "AgentID is required")
+		return nil, core.NewError(core.ErrCodeConfig, "AgentID is required")
 	}
 	if cfg.Server == "" {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Server address is required")
+		return nil, core.NewError(core.ErrCodeConfig, "Server address is required")
 	}
 
 	c := &Client{cfg: *cfg}
@@ -122,7 +118,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 //	defer client.Close()
 //
 //	// client is already connected, ready to SendBatch
-func Dial(ctx context.Context, server, agentID, token, version string, opts ...ClientOption) (*Client, error) {
+func Dial(ctx context.Context, server, agentID, token string, version ProtocolVersion, opts ...ClientOption) (*Client, error) {
 	allOpts := append([]ClientOption{
 		WithServer(server),
 		WithAgent(agentID, "", token),
@@ -131,14 +127,14 @@ func Dial(ctx context.Context, server, agentID, token, version string, opts ...C
 
 	client, err := NewClient(allOpts...)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial create", err)
+		return nil, core.WrapError(core.ErrCodeTransport, "dial create", err)
 	}
 
 	if err := client.Connect(ctx); err != nil {
 		if closeErr := client.Close(); closeErr != nil {
 			slog.Debug("cleanup close after failed connect", "error", closeErr)
 		}
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial connect", err)
+		return nil, core.WrapError(core.ErrCodeTransport, "dial connect", err)
 	}
 
 	return client, nil
@@ -154,7 +150,7 @@ func (c *Client) initClient() (versionedClient, error) {
 	case VersionNTLS:
 		return c.initNTLSClient()
 	default:
-		return nil, core.NewError(core.NumVersion, core.CodeVersion, fmt.Sprintf("unsupported version: %s", c.cfg.Version))
+		return nil, core.NewError(core.ErrCodeVersion, fmt.Sprintf("unsupported version: %s", c.cfg.Version))
 	}
 }
 
@@ -164,7 +160,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	if c.client == nil {
-		return core.NewError(core.NumSession, core.CodeSession, "client has been closed (cannot reconnect after Close)")
+		return core.NewError(core.ErrCodeSession, "client has been closed (cannot reconnect after Close)")
 	}
 
 	slog.Info("connecting", "version", c.cfg.Version, "server", c.cfg.Server)
@@ -178,19 +174,14 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// SendBatch sends a batch using the active connection.
-//
-// opts 携带 per-call 发送选项（如 WithTraceContext），不传则与旧行为完全一致。
-//
-// 整个调用在 RLock 保护下执行：防止 Close() 在中间切入将 c.client 置 nil 后
-// 继续调用底层 SendBatch（TOCTOU use-after-close）。Close 的 Lock 会等待
-// RLock 释放，保证 SendBatch 与 Close 串行化。
+// SendBatch 通过活动连接发送 batch；opts 携带 per-call 选项（如 WithTraceContext），不传则与旧行为一致。
+// RLock 保护防止与 Close 竞态（Close 的 Lock 等待 RLock 释放，保证串行化）。
 func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	if c.client == nil {
-		return "", core.NewError(core.NumSession, core.CodeSession, "not connected (call Connect first)")
+		return "", core.NewError(core.ErrCodeSession, "not connected (call Connect first)")
 	}
 
 	return c.client.SendBatch(ctx, batch, tag, source, opts...)
@@ -207,8 +198,7 @@ func (c *Client) Close() error {
 
 	if c.client != nil {
 		err := c.client.Close()
-		// 置 nil 防止 use-after-close：旧实现不置 nil，Close 后 SendBatch/State 仍会
-		// 分发到已关闭的底层客户端。
+		// 置 nil 防止 use-after-close。
 		c.client = nil
 		return err
 	}
@@ -229,8 +219,7 @@ func (c *Client) State() string {
 // SetACKHandler registers a callback for ACK notifications from the server.
 // The handler will be called with (chunkID, ackMode) when the server acknowledges a batch.
 //
-// 用 Lock（非 RLock）：底层 SetACKHandler 会修改 handler 状态，多个 goroutine 并发
-// 注册会形成数据竞争（RLock 仅防与 Close 的并发，不防并发 Set）。
+// 用 Lock（非 RLock）：SetACKHandler 修改 handler 状态，需防并发 Set（RLock 仅防与 Close 的并发）。
 func (c *Client) SetACKHandler(handler ACKHandler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -253,7 +242,7 @@ func (c *Client) SetRedirectHandler(handler RedirectHandler) {
 }
 
 // ActiveVersion returns the configured protocol version.
-func (c *Client) ActiveVersion() string {
+func (c *Client) ActiveVersion() ProtocolVersion {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.cfg.Version
@@ -262,7 +251,7 @@ func (c *Client) ActiveVersion() string {
 // initV1Client initializes the V1 client wrapper.
 func (c *Client) initV1Client() (versionedClient, error) {
 	if c.cfg.V1Creds == nil {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "v1 credentials not provided")
+		return nil, core.NewError(core.ErrCodeCredential, "v1 credentials not provided")
 	}
 
 	cfg := v1.ClientConfig{
@@ -286,19 +275,16 @@ func (c *Client) initV1Client() (versionedClient, error) {
 	return &v1ClientWrapper{client: client}, nil
 }
 
-// initV2Client 尚未实现：v2（QUIC + RFC 8998 国密 TLS）依赖未集成的 GM TLS 库。
-// 早失败：在 NewClient 阶段直接返回 error，而非构造一个运行期才报错的 wrapper。
+// initV2Client 尚未实现（v2 依赖未集成的 GM TLS 库）；NewClient 阶段早失败返回 error。
 func (c *Client) initV2Client() (versionedClient, error) {
-	return nil, core.NewError(core.NumVersion, core.CodeVersion,
-		"v2 protocol not yet implemented (requires GM TLS library)")
+	return nil, core.NewError(core.ErrCodeVersion, "v2 protocol not yet implemented (requires GM TLS library)")
 }
 
 // initNTLSClient 初始化 NTLS（TCP + TLCP）客户端。
 func (c *Client) initNTLSClient() (versionedClient, error) {
-	// fail-fast：与 initV1Client 一致，NewClient 时校验凭证非空，
-	// 避免延迟到 Connect 才报隐晦的 "ntls credentials required" 错误。
+	// fail-fast：NewClient 时校验凭证非空。
 	if c.cfg.NTLSCreds == nil {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "ntls credentials not provided")
+		return nil, core.NewError(core.ErrCodeCredential, "ntls credentials not provided")
 	}
 	cfg := ntls.ClientConfig{
 		Server:       c.cfg.Server,
@@ -353,16 +339,13 @@ func (w *ntlsClientWrapper) SetRedirectHandler(handler RedirectHandler) {
 
 // Client Options (functional options pattern)
 
-// WithVersion sets the protocol version. Must be one of "v1", "v2", "ntls".
-func WithVersion(version string) ClientOption {
+// WithVersion sets the protocol version. version 是 ProtocolVersion 类型，
+// 编译期已约束为合法常量（Version1/Version2/VersionNTLS），无需运行时 switch。
+// 从 string 构造时用 [ParseVersion] 转换。
+func WithVersion(version ProtocolVersion) ClientOption {
 	return func(cc *ClientConfig) error {
-		switch version {
-		case Version1, Version2, VersionNTLS:
-			cc.Version = version
-			return nil
-		default:
-			return core.NewError(core.NumVersion, core.CodeVersion, fmt.Sprintf("invalid version: %s", version))
-		}
+		cc.Version = version
+		return nil
 	}
 }
 

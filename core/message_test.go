@@ -4,12 +4,13 @@ import (
 	"testing"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // r2 message 测试：corepb 类型 + Validate 函数 + proto Encode/Decode。
 
 func TestValidateHello(t *testing.T) {
-	if err := ValidateHello(&HelloMessage{AgentId: "agent-1", FrameVersion: 1}); err != nil {
+	if err := ValidateHello(&HelloMessage{AgentId: testutil.RandAgentID(), FrameVersion: 1}); err != nil {
 		t.Errorf("valid hello: %v", err)
 	}
 	if err := ValidateHello(&HelloMessage{AgentId: "", FrameVersion: 1}); err == nil {
@@ -20,51 +21,39 @@ func TestValidateHello(t *testing.T) {
 	}
 }
 
-func TestValidateHelloAck(t *testing.T) {
-	if err := ValidateHelloAck(&HelloAckMessage{SessionId: make([]byte, 16)}); err != nil {
-		t.Errorf("valid hello_ack: %v", err)
-	}
-	if err := ValidateHelloAck(&HelloAckMessage{SessionId: nil}); err == nil {
-		t.Error("empty session_id should fail")
-	}
-	if err := ValidateHelloAck(&HelloAckMessage{SessionId: []byte("short")}); err == nil {
-		t.Error("non-16-byte session_id should fail")
-	}
-}
-
 func TestValidateAuth(t *testing.T) {
-	m := &AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n"), Token: "tok"}
+	m := &AuthMessage{AgentId: testutil.RandAgentID(), SessionId: []byte("s"), AuthNonce: []byte("n"), Token: testutil.RandToken()}
 	if err := ValidateAuth(m); err != nil {
 		t.Errorf("valid auth: %v", err)
 	}
-	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s"), Token: "tok"}); err == nil {
+	if err := ValidateAuth(&AuthMessage{AgentId: testutil.RandAgentID(), SessionId: []byte("s"), Token: testutil.RandToken()}); err == nil {
 		t.Error("missing auth_nonce should fail")
 	}
 	// token 可以为空：tokenless AUTH 模式下服务端通过 TokenResolver 反查 token。
 	// token 必填校验由 handleAuth 在 resolveAuthToken 之后执行。
-	if err := ValidateAuth(&AuthMessage{AgentId: "a", SessionId: []byte("s"), AuthNonce: []byte("n")}); err != nil {
+	if err := ValidateAuth(&AuthMessage{AgentId: testutil.RandAgentID(), SessionId: []byte("s"), AuthNonce: []byte("n")}); err != nil {
 		t.Errorf("missing token should not fail ValidateAuth (tokenless mode): %v", err)
 	}
 }
 
 func TestValidateBatch(t *testing.T) {
 	cid := NewChunkID()
-	m := &BatchMessage{Seq: 1, ChunkId: cid.Bytes(), Batch: []byte("payload")}
+	m := &BatchMessage{Seq: 1, ChunkId: cid.Bytes(), Batch: []byte(testutil.RandPayloadString(8))}
 	if err := ValidateBatch(m); err != nil {
 		t.Errorf("valid batch: %v", err)
 	}
-	if err := ValidateBatch(&BatchMessage{Seq: 0, ChunkId: cid.Bytes(), Batch: []byte("p")}); err == nil {
+	if err := ValidateBatch(&BatchMessage{Seq: 0, ChunkId: cid.Bytes(), Batch: []byte(testutil.RandString(2))}); err == nil {
 		t.Error("seq=0 should fail")
 	}
-	if err := ValidateBatch(&BatchMessage{Seq: 1, ChunkId: nil, Batch: []byte("p")}); err == nil {
+	if err := ValidateBatch(&BatchMessage{Seq: 1, ChunkId: nil, Batch: []byte(testutil.RandString(2))}); err == nil {
 		t.Error("empty chunk_id should fail")
 	}
-	if err := ValidateBatch(&BatchMessage{Seq: 1, ChunkId: make([]byte, 17), Batch: []byte("p")}); err == nil {
+	if err := ValidateBatch(&BatchMessage{Seq: 1, ChunkId: make([]byte, 17), Batch: []byte(testutil.RandString(2))}); err == nil {
 		t.Error("oversized chunk_id should fail")
 	}
 	// 回归：1-15 字节的截断 chunk_id 现在必须被拒绝（之前只检查 >16）。
 	for _, n := range []int{1, 8, 15} {
-		if err := ValidateBatch(&BatchMessage{Seq: 1, ChunkId: make([]byte, n), Batch: []byte("p")}); err == nil {
+		if err := ValidateBatch(&BatchMessage{Seq: 1, ChunkId: make([]byte, n), Batch: []byte(testutil.RandString(2))}); err == nil {
 			t.Errorf("truncated chunk_id (%d bytes) should fail; must be exactly 16", n)
 		}
 	}
@@ -75,11 +64,11 @@ func TestValidateBatch(t *testing.T) {
 
 func TestEncodeDecodeMessageRoundTrip(t *testing.T) {
 	orig := &HelloMessage{
-		AgentId:      "agent-1",
-		Hostname:     "host",
+		AgentId:      testutil.RandAgentID(),
+		Hostname:     testutil.RandHost(),
 		FrameVersion: 1,
-		AgentVersion: "0.1.0",
-		Capabilities: []string{"codec_proto", "comp_zstd"},
+		AgentVersion: testutil.RandVersion(),
+		Capabilities: []string{CapCodecProto, CapCompZstd},
 	}
 	wire, err := Encode(orig)
 	if err != nil {
@@ -99,7 +88,7 @@ func TestEncodeDecodeMessageRoundTrip(t *testing.T) {
 
 // TestDatagramMessageExists 验证 r2 新增的 DATAGRAM 消息类型可用（core spec §4 type=7）。
 func TestDatagramMessageExists(t *testing.T) {
-	dg := &DatagramMessage{Seq: 1, ChunkId: NewChunkID().Bytes(), Batch: []byte("dg"), EventsCount: 1}
+	dg := &DatagramMessage{Seq: 1, ChunkId: NewChunkID().Bytes(), Batch: []byte(testutil.RandPayloadString(4)), EventsCount: 1}
 	wire, err := Encode(dg)
 	if err != nil {
 		t.Fatalf("Encode datagram: %v", err)

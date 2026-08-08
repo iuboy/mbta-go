@@ -42,8 +42,8 @@ func main() {
 		mbtago.WithV1(v1.QUICServerConfig{
 			Address: "0.0.0.0:7400",
 			Credentials: &v1.ServerCredentials{
-				CertFile: "../../testdata/certificates/server.crt",
-				KeyFile:  "../../testdata/certificates/server.key",
+				CertFile: "../../test/data/certificates/server.crt",
+				KeyFile:  "../../test/data/certificates/server.key",
 			},
 		}),
 	)

@@ -15,10 +15,10 @@
 | envelope Open | 预分配 buffer（`make([]byte, 0, len(src)*4)` 解压放大预留） | `core/envelope.go:294` |
 | frame header | `var [N]byte` 栈数组 | `core/frame.go` |
 | ReplayCache 淘汰 | `container/list` 双链表（processingList + doneList） | `core/delivery.go` |
-| Inflight / Window | `atomic.Int64` 替代 `sync.Mutex` | `internal/protocol/client.go` |
-| ACK 排空检测 | `pendingCount atomic.Int64` 替代 `sync.Map.Range` | `internal/protocol/client_control.go` |
+| client 流控（AckTracker） | seq-indexed ring buffer 替代 sync.Map+独立计数器；编译期固定 100 槽，零分配 | `core/ack_tracker.go` |
+| ACK 排空检测 | `AckTracker.Empty()` O(1) 判空（drain 触发） | `internal/protocol/client_ack.go` |
 | QUIC 流控窗口 | 按 maxBatchBytes 匹配 | `v1/quic_transport.go` |
-| SendBatch 锁粒度 | `reserveInflight`（锁内 window/seq/inflight）+ `buildAndSend`（锁外 marshal/Build/Write） | `internal/protocol/client_batch.go` |
+| SendBatch 锁粒度 | `reserveInflight`（锁内 CanSend/seq/Reserve）+ `buildAndSend`（锁外 marshal/Build/Write） | `internal/protocol/client_batch.go` |
 | 多流支持（v1 QUIC） | 一致哈希 StreamPicker + N 流，绕过队头阻塞 | `v1/stream_picker.go` |
 | EnhancedRouter | EventsIn atomic + RLock 快路径，evict 节流 | `core/metrics.go` |
 
@@ -67,7 +67,7 @@ SM2 证书认证（mTLS）属传输层 TLS（TLCP / RFC 8998），依赖 pollux-
 
 ### v1（QUIC + TLS 1.3，`mbta/1`）
 
-`v1/` 包。QUIC UDP 多流：control/data 分离的 QUIC 流，BATCH 跨多流并发（一致哈希 StreamPicker 绕过队头阻塞）。0-RTT data 完整支持（见 [0-rtt-design.md](./0-rtt-design.md)）。
+`v1/` 包。QUIC UDP 多流：control/data 分离的 QUIC 流，BATCH 跨多流并发（一致哈希 StreamPicker 绕过队头阻塞）。0-RTT data 完整支持（见 core spec §11.6）。
 
 ### ntls（TCP + TLCP / TLS 1.3，`mbta-ntls/1`、`mbta-tls/1`）
 
@@ -121,9 +121,16 @@ caller 可安全使用 `context.WithTimeout + defer cancel` 限定握手时长�
 
 reliable BATCH 通道提供 at-least-once 投递语义：
 
-- **发送追踪**：每个 batch 在 `pendingAcks`（`sync.Map`，chunkID → `*pendingBatch`）登记，含 seq / chunkID / spoolChunkID / 发送时间，用于 ACK 关联与超时重发。
-- **ACK**：`handleAck` 删除对应 pendingBatch；`handleNack` 区分 retryable / non-retryable。
-- **超时重发**：`ackReaper`（`internal/protocol/client_control.go`）周期扫描 pendingAcks，超 `ackTimeout` 的 batch 重发（新 seq/chunkID，服务端 ReplayCache per-connection）。
+- **发送追踪**：每个 batch 在 `AckTracker`（seq-indexed ring buffer，`core/ack_tracker.go`）登记，含 seq / chunkID / events / bytes / 发送时间 / 超时时刻，用于 ACK 关联与超时回收。
+- **ACK/NACK**：`handleAck`/`handleNack` 调 `AckTracker.Release(seq, chunkID)`（ACK 帧自带 seq 取模定位 slot，chunkID 二次校验），返回 slot 供 BatchLatency 观测。
+- **超时回收**：`ackReaper`（`internal/protocol/client_ack.go`）周期调 `AckTracker.ReapExpired`，回收超 `ackTimeout` 的 slot 并重算 oldestSeq，解除序号跨度检查的队头阻塞。
 - **0-RTT / 重连重发**：握手成功后 pending batch 随 resumption 重发。
 
-> **持久化限制**：当前可靠投递基于内存 `pendingAcks`——进程崩溃会丢失待发 batch。跨进程崩溃的持久化 at-least-once（基于文件的 spool 层）待后续实现。
+### AckTracker 设计要点
+
+- **定长 ring buffer**：编译期固定 `AckRingSize=100` 槽（≈7.2KB），零运行时分配，嵌入式可精确预估。
+- **数学消除取模碰撞**：`CanSend` 的序号跨度检查（`newSeq - oldestSeq < AckRingSize`）保证存活 slot 的 seq 在 ring 内唯一，chunkID 比对作防御性兜底。
+- **三路并发 claim 安全**：handleAck/handleNack/ackReaper 都经 `Release`/`ReapExpired`，首个成功者清空 slot.seq，后续见 seq==0 失败，天然避免双减。
+- **单锁原则**：`AckTracker.mu` 保护 slot 数组与聚合计数；`sendMu`（CoreClient 层）保护取 seq + CanSend + Reserve 复合操作，两层锁不嵌套。
+
+> **持久化限制**：当前可靠投递基于内存 `AckTracker`——进程崩溃会丢失待发 batch。跨进程崩溃的持久化 at-least-once（基于文件的 spool 层）待后续实现。

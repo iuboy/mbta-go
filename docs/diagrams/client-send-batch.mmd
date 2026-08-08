@@ -1,0 +1,43 @@
+%% MBTA-Go 客户端路径②：SendBatch 核心数据路径
+%% 重点突出锁内/锁外边界与 AckTracker 交互
+flowchart TD
+    classDef entry fill:#4a90d9,stroke:#2c5f9e,color:#fff
+    classDef locked fill:#f5a623,stroke:#c47c00,color:#000
+    classDef tracker fill:#50e3c2,stroke:#2aab8a,color:#000
+    classDef fail fill:#d0021b,stroke:#9b0014,color:#fff
+
+    SB["Client.SendBatch<br/>client.go:183"]:::entry
+
+    subgraph UNLOCK["🔓 锁外前置 client_batch.go:27-49"]
+        direction TB
+        OPT["ApplySendOptions opts"]
+        GATE["trace 门控<br/>ValidateBatchTraceContext"]
+        CHECK["sm.State==Ready?<br/>throttle.Active?"]
+        MAR["MarshalSignalBatchCodec<br/>proto 编码 SignalBatch"]
+        SB --> OPT --> GATE --> CHECK --> MAR
+    end
+
+    subgraph LOCK["🔒 reserveInflight sendMu 临界区 client_batch.go:81"]
+        direction TB
+        RECHECK["TOCTOU 复检<br/>state + throttle"]
+        SEQ["seq.Next + NewChunkID<br/>构造 BatchMessage + Encode"]
+        CANSEND["tracker.CanSend<br/>容量阈值 + 序号跨度检查"]:::tracker
+        RES["结果?"]
+        RESERVE["tracker.Reserve<br/>占 slot seq%AckRingSize"]:::tracker
+        RECHECK --> SEQ --> CANSEND --> RES
+        RES -- 通过 --> RESERVE
+        RES -- window full --> WF["返回 ErrCodeWindowFull"]:::fail
+    end
+    MAR --> RECHECK
+
+    subgraph BUILD["🔓 锁外 buildAndSend client_batch.go:129"]
+        direction TB
+        ENV["Build envelope<br/>压缩 + AEAD加密 + HMAC"]
+        ENC["Encode envelope proto"]
+        WRITE["tr.WriteFrame TypeBatch<br/>v1: picker多流 / ntls: writeMu"]
+        ENV --> ENC --> WRITE
+    end
+    RESERVE --> ENV
+
+    WRITE -. 写失败 .-> ROLL["tracker.Release 回滚<br/>不计 latency"]:::tracker
+    WRITE -- 成功 --> OK["metrics.BatchesSent++<br/>return chunkID"]:::entry

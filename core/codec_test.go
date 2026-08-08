@@ -5,22 +5,25 @@ import (
 	"testing"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // richSignalBatch 构造一个含多种 any 动态类型的 SignalBatch，用于验证各 codec
 // 对 attributes/body 的类型保真度。
 func richSignalBatch() *SignalBatch {
+	bodyStr := "service-" + testutil.RandString(8)
+	hostName := testutil.RandHost()
 	return &SignalBatch{
-		SchemaURL: "https://schema.example/mbta/v1",
-		Resource:  Resource{Attributes: map[string]any{"host": "node-1", "region": "us-east"}},
-		Scope:     Scope{Name: "collector", Version: "1.0.0", CollectorID: "dc-1"},
+		SchemaURL: "https://" + testutil.RandString(8) + ".example/mbta/v1",
+		Resource:  Resource{Attributes: map[string]any{"host": hostName, "region": "us-east"}},
+		Scope:     Scope{Name: "collector-" + testutil.RandString(4), Version: testutil.RandVersion(), CollectorID: "dc-" + testutil.RandString(4)},
 		Signals: []*SignalRecord{
 			{
 				SignalType:     "log",
-				EventID:        "evt-1",
-				TimeUnixMs:     1700000000000,
-				Body:           "service started",
-				SeverityNumber: 9,
+				EventID:        testutil.RandEventID(),
+				TimeUnixMs:     int64(testutil.RandInt(1, 2_000_000_000)),
+				Body:           bodyStr,
+				SeverityNumber: testutil.RandInt(1, 24),
 				SeverityText:   "INFO",
 				Attributes: map[string]any{
 					"str":    "hello",
@@ -33,19 +36,19 @@ func richSignalBatch() *SignalBatch {
 			},
 			{
 				SignalType:   "counter",
-				MetricName:   "cpu.usage",
+				MetricName:   "metric-" + testutil.RandString(6),
 				Unit:         "%",
 				Temporality:  "gauge",
-				MetricFields: map[string]float64{"value": 87.5},
+				MetricFields: map[string]float64{"value": float64(testutil.RandInt(1, 1000)) / 10.0},
 			},
 			{
 				SignalType:      "span",
-				Name:            "http.request",
+				Name:            "http-" + testutil.RandString(6),
 				Kind:            "client",
-				TraceID:         "trace-abc",
-				SpanID:          "span-1",
-				StartTimeUnixMs: 1700000000000,
-				EndTimeUnixMs:   1700000001234,
+				TraceID:         "trace-" + testutil.RandString(6),
+				SpanID:          "span-" + testutil.RandString(4),
+				StartTimeUnixMs: int64(testutil.RandInt(1, 2_000_000_000)),
+				EndTimeUnixMs:   int64(testutil.RandInt(1, 2_000_000_000)),
 				StatusCode:      "OK",
 			},
 		},
@@ -116,9 +119,7 @@ func TestCodec_DispatchFuncs(t *testing.T) {
 	}
 }
 
-// TestCodec_CrossCodecIncompatible 验证不同 codec 的 wire bytes 不可互读。
-// 这防止「codec 字段被篡改后误用另一 codec 解码」的互操作 bug——也正是
-// handler_batch.go verifyEnvelopeAlgo 的纵深防御意义。
+// TestCodec_CrossCodecIncompatible 验证不同 codec 的 wire bytes 不可互读（防 codec 字段篡改后被另一 codec 误解码）。
 func TestCodec_CrossCodecIncompatible(t *testing.T) {
 	t.Parallel()
 	sb := &SignalBatch{Signals: []*SignalRecord{{SignalType: "log", Body: "x"}}}
@@ -156,14 +157,14 @@ func TestCodec_LookupUnknown(t *testing.T) {
 // TestCodec_NilEmpty 验证 nil/空输入的边界处理。
 func TestCodec_NilEmpty(t *testing.T) {
 	t.Parallel()
-	if _, err := MarshalSignalBatch(nil); err == nil {
-		t.Error("MarshalSignalBatch(nil): expected error")
+	if _, err := MarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, nil); err == nil {
+		t.Error("MarshalSignalBatchCodec(nil): expected error")
 	}
-	if _, err := UnmarshalSignalBatch(nil); err == nil {
-		t.Error("UnmarshalSignalBatch(nil): expected error")
+	if _, err := UnmarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, nil); err == nil {
+		t.Error("UnmarshalSignalBatchCodec(nil): expected error")
 	}
-	if _, err := UnmarshalSignalBatch([]byte{}); err == nil {
-		t.Error("UnmarshalSignalBatch(empty): expected error")
+	if _, err := UnmarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, []byte{}); err == nil {
+		t.Error("UnmarshalSignalBatchCodec(empty): expected error")
 	}
 }
 
@@ -189,8 +190,8 @@ func assertSignalBatchEqual(t *testing.T, want, got *SignalBatch, codecName stri
 	if log.SignalType != "log" {
 		t.Errorf("%s: signal[0].type = %q, want log", codecName, log.SignalType)
 	}
-	if log.Body != "service started" {
-		t.Errorf("%s: signal[0].body = %v, want 'service started'", codecName, log.Body)
+	if log.Body != want.Signals[0].Body {
+		t.Errorf("%s: signal[0].body = %v, want %v", codecName, log.Body, want.Signals[0].Body)
 	}
 	// attributes 类型保真（JSON 可能把 int64 变 float64，分别断言）
 	if log.Attributes["str"] != "hello" {
@@ -225,10 +226,10 @@ func assertSignalBatchEqual(t *testing.T, want, got *SignalBatch, codecName stri
 	// metric signal
 	metric := got.Signals[1]
 	if metric.SignalType != "counter" {
-		t.Errorf("%s: signal[1].type = %q, want metric", codecName, metric.SignalType)
+		t.Errorf("%s: signal[1].type = %q, want counter", codecName, metric.SignalType)
 	}
-	if metric.MetricName != "cpu.usage" {
-		t.Errorf("%s: signal[1].metric_name = %q, want cpu.usage", codecName, metric.MetricName)
+	if metric.MetricName != want.Signals[1].MetricName {
+		t.Errorf("%s: signal[1].metric_name = %q, want %q", codecName, metric.MetricName, want.Signals[1].MetricName)
 	}
 
 	// span signal
@@ -236,7 +237,7 @@ func assertSignalBatchEqual(t *testing.T, want, got *SignalBatch, codecName stri
 	if span.SignalType != "span" {
 		t.Errorf("%s: signal[2].type = %q, want span", codecName, span.SignalType)
 	}
-	if span.TraceID != "trace-abc" {
-		t.Errorf("%s: signal[2].trace_id = %q, want trace-abc", codecName, span.TraceID)
+	if span.TraceID != want.Signals[2].TraceID {
+		t.Errorf("%s: signal[2].trace_id = %q, want %q", codecName, span.TraceID, want.Signals[2].TraceID)
 	}
 }

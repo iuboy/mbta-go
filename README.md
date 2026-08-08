@@ -8,7 +8,7 @@ MBTA (Mebsuta Binary Transport Agent) — 高性能二进制日志传输协议�
 | ---- | ------------- | -------------------------- | --------  |
 | v1   | `mbta/1`      | QUIC + TLS 1.3             | ✅ 可用   |
 | v2   | `mbta/2`      | QUIC + RFC 8998 GM TLS 1.3 | 🔲 计划中 |
-| ntls | `mbta-ntls/1` | TCP + NTLS/TLCP            | 🔲 计划中 |
+| ntls | `mbta-ntls/1` | TCP + NTLS/TLCP            | ✅ 可用   |
 
 ## 安装
 
@@ -168,40 +168,42 @@ if errors.Is(err, core.NewError(core.NumAuth, core.ErrAuth, "")) {
 
 ### 客户端选项
 
-| 选项                       | 说明                  |
-| -------------------------- | --------------------- |
-| `WithServer(addr)`         | 设置服务端地址        |
-| `WithAgent(id, host, tk)`  | 设置 Agent 标识和令牌 |
-| `WithVersionPriority(vs)`  | 设置版本优先级列表    |
-| `WithV1Credentials(creds)` | 配置 V1 TLS 凭据      |
-| `WithV2Credentials(creds)` | 配置 V2 GM TLS 凭据   |
-| `WithClientNTLS(cfg)`      | 配置 NTLS 凭据        |
+| 选项                       | 说明                          |
+| -------------------------- | ----------------------------- |
+| `WithServer(addr)`         | 设置服务端地址                |
+| `WithAgent(id, host, tk)`  | 设置 Agent 标识、主机名和令牌 |
+| `WithVersion(v)`           | 指定协议版本（`v1`/`ntls`）   |
+| `WithAgentMeta(os, ver)`   | 设置 HELLO os / agent_version |
+| `WithV1Credentials(creds)` | 配置 V1（QUIC）TLS 凭据       |
+| `WithClientNTLS(cfg)`      | 配置 NTLS（TCP+TLCP）凭据     |
+| `WithClientMetrics(m)`     | 注入 Prometheus 指标收集器    |
 
 ### 服务端选项
 
-| 选项                   | 说明                  |
-| ---------------------- | --------------------- |
-| `WithV1(cfg)`          | 启用 V1 + QUIC 配置   |
-| `WithV2(cfg)`          | 启用 V2 + GM TLS 配置 |
-| `WithNTLS(addr, cfg)`  | 启用 NTLS 配置        |
-| `WithAuth(validator)`  | 设置令牌验证器        |
-| `WithPolicy(policy)`   | 设置会话策略          |
-| `WithEventSink(sink)`  | 设置事件接收器        |
-| `WithMetrics(metrics)` | 设置指标收集器        |
+| 选项                       | 说明                          |
+| -------------------------- | ----------------------------- |
+| `WithV1(cfg)`              | 启用 V1（QUIC）监听           |
+| `WithNTLS(cfg)`            | 启用 NTLS（TCP+TLCP）监听     |
+| `WithoutV1()`              | 关闭默认 V1 监听（仅用 NTLS） |
+| `WithAuth(validator)`      | 设置令牌验证器                |
+| `WithPolicy(policy)`       | 设置会话策略                  |
+| `WithEventSink(sink)`      | 设置事件接收器（必需）        |
+| `WithMetrics(metrics)`     | 注入 Prometheus 指标收集器    |
+| `WithRedirectChecker(fn)`  | HA leader 重定向检查          |
+| `WithOnSession(fn)`        | 会话生命周期回调              |
 
 ## 架构
 
 ```
 ┌─────────────────────────────────┐
-│          mbta-go                │
+│  client.go / server.go          │  门面：多版本 Option API
 ├─────────────────────────────────┤
-│  client.go / server.go          │  多版本门面
+│  v1/  ntls/                     │  传输 binding（QUIC / TCP+TLCP）
 ├─────────────────────────────────┤
-│  v1/  v2/  ntls/                │  版本实现
+│  internal/protocol              │  协议核心（握手/流控/ACK/状态机）
+│  internal/binding               │  共享握手编排
 ├─────────────────────────────────┤
-│  core/                          │  帧编码 · 信封 · 会话 · 流控
-├─────────────────────────────────┤
-│  testing/                       │  测试辅助
+│  core/                          │  帧编码 · SecureEnvelope · 会话 · 流控
 └─────────────────────────────────┘
 ```
 
@@ -209,9 +211,10 @@ if errors.Is(err, core.NewError(core.NumAuth, core.ErrAuth, "")) {
 
 协议层通过以下接口与业务层解耦：
 
-- `core.EventSink` — 事件投递
-- `core.DurableEventSink` — 带 ACK 反馈的事件投递
+- `core.EventSink` / `DurableEventSink` / `RawEventSink` — 事件投递（逐层增强）
 - `core.TokenValidator` — 认证令牌验证
+- `core.OnSession` — 会话生命周期回调
+- `core.RedirectChecker` — HA leader 重定向
 
 ## 许可证
 

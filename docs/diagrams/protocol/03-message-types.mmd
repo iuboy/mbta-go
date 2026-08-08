@@ -1,0 +1,55 @@
+%%{init: {'theme':'default', 'themeVariables': {'background':'#ffffff'}}}%%
+flowchart TD
+    subgraph Handshake["握手 (1–5, control)"]
+        direction LR
+        T1["① HELLO<br/>C→S"]
+        T2["② HELLO_ACK<br/>S→C"]
+        T3["③ AUTH<br/>C→S"]
+        T4["④ AUTH_OK<br/>S→C"]
+        T5["⑤ AUTH_FAIL<br/>S→C"]
+    end
+
+    subgraph Data["数据面 (6–10, data channel)"]
+        direction LR
+        T6["⑥ BATCH<br/>C→S reliable"]
+        T7["⑦ DATAGRAM<br/>C→S unreliable<br/>cap: unreliable_datagram"]
+        T8["⑧ ACK<br/>S→C"]
+        T9["⑨ NACK<br/>S→C"]
+        T10["⑩ PARTIAL_ACK<br/>S→C"]
+    end
+
+    subgraph FlowCtrl["流控 (11–12, control)"]
+        direction LR
+        T11["⑪ WINDOW<br/>S→C"]
+        T12["⑫ THROTTLE<br/>S→C backoff"]
+    end
+
+    subgraph Lifecycle["生命周期 (13–17)"]
+        direction LR
+        T13["⑬ PING<br/>双向"]
+        T14["⑭ PONG<br/>双向"]
+        T15["⑮ CLOSE<br/>双向 graceful"]
+        T16["⑯ ERROR<br/>双向"]
+        T17["⑰ REDIRECT<br/>S→C 集群重定向"]
+    end
+
+    T1 --> T2 --> T3
+    T3 --> T4
+    T3 -. 可重试 .-> T3
+    T3 --> T5
+
+    T6 --> T8
+    T6 --> T9
+    T6 --> T10
+
+    T13 --> T14
+
+    classDef hs fill:#fce4ec,stroke:#c2185b,stroke-width:2px,color:#880e4f
+    classDef data fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    classDef flow fill:#fff8e1,stroke:#f9a825,stroke-width:2px,color:#f57f17
+    classDef life fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+
+    class T1,T2,T3,T4,T5 hs
+    class T6,T7,T8,T9,T10 data
+    class T11,T12 flow
+    class T13,T14,T15,T16,T17 life

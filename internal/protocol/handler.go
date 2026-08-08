@@ -31,9 +31,8 @@ const (
 	maxDrainTimeout = 30 * time.Second
 )
 
-// CodeEnvelopeAlgoMismatch 是 envelope 算法一致性复核失败时回送的 NACK code。
-// 客户端 envelope 声明的 Codec/Compression/CipherSuite 与服务端协商结果不符时使用。
-const CodeEnvelopeAlgoMismatch = "envelope_algo_mismatch"
+// envelope 算法一致性复核失败的 wire NACK code 定义在 core.ErrCodeEnvelopeAlgoMismatch
+// （Code 字段 = "envelope_algo_mismatch"），不再在此重复定义。
 
 // HandlerConfig 是 CoreHandler 的配置（传输无关）。
 type HandlerConfig struct {
@@ -63,14 +62,14 @@ type CoreHandler struct {
 
 	// 握手字段：controlLoop（handleHello/handleAuth）写，dataLoop/processBatch（0-RTT）读。
 	// 用 handshakeMu 保护，避免 0-RTT 场景下 agentID/sessionID 的数据竞争。
-	agentID        string
-	sessionID      []byte
+	agentID   string
+	sessionID []byte
 	// helloMeta 保存 HELLO 帧中除 agentID 外的身份字段，供 OnSession CONNECTED 回调读取。
 	// 与 agentID/sessionID 一样在 handleHello 中写入，handshakeMu 保护。
-	hostname     string
-	instanceID   string
-	agentVersion string
-	os           string
+	hostname       string
+	instanceID     string
+	agentVersion   string
+	os             string
 	challengeNonce []byte
 	authAttempts   int
 	handshakeMu    sync.RWMutex
@@ -205,7 +204,7 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 	}()
 	// 进入 CONTROL_WAIT（server 状态机初始为 Accepted）。
 	if err := h.sm.Transition(core.ServerStateControlWait); err != nil {
-		return core.WrapError(core.NumSession, core.CodeSession, "transition to CONTROL_WAIT", err)
+		return core.WrapError(core.ErrCodeSession, "transition to CONTROL_WAIT", err)
 	}
 	err := h.controlLoop(ctx)
 	// 等待所有 data frame 处理 goroutine 退出后再清密钥（避免与 processBatch 读 keys 竞态）。
@@ -249,12 +248,12 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 	for {
 		f, err := h.tr.RecvControlFrame(ctx)
 		if err != nil {
-			return core.WrapError(core.NumProtocol, core.CodeProtocol, "read control frame", err)
+			return core.WrapError(core.ErrCodeProtocol, "read control frame", err)
 		}
 		switch f.Header.Type {
 		case core.TypeHello:
 			if h.sm.State() == core.ServerStateReady {
-				h.sendError(ctx, core.CodeUnsupportedMessage, "HELLO not allowed after auth", true)
+				h.sendError(ctx, core.ErrCodeUnsupportedMessage, "HELLO not allowed after auth", true)
 				continue
 			}
 			if err := h.handleHello(ctx, f.Payload); err != nil {
@@ -262,7 +261,7 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			}
 		case core.TypeAuth:
 			if h.sm.State() == core.ServerStateReady {
-				h.sendError(ctx, core.CodeUnsupportedMessage, "AUTH not allowed after auth", true)
+				h.sendError(ctx, core.ErrCodeUnsupportedMessage, "AUTH not allowed after auth", true)
 				continue
 			}
 			if err := h.handleAuth(ctx, f.Payload); err != nil {
@@ -270,7 +269,7 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			}
 		case core.TypePing:
 			if h.sm.State() != core.ServerStateReady {
-				h.sendError(ctx, core.CodeUnsupportedMessage, "PING not allowed before auth", true)
+				h.sendError(ctx, core.ErrCodeUnsupportedMessage, "PING not allowed before auth", true)
 				continue
 			}
 			h.handlePing(ctx, f.Payload)
@@ -278,8 +277,8 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			h.handleClose(f.Payload)
 			return nil
 		default:
-			h.sendError(ctx, core.CodeUnsupportedMessage, fmt.Sprintf("unexpected control type 0x%02x", f.Header.Type), true)
-			return core.NewError(core.NumProtocol, core.CodeProtocol, fmt.Sprintf("unexpected control type 0x%02x", f.Header.Type))
+			h.sendError(ctx, core.ErrCodeUnsupportedMessage, fmt.Sprintf("unexpected control type 0x%02x", f.Header.Type), true)
+			return core.NewError(core.ErrCodeProtocol, fmt.Sprintf("unexpected control type 0x%02x", f.Header.Type))
 		}
 
 		// READY 或 0-RTT early_data 后启动 data loop（exactly once）
@@ -336,7 +335,7 @@ func (h *CoreHandler) dataLoop(ctx context.Context) {
 				}(f)
 			default:
 				// 并发满，拒绝并要求退避。
-				h.sendThrottle(ctx, throttleRetryMs, "too_many_batches", "max concurrent batches exceeded")
+				h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeTooManyBatches, "max concurrent batches exceeded")
 			}
 		case core.TypeDatagram:
 			// r2 unreliable 通道：at-most-once，无 ACK/spool，HMAC 失败静默丢弃（core spec §11.4）。

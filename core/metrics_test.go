@@ -263,8 +263,7 @@ func TestNoOpMetrics(t *testing.T) {
 	m.ConnectionDuration().Observe(60)
 }
 
-// TestMBTAMetrics_ImplementsMetrics 验证 *MBTAMetrics 满足 Metrics 接口
-// （编译期断言已在 metrics.go 底部，此处为运行期可观测的显式检查）。
+// TestMBTAMetrics_ImplementsMetrics 运行期确认 *MBTAMetrics 满足 Metrics 接口（编译期断言见 metrics.go）。
 func TestMBTAMetrics_ImplementsMetrics(t *testing.T) {
 	var _ Metrics = New(prometheus.NewRegistry())
 }

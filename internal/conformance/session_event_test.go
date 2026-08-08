@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,37 +11,39 @@ import (
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/protocol"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // runAuthedHandshakeWithOnSession 复用 doHandshake 的握手骨架，但注入 OnSession 回调
 // 并在 HELLO 中填充 hostname/instance_id/agent_version/os（用于校验 CONNECTED 携带完整身份）。
 // 返回捕获到的事件（按到达顺序）与 cancel（测试调用以触发 DISCONNECTED）。
-func runAuthedHandshakeWithOnSession(t *testing.T, helloHostname, helloOS, helloVersion string) (*sessionRecorder, context.CancelFunc) {
+func runAuthedHandshakeWithOnSession(t *testing.T, helloHostname, helloOS, helloVersion string) (*sessionRecorder, context.CancelFunc, string) {
 	t.Helper()
 	tr := NewFakeTransport(false)
+	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_proto", "comp_zstd", "cs_intl", "durable_ack"},
+		SupportedCapabilities: []string{core.CapCodecProto, core.CapCompZstd, core.CapCSIntl, core.CapDurableAck},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
-	auth := core.NewStaticTokenValidator(map[string]string{"secret-token": "agent-1"})
+	auth := core.NewStaticTokenValidator(map[string]string{tok: agentID})
 
 	rec := &sessionRecorder{}
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-		Auth: auth, Policy: policy, Sink: &noopSink{}, ServerID: "srv-1", OnSession: rec.append,
+		Auth: auth, Policy: policy, Sink: &noopSink{}, ServerID: "srv-" + testutil.RandString(4), OnSession: rec.append,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = h.Handle(ctx) }()
 
 	// HELLO（带完整身份字段）
 	hello := &corepb.HelloMessage{
-		AgentId:      "agent-1",
+		AgentId:      agentID,
 		Hostname:     helloHostname,
-		InstanceId:   "inst-xyz",
+		InstanceId:   "inst-" + testutil.RandString(6),
 		AgentVersion: helloVersion,
 		FrameVersion: 1,
-		Capabilities: []string{"codec_proto", "cs_intl"},
+		Capabilities: []string{core.CapCodecProto, core.CapCSIntl},
 	}
 	if helloOS != "" {
 		hello.Os = &helloOS
@@ -61,10 +64,10 @@ func runAuthedHandshakeWithOnSession(t *testing.T, helloHostname, helloOS, hello
 	cs := ack.GetCipherSuite()
 
 	// AUTH
-	authNonce := core.ComputeChallengeResponse("secret-token", string(ack.GetChallengeNonce()), cs)
+	authNonce := core.ComputeChallengeResponse(tok, string(ack.GetChallengeNonce()), cs)
 	authMsg := &corepb.AuthMessage{
-		Token:     "secret-token",
-		AgentId:   "agent-1",
+		Token:     tok,
+		AgentId:   agentID,
 		SessionId: ack.GetSessionId(),
 		AuthNonce: authNonce,
 	}
@@ -88,7 +91,7 @@ func runAuthedHandshakeWithOnSession(t *testing.T, helloHostname, helloOS, hello
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
-	return rec, cancel
+	return rec, cancel, agentID
 }
 
 // sessionRecorder 线程安全地收集 SessionEvent；避免测试通过 slice header 读到过期快照。
@@ -151,7 +154,8 @@ func (r *sessionRecorder) waitForDisconnected(timeout time.Duration) (*core.Sess
 
 // TestOnSession_Connected 验证 CONNECTED 在 AUTH_OK 后触发并携带完整 HELLO 身份字段。
 func TestOnSession_Connected(t *testing.T) {
-	rec, cancel := runAuthedHandshakeWithOnSession(t, "host-1", "linux", "9.9.9")
+	hostname, osVal, ver := testutil.RandHost(), "linux", testutil.RandVersion()
+	rec, cancel, agentID := runAuthedHandshakeWithOnSession(t, hostname, osVal, ver)
 	defer cancel()
 
 	var connected *core.SessionEvent
@@ -164,27 +168,27 @@ func TestOnSession_Connected(t *testing.T) {
 	if connected == nil {
 		t.Fatalf("no CONNECTED event; got %+v", rec.snapshot())
 	}
-	if connected.AgentID != "agent-1" {
-		t.Errorf("AgentID = %q, want agent-1", connected.AgentID)
+	if connected.AgentID != agentID {
+		t.Errorf("AgentID = %q, want %q", connected.AgentID, agentID)
 	}
-	if connected.Hostname != "host-1" {
-		t.Errorf("Hostname = %q, want host-1", connected.Hostname)
+	if connected.Hostname != hostname {
+		t.Errorf("Hostname = %q, want %q", connected.Hostname, hostname)
 	}
-	if connected.OS != "linux" {
-		t.Errorf("OS = %q, want linux", connected.OS)
+	if connected.OS != osVal {
+		t.Errorf("OS = %q, want %q", connected.OS, osVal)
 	}
-	if connected.AgentVersion != "9.9.9" {
-		t.Errorf("AgentVersion = %q, want 9.9.9", connected.AgentVersion)
+	if connected.AgentVersion != ver {
+		t.Errorf("AgentVersion = %q, want %q", connected.AgentVersion, ver)
 	}
-	if connected.InstanceID != "inst-xyz" {
-		t.Errorf("InstanceID = %q, want inst-xyz", connected.InstanceID)
+	if !strings.HasPrefix(connected.InstanceID, "inst-") {
+		t.Errorf("InstanceID = %q, want inst-* prefix", connected.InstanceID)
 	}
 }
 
 // TestOnSession_DisconnectedOnCancel 验证连接结束（ctx 取消）时触发 DISCONNECTED，
 // 且 AgentID 与 CONNECTED 配对。FakeTransport 的 RemoteAddr 为 nil，不做断言。
 func TestOnSession_DisconnectedOnCancel(t *testing.T) {
-	rec, cancel := runAuthedHandshakeWithOnSession(t, "host-1", "linux", "1.0.0")
+	rec, cancel, agentID := runAuthedHandshakeWithOnSession(t, testutil.RandHost(), "linux", testutil.RandVersion())
 
 	// 已确认 CONNECTED。取消 ctx 结束连接，等待 DISCONNECTED。
 	cancel()
@@ -192,8 +196,8 @@ func TestOnSession_DisconnectedOnCancel(t *testing.T) {
 	if !ok {
 		t.Fatalf("DISCONNECTED event not fired within timeout; events=%+v", rec.snapshot())
 	}
-	if ev.AgentID != "agent-1" {
-		t.Errorf("DISCONNECTED AgentID = %q, want agent-1", ev.AgentID)
+	if ev.AgentID != agentID {
+		t.Errorf("DISCONNECTED AgentID = %q, want %q", ev.AgentID, agentID)
 	}
 }
 
@@ -202,15 +206,16 @@ func TestOnSession_DisconnectedOnCancel(t *testing.T) {
 func TestOnSession_NoDisconnectedForUnauthedConnection(t *testing.T) {
 	tr := NewFakeTransport(false)
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_proto", "cs_intl"},
+		SupportedCapabilities: []string{core.CapCodecProto, core.CapCSIntl},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
-	auth := core.NewStaticTokenValidator(map[string]string{"secret-token": "agent-1"})
+	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
+	auth := core.NewStaticTokenValidator(map[string]string{tok: agentID})
 
 	var rec sessionRecorder
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-		Auth: auth, Policy: policy, Sink: &noopSink{}, ServerID: "srv-1",
+		Auth: auth, Policy: policy, Sink: &noopSink{}, ServerID: "srv-" + testutil.RandString(4),
 		OnSession: rec.append,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -218,7 +223,7 @@ func TestOnSession_NoDisconnectedForUnauthedConnection(t *testing.T) {
 	go func() { _ = h.Handle(ctx) }()
 
 	// HELLO（合法），但随后发错误 AUTH。
-	hello := &corepb.HelloMessage{AgentId: "agent-1", FrameVersion: 1, Capabilities: []string{"codec_proto", "cs_intl"}}
+	hello := &corepb.HelloMessage{AgentId: agentID, FrameVersion: 1, Capabilities: []string{core.CapCodecProto, core.CapCSIntl}}
 	hp, _ := core.Encode(hello)
 	tr.ControlIn <- MakeFrame(core.TypeHello, core.FlagControl, core.ChannelControl, hp)
 	ackF := ReadFrame(t, tr.Sent) // HELLO_ACK
@@ -227,9 +232,9 @@ func TestOnSession_NoDisconnectedForUnauthedConnection(t *testing.T) {
 	cs := ack.GetCipherSuite()
 
 	// 用错误 token 计算 challenge-response（必然校验失败）。
-	badNonce := core.ComputeChallengeResponse("wrong-token", string(ack.GetChallengeNonce()), cs)
+	badNonce := core.ComputeChallengeResponse(testutil.RandToken(), string(ack.GetChallengeNonce()), cs)
 	authMsg := &corepb.AuthMessage{
-		Token: "wrong-token", AgentId: "agent-1", SessionId: ack.GetSessionId(), AuthNonce: badNonce,
+		Token: testutil.RandToken(), AgentId: agentID, SessionId: ack.GetSessionId(), AuthNonce: badNonce,
 	}
 	ap, _ := core.Encode(authMsg)
 	// 连续发送错误 AUTH 直到达到 maxAuthAttempts，handler 返回 error，Handle 退出。
@@ -259,4 +264,4 @@ func TestOnSession_NoDisconnectedForUnauthedConnection(t *testing.T) {
 type noopSink struct{}
 
 func (n *noopSink) OnSignalBatch(_ context.Context, _ string, _ *core.SignalBatch) error { return nil }
-func (n *noopSink) OnPressure(_ string) core.PressureState                                 { return core.PressureNormal }
+func (n *noopSink) OnPressure(_ string) core.PressureState                               { return core.PressureNormal }

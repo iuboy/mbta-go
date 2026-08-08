@@ -16,12 +16,12 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	env, err := core.DecodeEnvelope(payload)
 	if err != nil {
 		slog.Debug("invalid envelope", "error", err)
-		h.sendError(ctx, core.CodeDecodeFailed, "invalid_envelope", false)
+		h.sendError(ctx, core.ErrCodeDecodeFailed, "invalid_envelope", false)
 		return
 	}
 
 	if h.expiresAt.Load() > 0 && time.Now().Unix() > h.expiresAt.Load() {
-		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "session_expired", "session TTL exceeded, please reconnect", false)
+		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeSessionExpired, "session TTL exceeded, please reconnect", false)
 		return
 	}
 
@@ -37,19 +37,19 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	}
 
 	// 先执行 HMAC 校验（Open 内部在解密前 VerifyMAC），再做算法一致性复核。
-	// 旧实现在 HMAC 之前执行 verifyEnvelopeAlgo，导致未认证方可通过注入帧探测服务端
+	// 在 HMAC 之前执行 verifyEnvelopeAlgo 会导致未认证方可通过注入帧探测服务端
 	// 协商算法集（defense-in-depth 仅在认证后有意义）。
 	batchPayload, err := core.Open(env, hmacKey, aeadKey)
 	if err != nil {
 		// 区分 HMAC 失败与解密失败用于 metrics。
-		if core.GetErrorCodeString(err) == core.CodeHMAC {
+		if core.CodeOf(err) == core.ErrCodeHMACMismatch.Code {
 			slog.Debug("envelope HMAC verification failed", "error", err)
 			h.config.Metrics.HMACFailures().Inc()
-			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "hmac_mismatch", "HMAC verification failed", false)
+			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeHMACMismatch, "HMAC verification failed", false)
 		} else {
 			slog.Debug("envelope open failed", "error", err)
 			h.config.Metrics.DecryptFailures().Inc()
-			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "envelope_open_error", "envelope could not be opened", true)
+			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeOpenError, "envelope could not be opened", true)
 		}
 		return
 	}
@@ -59,7 +59,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 		return
 	}
 	if len(batchPayload) > maxBatchBytes {
-		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "batch_too_large",
+		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeBatchTooLarge,
 			fmt.Sprintf("batch payload %d bytes exceeds limit %d", len(batchPayload), maxBatchBytes), false)
 		return
 	}
@@ -67,12 +67,12 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	var batchMsg corepb.BatchMessage
 	if err := core.Decode(batchPayload, &batchMsg); err != nil {
 		slog.Debug("batch decode failed", "error", err)
-		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), "invalid_batch", "batch message could not be decoded", false)
+		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeInvalidBatch, "batch message could not be decoded", false)
 		return
 	}
 	if err := core.ValidateBatch(&batchMsg); err != nil {
 		slog.Debug("batch validation failed", "error", err)
-		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "batch_validation", "batch failed validation", false)
+		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeBatchValidation, "batch failed validation", false)
 		return
 	}
 	// batch 级 W3C trace 上下文校验（capability w3c_trace_context，spec §6.2.2）。
@@ -80,7 +80,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	if tc := batchMsg.GetTraceContext(); tc != nil {
 		if err := core.ValidateBatchTraceContext(tc); err != nil {
 			slog.Debug("batch trace_context invalid", "error", err)
-			h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "batch_trace_context", "invalid batch trace context", false)
+			h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeBatchTraceContext, "invalid batch trace context", false)
 			return
 		}
 	}
@@ -95,7 +95,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 
 	// 服务端流控强制。
 	if !h.window.CanSend(h.inflight, batchEvents, batchBytes) {
-		h.sendThrottle(ctx, throttleRetryMs, "window_exceeded", "server flow-control window exceeded")
+		h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeWindowExceeded, "server flow-control window exceeded")
 		return
 	}
 	h.inflight.Add(batchEvents, batchBytes)
@@ -146,7 +146,7 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 	if err != nil {
 		// 区分 HMAC 失败与解密失败用于 metrics（与 processBatch 对齐），
 		// 避免 HMAC 篡改攻击信号被掩盖为解密失败。
-		if core.GetErrorCodeString(err) == core.CodeHMAC {
+		if core.CodeOf(err) == core.ErrCodeHMACMismatch.Code {
 			slog.Debug("datagram HMAC verification failed", "error", err)
 			h.config.Metrics.HMACFailures().Inc()
 		} else {
@@ -186,7 +186,7 @@ func (h *CoreHandler) resolveBatchEvents(ctx context.Context, batchMsg *corepb.B
 	if rawSink != nil && batchMsg.GetEventsCount() > 0 {
 		ec := int(batchMsg.GetEventsCount())
 		if ec > maxBatchEvents {
-			h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "too_many_events",
+			h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeTooManyEvents,
 				fmt.Sprintf("event count %d exceeds limit %d", ec, maxBatchEvents), false)
 			return -1, nil
 		}
@@ -203,16 +203,16 @@ func (h *CoreHandler) decodeSignalBatch(ctx context.Context, batchMsg *corepb.Ba
 	sb, err := core.UnmarshalSignalBatchCodec(h.codecForUnmarshal(), batchMsg.GetBatch())
 	if err != nil {
 		slog.Debug("signal batch decode failed", "error", err)
-		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "invalid_signal_batch", "signal batch could not be decoded", false)
+		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeInvalidSignalBatch, "signal batch could not be decoded", false)
 		return nil, false
 	}
 	if err := sb.Validate(); err != nil {
 		slog.Debug("signal validation failed", "error", err)
-		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "signal_validation", "signal batch failed validation", false)
+		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeSignalValidation, "signal batch failed validation", false)
 		return nil, false
 	}
 	if len(sb.Signals) > maxBatchEvents {
-		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), "too_many_events",
+		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeTooManyEvents,
 			fmt.Sprintf("event count %d exceeds limit %d", len(sb.Signals), maxBatchEvents), false)
 		return nil, false
 	}
@@ -227,22 +227,22 @@ func (h *CoreHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
 	if n == nil {
 		// negotiated 未设置 = 握手未完成或 0-RTT 降级路径。fail-closed：拒绝而非静默放行，
 		// 防止未认证的 envelope 在无算法一致性校验下被处理。
-		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeAlgoMismatch,
 			"negotiation result unavailable", false)
 		return true
 	}
 	if env.Compression != n.Compression {
-		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeAlgoMismatch,
 			"compression not negotiated", false)
 		return true
 	}
 	if env.Codec != n.Codec {
-		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeAlgoMismatch,
 			"codec not negotiated", false)
 		return true
 	}
 	if env.CipherSuite != n.CipherSuite {
-		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), CodeEnvelopeAlgoMismatch,
+		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeAlgoMismatch,
 			"cipher suite not negotiated", false)
 		return true
 	}
@@ -303,7 +303,7 @@ func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteRe
 		// 重置 replay entry 为 Processing，允许客户端重试时重新投递（否则 replay 仍为 Accepted，
 		// 客户端重试会收到 ACK_ACCEPTED 但 batch 从未真正处理，造成静默数据丢失）。
 		h.replay.Update(agentID, chunkID, core.ReplayProcessing)
-		h.sendThrottle(ctx, throttleRetryMs, "queue_pressure", "queue pressure critical, retry later")
+		h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeQueuePressure, "queue pressure critical, retry later")
 		return true
 	default:
 		*ackMode = corepb.AckMode_ACK_MODE_ACCEPTED

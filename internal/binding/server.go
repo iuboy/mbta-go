@@ -2,7 +2,6 @@ package binding
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
@@ -145,15 +144,14 @@ func handleConn[C any](
 		Policy:          hcfg.Policy,
 		Sink:            hcfg.Sink,
 		Metrics:         hcfg.Metrics,
-			ServerID:        hcfg.ServerID,
-			RedirectChecker: hcfg.RedirectChecker,
-			OnSession:       hcfg.OnSession,
-			SessionStore:    hcfg.SessionStore,
-		})
+		ServerID:        hcfg.ServerID,
+		RedirectChecker: hcfg.RedirectChecker,
+		OnSession:       hcfg.OnSession,
+		SessionStore:    hcfg.SessionStore,
+	})
 	if err := h.Handle(ctx); err != nil {
-		// ErrRedirected is normal HA flow (follower steered a client to
-		// the leader), not a handler error — suppress the noisy log.
-		if errors.Is(err, core.ErrRedirected) {
+		// redirected 是正常 HA 流程（follower 把客户端导向 leader），非 handler 错误，降级为 Debug 日志。
+		if core.CodeOf(err) == core.ErrCodeRedirected.Code {
 			slog.Debug("connection redirected to leader")
 		} else {
 			slog.Error("handler error", "error", err)

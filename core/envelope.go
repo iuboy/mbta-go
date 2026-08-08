@@ -55,15 +55,15 @@ type BuildParams struct {
 //	5. 计算 HMAC（canonical wire bytes）
 func Build(p BuildParams) (*SecureEnvelope, error) {
 	if p.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "cipher suite unspecified")
+		return nil, NewError(ErrCodeEnvelope, "cipher suite unspecified")
 	}
 	if p.Codec == corepb.Codec_CODEC_UNSPECIFIED {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "codec unspecified")
+		return nil, NewError(ErrCodeEnvelope, "codec unspecified")
 	}
 	// 提前校验 HMACKey：非空是规范要求（core spec §5.1），空 key 会在 NewHMAC 深处
 	// 才暴露错误，降低可诊断性，并可能引发 nil key 的 panic。
 	if len(p.HMACKey) == 0 {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "HMAC key is required")
+		return nil, NewError(ErrCodeEnvelope, "HMAC key is required")
 	}
 
 	env := &SecureEnvelope{
@@ -95,7 +95,7 @@ func Build(p BuildParams) (*SecureEnvelope, error) {
 		}
 		nonce := make([]byte, AEADNonceSize)
 		if _, err := rand.Read(nonce); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "generate AEAD nonce", err)
+			return nil, WrapError(ErrCodeEnvelope, "generate AEAD nonce", err)
 		}
 		env.Nonce = nonce
 		env.Payload = aead.Seal(nil, nonce, processed, nil)
@@ -123,25 +123,23 @@ func Build(p BuildParams) (*SecureEnvelope, error) {
 //   - 两者都为空              ：禁止——调用方应显式选择明文/生产模式
 func Open(env *SecureEnvelope, hmacKey, aeadKey []byte) ([]byte, error) {
 	if env == nil {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "nil envelope")
+		return nil, NewError(ErrCodeEnvelope, "nil envelope")
 	}
 	// 拒绝"有加密无 MAC"的降级攻击路径（encrypt-without-MAC）。
 	// hmacKey 空 + aeadKey 非空 = 完整性校验完全绕过，不可接受。
 	if len(hmacKey) == 0 && len(aeadKey) > 0 {
-		return nil, NewError(NumEnvelope, CodeEnvelope,
-			"AEAD key present but HMAC key empty (encrypt-without-MAC forbidden)")
+		return nil, NewError(ErrCodeEnvelope, "AEAD key present but HMAC key empty (encrypt-without-MAC forbidden)")
 	}
 	// 拒绝两个都空的模糊调用（调用方必须显式选择模式）。
 	if len(hmacKey) == 0 && len(aeadKey) == 0 {
-		return nil, NewError(NumEnvelope, CodeEnvelope,
-			"both HMAC and AEAD keys empty (use explicit mode: production or diagnostics)")
+		return nil, NewError(ErrCodeEnvelope, "both HMAC and AEAD keys empty (use explicit mode: production or diagnostics)")
 	}
 	// 版本校验：拒绝不兼容协议版本的 envelope，避免字段被静默误解。
 	if env.EnvelopeVersion != EnvelopeVersion {
-		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported envelope version: %d", env.EnvelopeVersion))
+		return nil, NewError(ErrCodeEnvelope, fmt.Sprintf("unsupported envelope version: %d", env.EnvelopeVersion))
 	}
 	if env.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "cipher suite unspecified")
+		return nil, NewError(ErrCodeEnvelope, "cipher suite unspecified")
 	}
 	switch env.Compression {
 	case corepb.Compression_COMPRESSION_UNSPECIFIED,
@@ -150,17 +148,17 @@ func Open(env *SecureEnvelope, hmacKey, aeadKey []byte) ([]byte, error) {
 		corepb.Compression_COMPRESSION_LZ4,
 		corepb.Compression_COMPRESSION_GZIP:
 	default:
-		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", env.Compression))
+		return nil, NewError(ErrCodeEnvelope, fmt.Sprintf("unsupported compression: %v", env.Compression))
 	}
 
 	// 强制 HMAC 校验：在解密/解压前。空 hmacKey 视为显式跳过（仅诊断场景）。
 	if len(hmacKey) > 0 {
 		ok, verr := VerifyMAC(hmacKey, env)
 		if verr != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "HMAC verify", verr)
+			return nil, WrapError(ErrCodeEnvelope, "HMAC verify", verr)
 		}
 		if !ok {
-			return nil, NewError(NumHMAC, CodeHMAC, "HMAC verification failed")
+			return nil, NewError(ErrCodeHMACMismatch, "HMAC verification failed")
 		}
 	}
 
@@ -169,25 +167,24 @@ func Open(env *SecureEnvelope, hmacKey, aeadKey []byte) ([]byte, error) {
 	// Decrypt
 	if len(aeadKey) > 0 {
 		if len(env.Nonce) != AEADNonceSize {
-			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("nonce must be %d bytes", AEADNonceSize))
+			return nil, NewError(ErrCodeEnvelope, fmt.Sprintf("nonce must be %d bytes", AEADNonceSize))
 		}
 		aead, err := NewAEAD(env.CipherSuite, aeadKey)
 		if err != nil {
 			return nil, err
 		}
 		if len(raw) < aead.Overhead() {
-			return nil, NewError(NumEnvelope, CodeEnvelope, "ciphertext too short for AEAD tag")
+			return nil, NewError(ErrCodeEnvelope, "ciphertext too short for AEAD tag")
 		}
 		pt, err := aead.Open(nil, env.Nonce, raw, nil)
 		if err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "AEAD decrypt", err)
+			return nil, WrapError(ErrCodeEnvelope, "AEAD decrypt", err)
 		}
 		raw = pt
 	} else if len(env.Nonce) > 0 {
 		// 防御：aeadKey 为空（明文模式）但 envelope 携带 Nonce → 发送方加密了但
 		// 接收方未提供解密密钥。直接返回密文到解压器会产生令人困惑的格式错误。
-		return nil, NewError(NumEnvelope, CodeEnvelope,
-			"envelope carries AEAD nonce but no AEAD key was provided (encrypted envelope opened in plaintext mode)")
+		return nil, NewError(ErrCodeEnvelope, "envelope carries AEAD nonce but no AEAD key was provided (encrypted envelope opened in plaintext mode)")
 	}
 
 	// Decompress
@@ -216,7 +213,7 @@ func canonicalMAC(cs corepb.CipherSuite, hmacKey []byte, env *SecureEnvelope) ([
 	clone.Mac = nil
 	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(clone)
 	if err != nil {
-		return nil, WrapError(NumEnvelope, CodeEnvelope, "canonical marshal", err)
+		return nil, WrapError(ErrCodeEnvelope, "canonical marshal", err)
 	}
 	_, _ = h.Write(wire) // hash.Hash.Write 永不返回错误
 	return h.Sum(nil), nil
@@ -265,11 +262,11 @@ func compress(c corepb.Compression, src []byte) ([]byte, error) {
 		w.Reset(&buf)
 		if _, err := w.Write(src); err != nil {
 			_ = w.Close() // best-effort cleanup；writer 可能处于损坏状态，不放回 pool
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip compress", err)
+			return nil, WrapError(ErrCodeEnvelope, "gzip compress", err)
 		}
 		if err := w.Close(); err != nil {
 			// Close 失败：writer 可能已损坏，不放回 pool（与 Write 错误路径一致）。
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip close", err)
+			return nil, WrapError(ErrCodeEnvelope, "gzip close", err)
 		}
 		gzipWriterPool.Put(w)
 		return buf.Bytes(), nil
@@ -284,16 +281,16 @@ func compress(c corepb.Compression, src []byte) ([]byte, error) {
 		w.Reset(&buf)
 		if _, err := w.Write(src); err != nil {
 			_ = w.Close() // writer 可能已损坏，不放回 pool
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 compress", err)
+			return nil, WrapError(ErrCodeEnvelope, "lz4 compress", err)
 		}
 		if err := w.Close(); err != nil {
 			// Close 失败：writer 可能已损坏，不放回 pool（与 gzip 路径一致）。
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 close", err)
+			return nil, WrapError(ErrCodeEnvelope, "lz4 close", err)
 		}
 		lz4WriterPool.Put(w)
 		return buf.Bytes(), nil
 	default:
-		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
+		return nil, NewError(ErrCodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
 	}
 }
 
@@ -306,17 +303,17 @@ func decompress(c corepb.Compression, src []byte) ([]byte, error) {
 		r := gzipReaderPool.Get().(*gzip.Reader)
 		if err := r.Reset(bytes.NewReader(src)); err != nil {
 			gzipReaderPool.Put(r)
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip reader", err)
+			return nil, WrapError(ErrCodeEnvelope, "gzip reader", err)
 		}
 		defer gzipReaderPool.Put(r)
 		var buf bytes.Buffer
 		buf.Grow(len(src) * 4)
 		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
 		if _, err := io.Copy(&buf, lr); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip decompress", err)
+			return nil, WrapError(ErrCodeEnvelope, "gzip decompress", err)
 		}
 		if lr.N == 0 {
-			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
+			return nil, NewError(ErrCodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
 		}
 		return buf.Bytes(), nil
 	case corepb.Compression_COMPRESSION_ZSTD:
@@ -324,17 +321,17 @@ func decompress(c corepb.Compression, src []byte) ([]byte, error) {
 		defer zstdDecoderPool.Put(dec)
 		// 用流式 + LimitedReader 防止 zstd 炸弹：DecodeAll 会在大小检查前分配完整解压内容。
 		if err := dec.Reset(bytes.NewReader(src)); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "zstd reset", err)
+			return nil, WrapError(ErrCodeEnvelope, "zstd reset", err)
 		}
 		defer func() { _ = dec.Reset(nil) }() //nolint:errcheck // pool 归还前清理，错误无关紧要
 		lr := &io.LimitedReader{R: dec.IOReadCloser(), N: MaxDecompressedSize + 1}
 		var buf bytes.Buffer
 		buf.Grow(len(src) * 4)
 		if _, err := io.Copy(&buf, lr); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "zstd decompress", err)
+			return nil, WrapError(ErrCodeEnvelope, "zstd decompress", err)
 		}
 		if lr.N == 0 {
-			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
+			return nil, NewError(ErrCodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
 		}
 		return buf.Bytes(), nil
 	case corepb.Compression_COMPRESSION_LZ4:
@@ -345,28 +342,23 @@ func decompress(c corepb.Compression, src []byte) ([]byte, error) {
 		buf.Grow(len(src) * 4)
 		if _, err := io.Copy(&buf, lr); err != nil {
 			lz4ReaderPool.Put(r)
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 decompress", err)
+			return nil, WrapError(ErrCodeEnvelope, "lz4 decompress", err)
 		}
 		lz4ReaderPool.Put(r)
 		if lr.N == 0 {
-			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
+			return nil, NewError(ErrCodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
 		}
 		return buf.Bytes(), nil
 	default:
-		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
+		return nil, NewError(ErrCodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
 	}
-}
-
-// EncodeEnvelope 序列化 envelope 为 wire bytes（proto）。
-func EncodeEnvelope(env *SecureEnvelope) ([]byte, error) {
-	return proto.Marshal(env)
 }
 
 // DecodeEnvelope 从 wire bytes 解析 envelope。
 func DecodeEnvelope(data []byte) (*SecureEnvelope, error) {
 	var env SecureEnvelope
 	if err := proto.Unmarshal(data, &env); err != nil {
-		return nil, WrapError(NumEnvelope, CodeEnvelope, "decode envelope", err)
+		return nil, WrapError(ErrCodeEnvelope, "decode envelope", err)
 	}
 	return &env, nil
 }

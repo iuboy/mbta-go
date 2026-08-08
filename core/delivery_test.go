@@ -1,8 +1,9 @@
 package core
 
 import (
-	"strings"
 	"testing"
+
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // TestSeqGenerator tests the SeqGenerator functionality.
@@ -64,6 +65,8 @@ func TestSeqGenerator(t *testing.T) {
 
 // TestReplayKey tests the replayKey function.
 func TestReplayKey(t *testing.T) {
+	agentA := testutil.RandAgentID()
+	chunkX := testutil.RandChunkLabel()
 	tests := []struct {
 		name    string
 		agentID string
@@ -72,15 +75,15 @@ func TestReplayKey(t *testing.T) {
 	}{
 		{
 			name:    "basic key generation",
-			agentID: "agent-123",
-			chunkID: "chunk-456",
-			want:    "agent-123\x00chunk-456",
+			agentID: agentA,
+			chunkID: chunkX,
+			want:    agentA + "\x00" + chunkX,
 		},
 		{
 			name:    "empty chunkID",
-			agentID: "agent-123",
+			agentID: agentA,
 			chunkID: "",
-			want:    "agent-123\x00",
+			want:    agentA + "\x00",
 		},
 		{
 			name:    "both empty",
@@ -100,10 +103,12 @@ func TestReplayKey(t *testing.T) {
 	}
 
 	t.Run("Keys are unique for different combinations", func(t *testing.T) {
-		k1 := replayKey("agent1", "chunk1")
-		k2 := replayKey("agent1", "chunk2")
-		k3 := replayKey("agent2", "chunk1")
-		k4 := replayKey("agent2", "chunk2")
+		a1, a2 := testutil.RandAgentID(), testutil.RandAgentID()
+		c1, c2 := testutil.RandChunkLabel(), testutil.RandChunkLabel()
+		k1 := replayKey(a1, c1)
+		k2 := replayKey(a1, c2)
+		k3 := replayKey(a2, c1)
+		k4 := replayKey(a2, c2)
 
 		if k1 == k2 || k1 == k3 || k1 == k4 {
 			t.Error("k1 should be unique")
@@ -119,8 +124,9 @@ func TestReplayKey(t *testing.T) {
 	t.Run("No collision for valid inputs (\\x00 separator safe by validation)", func(t *testing.T) {
 		// \x00 分隔符安全性依赖 validateAgentID（拒绝 <0x20 含 \x00）和 chunkID
 		// hex 校验（仅 [0-9a-f]）的不变量。此处测试合法输入不碰撞。
-		k1 := replayKey("agent-a", "01")
-		k2 := replayKey("agent", "a01") // 不同分割
+		prefix := testutil.RandAgentID()
+		k1 := replayKey(prefix, "01")
+		k2 := replayKey(prefix[:len(prefix)-1], string(prefix[len(prefix)-1])+"01")
 		if k1 == k2 {
 			t.Error("different valid inputs should not collide")
 		}
@@ -144,7 +150,7 @@ func TestReplayCacheSeenOrAdd(t *testing.T) {
 	t.Run("first call returns nil (not seen)", func(t *testing.T) {
 		rc := NewReplayCache()
 
-		entry := rc.SeenOrAdd("agent-1", "chunk-1")
+		entry := rc.SeenOrAdd(testutil.RandAgentID(), testutil.RandChunkLabel())
 		if entry != nil {
 			t.Errorf("SeenOrAdd() = %v, want nil (first call)", entry)
 		}
@@ -152,15 +158,16 @@ func TestReplayCacheSeenOrAdd(t *testing.T) {
 
 	t.Run("second call returns existing entry", func(t *testing.T) {
 		rc := NewReplayCache()
+		agent, chunk := testutil.RandAgentID(), testutil.RandChunkLabel()
 
 		// First call - creates entry
-		first := rc.SeenOrAdd("agent-1", "chunk-1")
+		first := rc.SeenOrAdd(agent, chunk)
 		if first != nil {
 			t.Errorf("First SeenOrAdd() = %v, want nil", first)
 		}
 
 		// Second call - should return existing entry
-		second := rc.SeenOrAdd("agent-1", "chunk-1")
+		second := rc.SeenOrAdd(agent, chunk)
 		if second == nil {
 			t.Fatal("Second SeenOrAdd() = nil, want existing entry")
 			return
@@ -172,17 +179,19 @@ func TestReplayCacheSeenOrAdd(t *testing.T) {
 
 	t.Run("different keys are independent", func(t *testing.T) {
 		rc := NewReplayCache()
+		agent := testutil.RandAgentID()
+		chunk1, chunk2 := testutil.RandChunkLabel(), testutil.RandChunkLabel()
 
-		entry1 := rc.SeenOrAdd("agent-1", "chunk-1")
-		entry2 := rc.SeenOrAdd("agent-1", "chunk-2")
+		entry1 := rc.SeenOrAdd(agent, chunk1)
+		entry2 := rc.SeenOrAdd(agent, chunk2)
 
 		if entry1 != nil || entry2 != nil {
 			t.Error("Both first calls should return nil")
 		}
 
 		// Both should now exist
-		entry1 = rc.SeenOrAdd("agent-1", "chunk-1")
-		entry2 = rc.SeenOrAdd("agent-1", "chunk-2")
+		entry1 = rc.SeenOrAdd(agent, chunk1)
+		entry2 = rc.SeenOrAdd(agent, chunk2)
 
 		if entry1 == nil || entry2 == nil {
 			t.Error("Both second calls should return entries")
@@ -191,26 +200,28 @@ func TestReplayCacheSeenOrAdd(t *testing.T) {
 
 	t.Run("same chunk from different agents creates separate entries", func(t *testing.T) {
 		rc := NewReplayCache()
+		agent1, agent2 := testutil.RandAgentID(), testutil.RandAgentID()
+		chunk := testutil.RandChunkLabel()
 
-		entry1 := rc.SeenOrAdd("agent-1", "chunk-1")
-		entry2 := rc.SeenOrAdd("agent-2", "chunk-1")
+		entry1 := rc.SeenOrAdd(agent1, chunk)
+		entry2 := rc.SeenOrAdd(agent2, chunk)
 
 		if entry1 != nil || entry2 != nil {
 			t.Error("Both first calls should return nil")
 		}
 
 		// Verify they are different entries
-		entry1 = rc.SeenOrAdd("agent-1", "chunk-1")
-		entry2 = rc.SeenOrAdd("agent-2", "chunk-1")
+		entry1 = rc.SeenOrAdd(agent1, chunk)
+		entry2 = rc.SeenOrAdd(agent2, chunk)
 
 		if entry1 == nil || entry2 == nil {
 			t.Error("Both second calls should return entries")
 		}
 
 		// Update one and verify the other is unchanged
-		rc.Update("agent-1", "chunk-1", ReplayAccepted)
-		updated1 := rc.SeenOrAdd("agent-1", "chunk-1")
-		updated2 := rc.SeenOrAdd("agent-2", "chunk-1")
+		rc.Update(agent1, chunk, ReplayAccepted)
+		updated1 := rc.SeenOrAdd(agent1, chunk)
+		updated2 := rc.SeenOrAdd(agent2, chunk)
 
 		if updated1.Status != ReplayAccepted {
 			t.Errorf("agent-1 entry Status = %v, want ReplayAccepted", updated1.Status)
@@ -225,11 +236,12 @@ func TestReplayCacheSeenOrAdd(t *testing.T) {
 func TestReplayCacheUpdate(t *testing.T) {
 	t.Run("update existing entry", func(t *testing.T) {
 		rc := NewReplayCache()
+		agent, chunk := testutil.RandAgentID(), testutil.RandChunkLabel()
 
-		rc.SeenOrAdd("agent-1", "chunk-1")
-		rc.Update("agent-1", "chunk-1", ReplayAccepted)
+		rc.SeenOrAdd(agent, chunk)
+		rc.Update(agent, chunk, ReplayAccepted)
 
-		entry := rc.SeenOrAdd("agent-1", "chunk-1")
+		entry := rc.SeenOrAdd(agent, chunk)
 		if entry.Status != ReplayAccepted {
 			t.Errorf("Status = %v, want ReplayAccepted", entry.Status)
 		}
@@ -237,26 +249,27 @@ func TestReplayCacheUpdate(t *testing.T) {
 
 	t.Run("update through status transitions", func(t *testing.T) {
 		rc := NewReplayCache()
+		agent, chunk := testutil.RandAgentID(), testutil.RandChunkLabel()
 
-		rc.SeenOrAdd("agent-1", "chunk-1")
+		rc.SeenOrAdd(agent, chunk)
 
 		// Processing -> Accepted
-		rc.Update("agent-1", "chunk-1", ReplayAccepted)
-		entry := rc.SeenOrAdd("agent-1", "chunk-1")
+		rc.Update(agent, chunk, ReplayAccepted)
+		entry := rc.SeenOrAdd(agent, chunk)
 		if entry.Status != ReplayAccepted {
 			t.Errorf("Status = %v, want ReplayAccepted", entry.Status)
 		}
 
 		// Accepted -> Durable
-		rc.Update("agent-1", "chunk-1", ReplayDurable)
-		entry = rc.SeenOrAdd("agent-1", "chunk-1")
+		rc.Update(agent, chunk, ReplayDurable)
+		entry = rc.SeenOrAdd(agent, chunk)
 		if entry.Status != ReplayDurable {
 			t.Errorf("Status = %v, want ReplayDurable", entry.Status)
 		}
 
 		// Durable -> Rejected (should work even if unusual)
-		rc.Update("agent-1", "chunk-1", ReplayRejected)
-		entry = rc.SeenOrAdd("agent-1", "chunk-1")
+		rc.Update(agent, chunk, ReplayRejected)
+		entry = rc.SeenOrAdd(agent, chunk)
 		if entry.Status != ReplayRejected {
 			t.Errorf("Status = %v, want ReplayRejected", entry.Status)
 		}
@@ -264,12 +277,13 @@ func TestReplayCacheUpdate(t *testing.T) {
 
 	t.Run("update non-existent entry is no-op", func(t *testing.T) {
 		rc := NewReplayCache()
+		agent, chunk := testutil.RandAgentID(), testutil.RandChunkLabel()
 
 		// Update without adding first
-		rc.Update("agent-1", "chunk-1", ReplayAccepted)
+		rc.Update(agent, chunk, ReplayAccepted)
 
 		// Should still not exist
-		entry := rc.SeenOrAdd("agent-1", "chunk-1")
+		entry := rc.SeenOrAdd(agent, chunk)
 		if entry != nil {
 			t.Errorf("Entry should not exist, got Status = %v", entry.Status)
 		}
@@ -281,78 +295,20 @@ func TestReplayCacheUpdate(t *testing.T) {
 // 否则条目会被当作已完成驱逐、且 processingList 计数不一致。
 func TestReplayCacheReverseTransition(t *testing.T) {
 	rc := NewReplayCache()
-	rc.SeenOrAdd("agent-1", "chunk-1")             // 初始 Processing
-	rc.Update("agent-1", "chunk-1", ReplayDurable) // → doneList
+	agent, chunk := testutil.RandAgentID(), testutil.RandChunkLabel()
+	rc.SeenOrAdd(agent, chunk)             // 初始 Processing
+	rc.Update(agent, chunk, ReplayDurable) // → doneList
 
 	// 反向：done → Processing（throttle 重试场景）。
-	rc.Update("agent-1", "chunk-1", ReplayProcessing)
+	rc.Update(agent, chunk, ReplayProcessing)
 
-	entry := rc.Get("agent-1", "chunk-1")
-	if entry == nil {
+	// 用 SeenOrAdd 读取已存在条目（Get 已移除）：对已存在 key 返回非 nil entry。
+	existing := rc.SeenOrAdd(agent, chunk)
+	if existing == nil {
 		t.Fatal("entry should exist after reverse transition")
 	}
-	if entry.Status != ReplayProcessing {
-		t.Errorf("Status = %v, want ReplayProcessing", entry.Status)
-	}
-
-	// 再次 SeenOrAdd 不应误判为已存在（返回 nil = 新条目），
-	// 因为状态已回到 Processing，重试应能重新投递。
-	if existing := rc.SeenOrAdd("agent-1", "chunk-1"); existing == nil {
-		// Processing 状态下 SeenOrAdd 返回 existing（非 nil），表示已存在。
-		// 这是正确的——SeenOrAdd 发现已存在条目即返回它，上层据此决定是否重投。
-		t.Log("SeenOrAdd returned nil for Processing entry (acceptable: entry exists in Processing)")
-	}
-}
-
-// TestReplayCacheGet tests the Get method.
-func TestReplayCacheGet(t *testing.T) {
-	t.Run("get existing entry", func(t *testing.T) {
-		rc := NewReplayCache()
-
-		rc.SeenOrAdd("agent-1", "chunk-1")
-		rc.Update("agent-1", "chunk-1", ReplayDurable)
-
-		entry := rc.Get("agent-1", "chunk-1")
-		if entry == nil {
-			t.Fatal("Get() should return entry for existing key")
-		}
-		if entry.Status != ReplayDurable {
-			t.Errorf("Status = %v, want ReplayDurable", entry.Status)
-		}
-	})
-
-	t.Run("get non-existent entry", func(t *testing.T) {
-		rc := NewReplayCache()
-
-		entry := rc.Get("agent-1", "chunk-1")
-		if entry != nil {
-			t.Error("Get() should return nil for non-existent entry")
-		}
-	})
-}
-
-// TestReplayCacheLen tests the Len method.
-func TestReplayCacheLen(t *testing.T) {
-	rc := NewReplayCache()
-
-	if got := rc.Len(); got != 0 {
-		t.Errorf("Len() = %d, want 0", got)
-	}
-
-	// Add entries
-	for i := 0; i < 5; i++ {
-		rc.SeenOrAdd("agent-1", strings.Repeat("c", i+1))
-	}
-
-	if got := rc.Len(); got != 5 {
-		t.Errorf("Len() = %d, want 5", got)
-	}
-
-	// Add duplicate (should not increase length)
-	rc.SeenOrAdd("agent-1", "ccc")
-
-	if got := rc.Len(); got != 5 {
-		t.Errorf("Len() = %d, want 5 (duplicate should not increase)", got)
+	if existing.Status != ReplayProcessing {
+		t.Errorf("Status = %v, want ReplayProcessing", existing.Status)
 	}
 }
 
@@ -362,15 +318,14 @@ func TestReplayCacheConcurrentAccess(t *testing.T) {
 	done := make(chan bool)
 	concurrency := 10
 	opsPerGoroutine := 100
+	agent := testutil.RandAgentID()
 
 	for i := 0; i < concurrency; i++ {
 		go func(workerID int) {
 			chunkID := string(rune(workerID))
 			for j := 0; j < opsPerGoroutine; j++ {
-				rc.SeenOrAdd("agent", chunkID)
-				rc.Update("agent", chunkID, ReplayAccepted)
-				rc.Get("agent", chunkID)
-				rc.Len()
+				rc.SeenOrAdd(agent, chunkID)
+				rc.Update(agent, chunkID, ReplayAccepted)
 			}
 			done <- true
 		}(i)
@@ -381,9 +336,13 @@ func TestReplayCacheConcurrentAccess(t *testing.T) {
 		<-done
 	}
 
-	// Should have exactly 'concurrency' unique entries
-	if got := rc.Len(); got != concurrency {
-		t.Errorf("Len() = %d, want %d", got, concurrency)
+	// 每个-worker 用唯一 chunkID，SeenOrAdd 应收敛到 concurrency 个唯一条目（无重复、无 panic）。
+	// 用 SeenOrAdd 验证：对已存在条目返回非 nil，对每个 workerID 的二次查效应命中。
+	for i := 0; i < concurrency; i++ {
+		chunkID := string(rune(i))
+		if existing := rc.SeenOrAdd(agent, chunkID); existing == nil {
+			t.Errorf("worker %d: SeenOrAdd returned nil for existing entry", i)
+		}
 	}
 }
 

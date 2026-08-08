@@ -27,8 +27,8 @@ func (h *CoreHandler) sendAck(ctx context.Context, seq uint64, chunkID []byte, c
 	h.config.Metrics.BatchesAcked().Inc()
 }
 
-func (h *CoreHandler) sendNack(ctx context.Context, seq uint64, chunkID []byte, code, reason string, retryable bool) {
-	nack := &corepb.NackMessage{Seq: seq, ChunkId: chunkID, Code: code, Reason: reason, Retryable: retryable}
+func (h *CoreHandler) sendNack(ctx context.Context, seq uint64, chunkID []byte, code core.ErrorCode, reason string, retryable bool) {
+	nack := &corepb.NackMessage{Seq: seq, ChunkId: chunkID, Code: code.Code, Reason: reason, Retryable: retryable}
 	p, err := core.Encode(nack)
 	if err != nil {
 		slog.Warn("encode nack failed", "error", err)
@@ -40,8 +40,8 @@ func (h *CoreHandler) sendNack(ctx context.Context, seq uint64, chunkID []byte, 
 	h.config.Metrics.BatchesNacked().Inc()
 }
 
-func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code, reason string) {
-	t := &corepb.ThrottleMessage{RetryDelayMs: int32(retryDelayMs), Code: code, Reason: reason}
+func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code core.ErrorCode, reason string) {
+	t := &corepb.ThrottleMessage{RetryDelayMs: int32(retryDelayMs), Code: code.Code, Reason: reason}
 	p, err := core.Encode(t)
 	if err != nil {
 		slog.Warn("encode throttle failed", "error", err)
@@ -55,15 +55,14 @@ func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code, 
 }
 
 // failAuth 发 AUTH_FAIL 并轮换 challengeNonce（每次在线验证用新挑战）。
-func (h *CoreHandler) failAuth(ctx context.Context, code, reason string) {
-	// 轮换 nonce；失败时保留旧 nonce（此处已是错误处理路径，最坏情况是下一次
-	// 挑战复用旧值，优于丢弃 AUTH_FAIL 不响应）。AUTH_FAIL 帧仍可发送。
+func (h *CoreHandler) failAuth(ctx context.Context, code core.ErrorCode, reason string) {
+	// 轮换 nonce；失败时保留旧 nonce（错误路径，不影响 AUTH_FAIL 发送）。
 	if nonce, err := randBytes(challengeNonceLen); err != nil {
 		slog.Warn("rotate challenge nonce failed, keeping previous", "error", err)
 	} else {
 		h.setChallengeNonce(nonce)
 	}
-	fail := &corepb.AuthFailMessage{Code: code, Reason: reason, Retryable: true, ChallengeNonce: h.getChallengeNonce()}
+	fail := &corepb.AuthFailMessage{Code: code.Code, Reason: reason, Retryable: true, ChallengeNonce: h.getChallengeNonce()}
 	p, err := core.Encode(fail)
 	if err != nil {
 		slog.Warn("encode auth_fail failed", "error", err)
@@ -74,8 +73,8 @@ func (h *CoreHandler) failAuth(ctx context.Context, code, reason string) {
 	}
 }
 
-func (h *CoreHandler) sendAuthFail(ctx context.Context, code, reason string, retryable bool) {
-	fail := &corepb.AuthFailMessage{Code: code, Reason: reason, Retryable: retryable}
+func (h *CoreHandler) sendAuthFail(ctx context.Context, code core.ErrorCode, reason string, retryable bool) {
+	fail := &corepb.AuthFailMessage{Code: code.Code, Reason: reason, Retryable: retryable}
 	p, err := core.Encode(fail)
 	if err != nil {
 		slog.Warn("encode auth_fail failed", "error", err)
@@ -87,8 +86,8 @@ func (h *CoreHandler) sendAuthFail(ctx context.Context, code, reason string, ret
 	h.config.Metrics.AuthFailure().Inc()
 }
 
-func (h *CoreHandler) sendError(ctx context.Context, code, reason string, fatal bool) {
-	e := &corepb.ErrorMessage{Code: code, Reason: reason, Fatal: fatal, Retryable: !fatal}
+func (h *CoreHandler) sendError(ctx context.Context, code core.ErrorCode, reason string, fatal bool) {
+	e := &corepb.ErrorMessage{Code: code.Code, Reason: reason, Fatal: fatal, Retryable: !fatal}
 	p, err := core.Encode(e)
 	if err != nil {
 		slog.Warn("encode error frame failed", "error", err)

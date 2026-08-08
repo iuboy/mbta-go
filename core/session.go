@@ -66,7 +66,7 @@ func (s State) String() string {
 // validTransitions defines which state can transition to which.
 //
 // StateClosed → StateDisconnected：允许客户端在握手失败/连接终止后重置回初始态，
-// 以便重新 Connect（旧实现 StateClosed 无出边，导致握手失败后无法重连）。
+// 以便重新 Connect（StateClosed 若无出边，则握手失败后无法重连）。
 // StateAuthSent 自环：允许 AUTH_FAIL(retryable) 后重试 SendAuth 而无需回退状态。
 var validTransitions = map[State][]State{
 	StateDisconnected:      {StateConnecting},
@@ -167,7 +167,7 @@ func (sm *StateMachine) Transition(next State) error {
 		}
 		return nil
 	}
-	return NewError(NumSession, CodeSession, fmt.Sprintf("invalid transition %s -> %s", sm.state, next))
+	return NewError(ErrCodeSession, fmt.Sprintf("invalid transition %s -> %s", sm.state, next))
 }
 
 // DrainExpired returns true if the drain timer has fired.
@@ -244,5 +244,5 @@ func (sm *ServerMachine) Transition(next ServerState) error {
 	return nil
 
 invalid:
-	return NewError(NumSession, CodeSession, fmt.Sprintf("invalid server transition %s -> %s", sm.state, next))
+	return NewError(ErrCodeSession, fmt.Sprintf("invalid server transition %s -> %s", sm.state, next))
 }

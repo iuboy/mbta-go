@@ -1,69 +1,75 @@
 package core
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/iuboy/mbta-go/internal/testutil"
+)
 
 // TestStaticTokenValidatorResolveToken 验证 H-4 新增的反向 agentID->token 查找。
 func TestStaticTokenValidatorResolveToken(t *testing.T) {
+	tok1, agent1 := testutil.RandToken(), testutil.RandAgentID()
+	tok2, agent2 := testutil.RandToken(), testutil.RandAgentID()
 	validator := NewStaticTokenValidator(map[string]string{
-		"tok1": "agent-1",
-		"tok2": "agent-2",
+		tok1: agent1,
+		tok2: agent2,
 	})
 
 	t.Run("known agent", func(t *testing.T) {
-		tok, err := validator.ResolveToken("agent-1")
+		got, err := validator.ResolveToken(agent1)
 		if err != nil {
 			t.Fatalf("ResolveToken unexpected error: %v", err)
 		}
-		if tok != "tok1" {
-			t.Errorf("ResolveToken = %q, want %q", tok, "tok1")
+		if got != tok1 {
+			t.Errorf("ResolveToken = %q, want %q", got, tok1)
 		}
 	})
 
 	t.Run("unknown agent", func(t *testing.T) {
-		tok, err := validator.ResolveToken("no-such-agent")
-		if err != ErrAgentNotFound {
+		got, err := validator.ResolveToken(testutil.RandAgentID())
+		if CodeOf(err) != ErrCodeAgentNotFound.Code {
 			t.Errorf("ResolveToken error = %v, want ErrAgentNotFound", err)
 		}
-		if tok != "" {
-			t.Errorf("ResolveToken token = %q, want empty on miss", tok)
+		if got != "" {
+			t.Errorf("ResolveToken token = %q, want empty on miss", got)
 		}
 	})
 
 	t.Run("resolved token round-trips through Validate", func(t *testing.T) {
 		// ResolveToken 返回的 token 必须能通过同一 validator 的 Validate，
 		// 保证服务端 handleAuth "反查 -> HMAC -> Validate" 链路自洽。
-		tok, err := validator.ResolveToken("agent-2")
+		got, err := validator.ResolveToken(agent2)
 		if err != nil {
 			t.Fatalf("ResolveToken: %v", err)
 		}
-		id, err := validator.Validate(tok)
+		id, err := validator.Validate(got)
 		if err != nil {
-			t.Fatalf("Validate resolved token %q: %v", tok, err)
+			t.Fatalf("Validate resolved token %q: %v", got, err)
 		}
-		if id.AgentID != "agent-2" {
-			t.Errorf("AgentID = %q, want %q", id.AgentID, "agent-2")
+		if id.AgentID != agent2 {
+			t.Errorf("AgentID = %q, want %q", id.AgentID, agent2)
 		}
 	})
 }
 
-// TestStaticTokenValidatorMultiTokenOneAgent 记录同一 agentID 多 token 时的
-// last-write-wins 行为（确定性折中，dev/test 场景）。
+// TestStaticTokenValidatorMultiTokenOneAgent 验证同一 agentID 多 token 时 ResolveToken 返回的 token 能 Validate 回该 agentID。
 func TestStaticTokenValidatorMultiTokenOneAgent(t *testing.T) {
+	agent := testutil.RandAgentID()
 	validator := NewStaticTokenValidator(map[string]string{
-		"tokA": "agentX",
-		"tokB": "agentX",
+		testutil.RandToken(): agent,
+		testutil.RandToken(): agent,
 	})
-	tok, err := validator.ResolveToken("agentX")
+	tok, err := validator.ResolveToken(agent)
 	if err != nil {
 		t.Fatalf("ResolveToken: %v", err)
 	}
-	// map 遍历顺序非确定，不强断言具体值；但返回的 token 必须能 Validate 回 agentX。
+	// map 遍历顺序非确定，ResolveToken 返回最小 token；断言其能 Validate 回 agent。
 	id, err := validator.Validate(tok)
 	if err != nil {
 		t.Fatalf("Validate resolved token %q: %v", tok, err)
 	}
-	if id.AgentID != "agentX" {
-		t.Errorf("AgentID = %q, want %q", id.AgentID, "agentX")
+	if id.AgentID != agent {
+		t.Errorf("AgentID = %q, want %q", id.AgentID, agent)
 	}
 }
 

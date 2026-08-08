@@ -1,0 +1,35 @@
+%% MBTA-Go 客户端函数调用图（client-side 视角）
+%% 按路径拆分为 5 个独立子图，每张信息密度低、文字清晰
+%% 🔒=sendMu 临界区内 / 🔓=锁外 / ⚙=后台 goroutine
+flowchart TD
+    classDef entry fill:#4a90d9,stroke:#2c5f9e,color:#fff
+    classDef locked fill:#f5a623,stroke:#c47c00,color:#000
+    classDef goroutine fill:#7ed321,stroke:#5da018,color:#000
+    classDef tracker fill:#50e3c2,stroke:#2aab8a,color:#000
+    classDef flow fill:#bd10e0,stroke:#880ba3,color:#fff
+    classDef close fill:#d0021b,stroke:#9b0014,color:#fff
+
+    %% 路径①连接建立
+    subgraph P1["① 连接建立 Connect"]
+        direction TB
+        DIAL["mbta.Dial<br/>client.go:125"]:::entry
+        NEWC["NewClient → initV1/initNTLS<br/>→ NewCoreClient"]
+        HS["binding.Handshake 编排<br/>14 步握手"]
+        HELLO["SendHello → WriteFrame<br/>sm.Transition HelloSent"]
+        ACK1["RecvHelloAck<br/>negotiated.Store + challengeNonce.Store"]
+        UWIN["UpdateWindow<br/>→ tracker.UpdateLimits"]:::tracker
+        AUTH["SendAuth<br/>ComputeChallengeResponse"]
+        AUTHOK["RecvAuthResult AUTH_OK<br/>NewSessionKeys → keys.Store<br/>sm.Transition Ready"]
+        LIFE["StartLifecycle<br/>启动 4 个后台 goroutine"]:::goroutine
+        DIAL --> NEWC --> HS --> HELLO --> ACK1 --> UWIN --> AUTH --> AUTHOK --> LIFE
+    end
+
+    %% 后台 goroutine
+    subgraph BG["⚙ 4 个后台 goroutine 独立于 Connect ctx"]
+        direction LR
+        G1["ReadControlLoop<br/>分发 ACK/NACK/WINDOW/THROTTLE"]:::goroutine
+        G2["HeartbeatLoop<br/>周期发 PING"]:::goroutine
+        G3["ackReaper<br/>tracker.ReapExpired"]:::goroutine
+        G4["runACKWorker<br/>消费 ackQueue"]:::goroutine
+    end
+    LIFE --> BG

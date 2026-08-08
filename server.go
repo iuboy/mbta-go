@@ -61,13 +61,13 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 
 	for _, opt := range opts {
 		if err := opt(cfg); err != nil {
-			return nil, core.WrapError(core.NumConfig, core.CodeConfig, "server option", err)
+			return nil, core.WrapError(core.ErrCodeConfig, "server option", err)
 		}
 	}
 
 	// Validate at least one version is enabled
 	if !cfg.EnableV1 && !cfg.EnableNTLS {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "at least one version must be enabled")
+		return nil, core.NewError(core.ErrCodeConfig, "at least one version must be enabled")
 	}
 
 	return &Server{cfg: cfg}, nil
@@ -80,17 +80,16 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
-		return core.NewError(core.NumSession, core.CodeSession, "server already started")
+		return core.NewError(core.ErrCodeSession, "server already started")
 	}
 	s.started = true
 
-	// 初始化在锁内完成：initV1Server/initNTLSServer 写 s.v1Server/s.ntlsServer，
-	// 与 Close 的锁内读必须同步，避免 data race（旧实现 init 在锁外写）。
+	// init 在锁内完成，与 Close 的锁内读同步（避免 data race）。
 	if s.cfg.EnableV1 {
 		if err := s.initV1Server(); err != nil {
 			s.started = false
 			s.mu.Unlock()
-			return core.WrapError(core.NumConfig, core.CodeConfig, "init v1", err)
+			return core.WrapError(core.ErrCodeConfig, "init v1", err)
 		}
 	}
 	if s.cfg.EnableNTLS {
@@ -102,7 +101,7 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 			s.started = false
 			s.mu.Unlock()
-			return core.WrapError(core.NumConfig, core.CodeConfig, "init ntls", err)
+			return core.WrapError(core.ErrCodeConfig, "init ntls", err)
 		}
 	}
 	// 捕获子服务器引用，accept-loop goroutine 用局部变量读，避免与 Close 竞态。
@@ -116,7 +115,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if v1srv != nil {
 		g.Go(func() error {
 			if err := v1srv.Start(ctx); err != nil {
-				return core.WrapError(core.NumTransport, core.CodeTransport, "v1", err)
+				return core.WrapError(core.ErrCodeTransport, "v1", err)
 			}
 			return nil
 		})
@@ -124,7 +123,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if ntlsSrv != nil {
 		g.Go(func() error {
 			if err := ntlsSrv.Start(ctx); err != nil {
-				return core.WrapError(core.NumTransport, core.CodeTransport, "ntls", err)
+				return core.WrapError(core.ErrCodeTransport, "ntls", err)
 			}
 			return nil
 		})
@@ -137,7 +136,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		// 显式 Close 触发子服务器清理（errgroup cancel 已使 ctx.Done，但 Close 保证资源释放）。
 		_ = s.Close()
-		return core.WrapError(core.NumTransport, core.CodeTransport, "server accept loop", err)
+		return core.WrapError(core.ErrCodeTransport, "server accept loop", err)
 	}
 
 	return nil
@@ -185,7 +184,7 @@ func (s *Server) initV1Server() error {
 
 	v1srv, err := v1.NewServer(cfg)
 	if err != nil {
-		return core.WrapError(core.NumConfig, core.CodeConfig, "v1 server init", err)
+		return core.WrapError(core.ErrCodeConfig, "v1 server init", err)
 	}
 	s.v1Server = v1srv
 	return nil
@@ -204,7 +203,7 @@ func (s *Server) initNTLSServer() error {
 
 	server, err := ntls.NewServer(cfg)
 	if err != nil {
-		return core.WrapError(core.NumConfig, core.CodeConfig, "ntls server init", err)
+		return core.WrapError(core.ErrCodeConfig, "ntls server init", err)
 	}
 
 	s.ntlsServer = server

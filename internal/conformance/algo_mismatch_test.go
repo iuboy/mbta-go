@@ -6,7 +6,7 @@ import (
 	corepb "github.com/iuboy/mbta-go/corepb"
 
 	"github.com/iuboy/mbta-go/core"
-	"github.com/iuboy/mbta-go/internal/protocol"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // buildMismatchedEnvelope 构造一个 BATCH envelope，但 Codec/CipherSuite/Compression
@@ -24,7 +24,7 @@ func buildMismatchedEnvelope(t *testing.T, keys *core.SessionKeys, cs corepb.Cip
 		t.Fatalf("encode batch message: %v", err)
 	}
 	params := core.BuildParams{
-		SessionID: []byte("session-1"), Seq: 1, ChunkID: chunkID,
+		SessionID: []byte(testutil.RandString(8)), Seq: 1, ChunkID: chunkID,
 		Codec: overrideCodec, Compression: overrideComp, CipherSuite: cs,
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
@@ -50,7 +50,6 @@ func buildMismatchedEnvelope(t *testing.T, keys *core.SessionKeys, cs corepb.Cip
 }
 
 // TestCoreHandler_AlgoMismatch_Codec 验证 envelope 声明的 Codec 与协商结果不符时被 NACK。
-// 回归 P1 修复：原先 verifyEnvelopeAlgo 只校验 Compression，codec 可被任意注入。
 func TestCoreHandler_AlgoMismatch_Codec(t *testing.T) {
 	tr, keys, cs := doHandshake(t, nil)
 	// 协商结果 codec=PROTO（capability 仅含 codec_proto），注入 CODEC_JSON（未协商）。
@@ -68,17 +67,13 @@ func TestCoreHandler_AlgoMismatch_Codec(t *testing.T) {
 	if err := core.Decode(resp.Payload, &n); err != nil {
 		t.Fatalf("decode nack: %v", err)
 	}
-	if n.GetCode() != protocol.CodeEnvelopeAlgoMismatch {
-		t.Errorf("nack code = %q, want %s", n.GetCode(), protocol.CodeEnvelopeAlgoMismatch)
+	if n.GetCode() != core.ErrCodeEnvelopeAlgoMismatch.Code {
+		t.Errorf("nack code = %q, want %s", n.GetCode(), core.ErrCodeEnvelopeAlgoMismatch.Code)
 	}
 }
 
 // TestCoreHandler_AlgoMismatch_CipherSuite 验证 CipherSuite 篡改被拒绝。
-//
-// 注意：CipherSuite 是 HMAC canonical 输入的一部分，篡改它必然先触发 hmac_mismatch
-// （HMAC 校验在 verifyEnvelopeAlgo 之前）。这是正确的纵深防御——无论被 hmac 层还是
-// algo 层拦截，篡改的 envelope 都不会进入解密/解码路径。本测试断言「被拒绝」而非
-// 特定错误码，兼容两层拦截。
+// CipherSuite 属 HMAC canonical 输入，篡改会被 hmac_mismatch 或 algo_mismatch 拦截；本测试断言「被拒绝」。
 func TestCoreHandler_AlgoMismatch_CipherSuite(t *testing.T) {
 	tr, keys, cs := doHandshake(t, nil)
 	// 协商 INTL，注入 GM（HMAC/AEAD 仍用 INTL 密钥，仅 envelope 字段造假）。
@@ -95,8 +90,8 @@ func TestCoreHandler_AlgoMismatch_CipherSuite(t *testing.T) {
 		t.Fatalf("decode nack: %v", err)
 	}
 	// 合理拦截层：hmac_mismatch（篡改破坏 MAC）或 envelope_algo_mismatch（复核层）。
-	if n.GetCode() != protocol.CodeEnvelopeAlgoMismatch && n.GetCode() != "hmac_mismatch" {
-		t.Errorf("nack code = %q, want %s or hmac_mismatch", n.GetCode(), protocol.CodeEnvelopeAlgoMismatch)
+	if n.GetCode() != core.ErrCodeEnvelopeAlgoMismatch.Code && n.GetCode() != core.ErrCodeHMACMismatch.Code {
+		t.Errorf("nack code = %q, want %s or %s", n.GetCode(), core.ErrCodeEnvelopeAlgoMismatch.Code, core.ErrCodeHMACMismatch.Code)
 	}
 }
 
@@ -115,7 +110,7 @@ func TestCoreHandler_AlgoMismatch_Compression(t *testing.T) {
 	if err := core.Decode(resp.Payload, &n); err != nil {
 		t.Fatalf("decode nack: %v", err)
 	}
-	if n.GetCode() != protocol.CodeEnvelopeAlgoMismatch {
-		t.Errorf("nack code = %q, want %s", n.GetCode(), protocol.CodeEnvelopeAlgoMismatch)
+	if n.GetCode() != core.ErrCodeEnvelopeAlgoMismatch.Code {
+		t.Errorf("nack code = %q, want %s", n.GetCode(), core.ErrCodeEnvelopeAlgoMismatch.Code)
 	}
 }

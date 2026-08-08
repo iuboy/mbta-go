@@ -32,7 +32,7 @@ func Handshake(
 	}
 
 	if err := dial(ctx); err != nil {
-		return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
+		return core.WrapError(core.ErrCodeTransport, "dial", err)
 	}
 
 	// 握手任一步骤失败：清理已建立的连接（cc.Close 幂等，会取消 lifecycle、关闭 transport、
@@ -53,11 +53,11 @@ func Handshake(
 	}
 
 	if err := cc.SendHello(ctx); err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello", err)
+		return core.WrapError(core.ErrCodeHandshake, "hello", err)
 	}
 	helloAck, err := cc.RecvHelloAck(ctx)
 	if err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "hello_ack", err)
+		return core.WrapError(core.ErrCodeHandshake, "hello_ack", err)
 	}
 
 	cc.SetSessionID(helloAck.GetSessionId())
@@ -74,10 +74,10 @@ func Handshake(
 	}
 
 	if err := cc.SendAuth(ctx); err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth", err)
+		return core.WrapError(core.ErrCodeHandshake, "auth", err)
 	}
 	if err := cc.RecvAuthResult(ctx); err != nil {
-		return core.WrapError(core.NumHandshake, core.CodeHandshake, "auth_result", err)
+		return core.WrapError(core.ErrCodeHandshake, "auth_result", err)
 	}
 
 	// 先执行 postAuth（如 openDataStreams），成功后再启动 lifecycle goroutine。

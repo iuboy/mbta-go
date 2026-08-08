@@ -1,0 +1,86 @@
+%%{init: {'theme':'default', 'themeVariables': {'background':'#ffffff', 'mainBkg':'#ffffff', 'actorBkg':'#ffffff'}}}%%
+sequenceDiagram
+    autonumber
+    participant App as 应用代码
+    participant C as v1.Client / ntls.Client<br/>(薄包装)
+    participant BH as binding.Handshake
+    participant CC as protocol.CoreClient
+    participant TR as v1ClientTransport /<br/>ntlsClientTransport
+    participant Srv as Server
+
+    Note over App,Srv: Connect(ctx) — ctx 仅控制握手阶段
+
+    App->>C: Connect(ctx)
+
+    Note over C,BH: ① 入口守卫: c.conn != nil → "already connected"
+
+    C->>BH: Handshake(ctx, core, dial, setupTransport, postAuth)
+    BH->>CC: SmTransitionConnecting()
+
+    rect rgb(255, 243, 224)
+    Note over BH,Srv: 步骤 1: dial 回调
+    BH->>TR: Dial(ctx) 建立 QUIC / TCP 连接
+    Note over TR: v1: OpenControlStream 后 tr.controlStr<br/>ntls: 单连接, 无独立 control stream
+    TR->>Srv: QUIC/TCP 连接建立
+    end
+
+    rect rgb(232, 245, 233)
+    Note over BH,CC: 步骤 2: setupTransport 回调
+    alt v1 (QUIC)
+        TR->>TR: OpenControlStream (单一控制流)
+        TR->>CC: SetTransport(tr)
+        TR->>CC: SetOnAuthed(conn.SetAuthed(true))
+        Note over TR: onAuthed 开放 data stream 门禁<br/>(OpenDataStream 检查 authed)
+    else ntls (TCP/TLCP)
+        TR->>CC: SetTransport(tr)
+        Note over TR: 无 SetAuthed 门禁 (单连接多路复用)
+    end
+    BH->>CC: SmTransition(StateControlStreamOpen)
+    end
+
+    rect rgb(227, 242, 253)
+    Note over CC,Srv: 步骤 3: HELLO / HELLO_ACK
+    CC->>TR: SendHello (HELLO 帧: agent_id/host/os/version/caps)
+    TR->>Srv: 写 control 帧
+    Srv-->>TR: HELLO_ACK (session_id/server_id/协商 caps/codec/cipher/window/heartbeat)
+    TR-->>CC: RecvHelloAck
+    BH->>CC: SetSessionID, UpdateWindow, SetHeartbeatInterval
+    BH->>CC: SmTransition(StateHelloAcked)
+    end
+
+    rect rgb(252, 228, 236)
+    Note over CC,Srv: 步骤 4: AUTH / AUTH_OK
+    CC->>TR: SendAuth (challenge-response, HMAC)
+    TR->>Srv: 写 AUTH 帧
+    Srv-->>TR: AUTH_OK / AUTH_FAIL
+    TR-->>CC: RecvAuthResult
+    alt AUTH_OK
+        CC->>TR: onAuthed(ctx) 触发 (仅 v1)
+        Note over TR: v1: conn.SetAuthed(true) → 解除 data 门禁
+    else AUTH_FAIL
+        BH->>CC: defer cc.Close() 清理
+        Note over C: 返回认证错误
+    end
+    end
+
+    rect rgb(243, 229, 245)
+    Note over BH,TR: 步骤 5: postAuth 回调 (StartLifecycle 之前)
+    alt v1 (QUIC)
+        TR->>TR: openDataStreams (hash 模式开 N 流 / single 模式开 1 流)
+        TR->>TR: tr.picker.Store(picker) (atomic)
+    else ntls (TCP/TLCP)
+        Note over TR: nil — 单连接无需后置开流
+    end
+    end
+
+    rect rgb(225, 245, 254)
+    Note over CC: 步骤 6: StartLifecycle — 启动 4 个后台 goroutine
+    CC->>CC: lifecycleCtx = WithCancel(Background)
+    Note over CC: ① readControlLoop (binding 注入)<br/>② heartbeatLoop (binding 注入)<br/>③ ackReaper (ACK 超时重发)<br/>④ runACKWorker (异步发 ACK)
+    Note over App,CC: 握手成功: 后台 goroutine 独立运行<br/>不再受 ctx 取消影响, 由 Close() 终结
+    end
+
+    BH-->>C: handshakeOK = true
+    C-->>App: nil (成功)
+
+    Note over App,Srv: Connect 失败路径: Handshake defer 调 cc.Close()<br/>若 setupTransport 在 SetTransport 前失败 → 显式关 conn 防 QUIC 泄漏

@@ -1,7 +1,6 @@
 package core
 
 import (
-	"errors"
 	"fmt"
 )
 
@@ -20,12 +19,11 @@ const (
 	NumStream    = 2002 // 流操作失败
 
 	// 协议/会话 (3000-3099)
+
 	NumHandshake = 3000 // 握手失败
-	// NumAuth 认证失败。语义属"安全"类，但状态机上紧随握手（HELLO→AUTH），故归协议段；
-	// spec §13 的安全段 (8000-8099) 预留给传输层安全（TLS/TLCP 握手失败等）。
-	NumAuth     = 3001 // 认证失败
-	NumSession  = 3002 // 会话状态错误
-	NumProtocol = 3003 // 协议违规（非法帧类型、非法状态转换）
+	NumAuth      = 3001 // 认证失败
+	NumSession   = 3002 // 会话状态错误
+	NumProtocol  = 3003 // 非法协议（非法帧类型、非法状态转换）
 
 	// 数据/业务 (4000-4099)
 	NumBatch      = 4000 // 批次处理失败
@@ -45,223 +43,221 @@ const (
 )
 
 // ---------------------------------------------------------------------------
-// 字符串错误码 — 用于日志和线缆传输
+// ErrorCode — 错误码类型 + register()
 // ---------------------------------------------------------------------------
 
-const (
-	// 配置/初始化
-	CodeConfig     = "ERR_CONFIG"
-	CodeCredential = "ERR_CREDENTIAL" //#nosec G101 -- false positive: error code constant, not a credential
-
-	// 连接/传输
-	CodeTransport = "ERR_TRANSPORT"
-	CodeTLS       = "ERR_TLS"
-	CodeStream    = "ERR_STREAM"
-
-	// 协议/会话
-	CodeHandshake = "ERR_HANDSHAKE"
-	CodeAuth      = "ERR_AUTH"
-	CodeSession   = "ERR_SESSION"
-	CodeProtocol  = "ERR_PROTOCOL"
-
-	// 数据/业务
-	CodeBatch      = "ERR_BATCH"
-	CodeEnvelope   = "ERR_ENVELOPE"
-	CodeValidation = "ERR_VALIDATION"
-	CodeHMAC       = "ERR_HMAC"
-
-	// 流控
-	CodeWindowFull = "ERR_WINDOW_FULL"
-	CodeThrottle   = "ERR_THROTTLE"
-
-	// 存储
-	CodeSpool = "ERR_SPOOL"
-
-	// 版本
-	CodeVersion = "ERR_VERSION"
-)
-
-// ---------------------------------------------------------------------------
-// 协议层线缆错误码（用于 ErrorMessage 帧的 Code 字段）
-// ---------------------------------------------------------------------------
-
-const (
-	CodeUnsupportedVersion    = "ERR_UNSUPPORTED_VERSION"
-	CodeUnsupportedCapability = "ERR_UNSUPPORTED_CAPABILITY"
-	CodeUnsupportedMessage    = "ERR_UNSUPPORTED_MESSAGE"
-	CodeUnsupportedFlag       = "ERR_UNSUPPORTED_FLAG"
-	CodeInvalidMagic          = "ERR_INVALID_MAGIC"
-	CodeInvalidFrame          = "ERR_INVALID_FRAME"
-	CodeFrameTooLarge         = "ERR_FRAME_TOO_LARGE"
-	CodeCRCMismatch           = "ERR_CRC_MISMATCH"
-	CodeDecodeFailed          = "ERR_DECODE_FAILED"
-	CodeAuthRequired          = "ERR_AUTH_REQUIRED"
-	CodeAuthFailed            = "ERR_AUTH_FAILED"
-	CodeSessionExpired        = "ERR_SESSION_EXPIRED"
-	CodeHMACFailed            = "ERR_HMAC_FAILED"
-	CodeDecryptFailed         = "ERR_DECRYPT_FAILED"
-	CodeDecompressFailed      = "ERR_DECOMPRESS_FAILED"
-	CodeBatchTooLarge         = "ERR_BATCH_TOO_LARGE"
-	CodeEventTooLarge         = "ERR_EVENT_TOO_LARGE"
-	CodeRateLimited           = "ERR_RATE_LIMITED"
-	CodeServerOverloaded      = "ERR_SERVER_OVERLOADED"
-	CodeDuplicateChunk        = "ERR_DUPLICATE_CHUNK"
-	CodeDuplicateInflight     = "ERR_DUPLICATE_INFLIGHT"
-	CodeEnvelopeMismatch      = "ERR_ENVELOPE_MISMATCH"
-	CodeForbiddenTag          = "ERR_FORBIDDEN_TAG"
-	CodeForbiddenSource       = "ERR_FORBIDDEN_SOURCE"
-	CodeForbiddenEvent        = "ERR_FORBIDDEN_EVENT"
-)
-
-// wireCodeToNum 将线缆错误码（ErrorMessage.Code）映射到对应的 NumCode。
-//
-// 旧实现中这些线缆错误码没有任何 NumCode 关联：当被包装为 *Error 时 NumCode 默认为 0，
-// 导致 GetErrorCode 返回 0（switch 无法匹配）、Error.Is 返回 false（t.NumCode != 0 守卫）。
-// 通过此映射表，WrapWireError 能自动填入正确的 NumCode，使程序化错误匹配生效。
-var wireCodeToNum = map[string]int{
-	CodeUnsupportedVersion:    NumVersion,
-	CodeUnsupportedCapability: NumProtocol,
-	CodeUnsupportedMessage:    NumProtocol,
-	CodeUnsupportedFlag:       NumProtocol,
-	CodeInvalidMagic:          NumProtocol,
-	CodeInvalidFrame:          NumProtocol,
-	CodeFrameTooLarge:         NumProtocol,
-	CodeCRCMismatch:           NumProtocol,
-	CodeDecodeFailed:          NumProtocol,
-	CodeAuthRequired:          NumAuth,
-	CodeAuthFailed:            NumAuth,
-	CodeSessionExpired:        NumSession,
-	CodeHMACFailed:            NumHMAC,
-	CodeDecryptFailed:         NumEnvelope,
-	CodeDecompressFailed:      NumEnvelope,
-	CodeBatchTooLarge:         NumBatch,
-	CodeEventTooLarge:         NumBatch,
-	CodeRateLimited:           NumThrottle,
-	CodeServerOverloaded:      NumThrottle,
-	CodeDuplicateChunk:        NumBatch,
-	CodeDuplicateInflight:     NumBatch,
-	CodeEnvelopeMismatch:      NumEnvelope,
-	CodeForbiddenTag:          NumValidation,
-	CodeForbiddenSource:       NumValidation,
-	CodeForbiddenEvent:        NumValidation,
+// ErrorCode 绑定数字码 Num 与字符串码 Code 为单一值。
+// 所有错误码（大类 + 具体原因）通过 register() 注册到 registry，加码只需一行 var。
+type ErrorCode struct {
+	Num  int
+	Code string
 }
 
-// WrapWireError 用线缆错误码构造 *Error，自动查 wireCodeToNum 填入 NumCode。
-// 未知线缆码 fallback 到 NumProtocol。msg 为人类可读描述，err 为可选被包装错误。
-func WrapWireError(code, msg string, err error) error {
-	num, ok := wireCodeToNum[code]
-	if !ok {
-		num = NumProtocol
+// registry 是所有已注册错误码的查找表，由 register() 在包初始化时填充。
+// MatchWireCode 据此把对端 wire 字符串反查回 ErrorCode。
+var registry = map[string]ErrorCode{}
+
+// register 把 ErrorCode 注册到 registry 并原样返回，支持 var X = register(ErrorCode{...})。
+// 包初始化期 fail-fast：空 Code 或重复码 panic。
+func register(c ErrorCode) ErrorCode {
+	if c.Code == "" {
+		panic("errors: register empty Code")
 	}
-	return &Error{NumCode: num, Code: code, Message: msg, Err: err}
+	if _, dup := registry[c.Code]; dup {
+		panic("errors: duplicate Code " + c.Code)
+	}
+	registry[c.Code] = c
+	return c
+}
+
+// 错误码 wire 字符串常量（snake_case，实际写入线缆 Code 字段的值）。
+// 大类码以 _error / _unavailable 后缀明确标识"这是一个错误"，而非无定语名词。
+// 具体码描述具体原因（如 hmac_mismatch、invalid_token），自解释。
+// 导出供需要直接比对 wire 字符串的场景使用（如收帧匹配、测试断言）。
+const (
+	// 通用
+	CodeConfig     = "invalid_config"
+	CodeCredential = "missing_credentials"
+	CodeTransport  = "transport_error"
+	CodeTLS        = "tls_error"
+	CodeStream     = "stream_error"
+	CodeHandshake  = "handshake_error"
+	CodeAuth       = "auth_error"
+	CodeSession    = "session_error"
+	CodeProtocol   = "protocol_error"
+	CodeBatch      = "batch_error"
+	CodeEnvelope   = "envelope_error"
+	CodeValidation = "validation_error"
+	CodeHMAC       = "hmac_error"
+	CodeWindowFull = "window_full"
+	CodeThrottle   = "throttled"
+	CodeSpool      = "spool_error"
+	CodeVersion    = "unsupported_version"
+
+	// Auth（握手期 AUTH_FAIL）
+	CodeInvalidAuth       = "invalid_auth"
+	CodeInvalidToken      = "invalid_token"
+	CodeTooManyAttempts   = "too_many_attempts"
+	CodeChallengeMismatch = "challenge_mismatch"
+	CodeAgentNotFound     = "agent_not_found"
+
+	// Session（连接级）
+	CodeSessionExpired = "session_expired"
+	CodeRedirected     = "redirected"
+
+	// Stream
+	CodeNoStreams = "no_streams"
+
+	// Envelope / HMAC（BATCH 处理期 NACK）
+	CodeHMACMismatch         = "hmac_mismatch"
+	CodeEnvelopeOpenError    = "envelope_open_error"
+	CodeEnvelopeAlgoMismatch = "envelope_algo_mismatch"
+
+	// Batch（BATCH 处理期 NACK）
+	CodeBatchTooLarge = "batch_too_large"
+	CodeInvalidBatch  = "invalid_batch"
+	CodeTooManyEvents = "too_many_events"
+
+	// Validation（BATCH 内容校验 NACK）
+	CodeBatchValidation    = "batch_validation"
+	CodeBatchTraceContext  = "batch_trace_context"
+	CodeInvalidSignalBatch = "invalid_signal_batch"
+	CodeSignalValidation   = "signal_validation"
+
+	// Flow control（THROTTLE）
+	CodeWindowExceeded = "window_exceeded"
+	CodeTooManyBatches = "too_many_batches"
+	CodeQueuePressure  = "queue_pressure"
+
+	// Protocol（ERROR 帧）
+	CodeDecodeFailed       = "decode_failed"
+	CodeUnsupportedMessage = "unsupported_message"
+	CodeInternalError      = "internal_error"
+)
+
+// 全部错误码（大类 + 具体 wire 码）。每个码定义即注册，加码只加一行。
+var (
+	// 大类
+	ErrCodeConfig     = register(ErrorCode{NumConfig, CodeConfig})
+	ErrCodeCredential = register(ErrorCode{NumCredential, CodeCredential})
+	ErrCodeTransport  = register(ErrorCode{NumTransport, CodeTransport})
+	ErrCodeTLS        = register(ErrorCode{NumTLS, CodeTLS})
+	ErrCodeStream     = register(ErrorCode{NumStream, CodeStream})
+	ErrCodeHandshake  = register(ErrorCode{NumHandshake, CodeHandshake})
+	ErrCodeAuth       = register(ErrorCode{NumAuth, CodeAuth})
+	ErrCodeSession    = register(ErrorCode{NumSession, CodeSession})
+	ErrCodeProtocol   = register(ErrorCode{NumProtocol, CodeProtocol})
+	ErrCodeBatch      = register(ErrorCode{NumBatch, CodeBatch})
+	ErrCodeEnvelope   = register(ErrorCode{NumEnvelope, CodeEnvelope})
+	ErrCodeValidation = register(ErrorCode{NumValidation, CodeValidation})
+	ErrCodeHMAC       = register(ErrorCode{NumHMAC, CodeHMAC})
+	ErrCodeWindowFull = register(ErrorCode{NumWindowFull, CodeWindowFull})
+	ErrCodeThrottle   = register(ErrorCode{NumThrottle, CodeThrottle})
+	ErrCodeSpool      = register(ErrorCode{NumSpool, CodeSpool})
+	ErrCodeVersion    = register(ErrorCode{NumVersion, CodeVersion})
+
+	// Auth（握手期 AUTH_FAIL）
+	ErrCodeInvalidAuth       = register(ErrorCode{NumAuth, CodeInvalidAuth})
+	ErrCodeInvalidToken      = register(ErrorCode{NumAuth, CodeInvalidToken})
+	ErrCodeTooManyAttempts   = register(ErrorCode{NumAuth, CodeTooManyAttempts})
+	ErrCodeChallengeMismatch = register(ErrorCode{NumAuth, CodeChallengeMismatch})
+	ErrCodeAgentNotFound     = register(ErrorCode{NumAuth, CodeAgentNotFound})
+
+	// Session（连接级）
+	ErrCodeSessionExpired = register(ErrorCode{NumSession, CodeSessionExpired})
+	ErrCodeRedirected     = register(ErrorCode{NumSession, CodeRedirected})
+
+	// Stream
+	ErrCodeNoStreams = register(ErrorCode{NumStream, CodeNoStreams})
+
+	// Envelope / HMAC（BATCH 处理期 NACK）
+	ErrCodeHMACMismatch         = register(ErrorCode{NumHMAC, CodeHMACMismatch})
+	ErrCodeEnvelopeOpenError    = register(ErrorCode{NumEnvelope, CodeEnvelopeOpenError})
+	ErrCodeEnvelopeAlgoMismatch = register(ErrorCode{NumEnvelope, CodeEnvelopeAlgoMismatch})
+
+	// Batch（BATCH 处理期 NACK）
+	ErrCodeBatchTooLarge = register(ErrorCode{NumBatch, CodeBatchTooLarge})
+	ErrCodeInvalidBatch  = register(ErrorCode{NumBatch, CodeInvalidBatch})
+	ErrCodeTooManyEvents = register(ErrorCode{NumBatch, CodeTooManyEvents})
+
+	// Validation（BATCH 内容校验 NACK）
+	ErrCodeBatchValidation    = register(ErrorCode{NumValidation, CodeBatchValidation})
+	ErrCodeBatchTraceContext  = register(ErrorCode{NumValidation, CodeBatchTraceContext})
+	ErrCodeInvalidSignalBatch = register(ErrorCode{NumValidation, CodeInvalidSignalBatch})
+	ErrCodeSignalValidation   = register(ErrorCode{NumValidation, CodeSignalValidation})
+
+	// Flow control（THROTTLE）
+	ErrCodeWindowExceeded = register(ErrorCode{NumWindowFull, CodeWindowExceeded})
+	ErrCodeTooManyBatches = register(ErrorCode{NumWindowFull, CodeTooManyBatches})
+	ErrCodeQueuePressure  = register(ErrorCode{NumThrottle, CodeQueuePressure})
+
+	// Protocol（ERROR 帧）
+	ErrCodeDecodeFailed       = register(ErrorCode{NumProtocol, CodeDecodeFailed})
+	ErrCodeUnsupportedMessage = register(ErrorCode{NumProtocol, CodeUnsupportedMessage})
+	ErrCodeInternalError      = register(ErrorCode{NumProtocol, CodeInternalError})
+
+	// ErrCodeUnknown 标识未注册的 wire 码（MatchWireCode 的 fallback），不注册。
+	ErrCodeUnknown = ErrorCode{}
+)
+
+// MatchWireCode 把对端发来的 wire Code 字符串匹配到注册的 ErrorCode。
+// 未注册返回 ErrCodeUnknown（Num=0），调用方可据此判断是否为未知码。
+func MatchWireCode(code string) ErrorCode {
+	if c, ok := registry[code]; ok {
+		return c
+	}
+	return ErrCodeUnknown
 }
 
 // ---------------------------------------------------------------------------
 // Error 类型 — MBTA 库的标准错误
 // ---------------------------------------------------------------------------
 
-// Error 是 MBTA 库的标准错误类型，携带数字错误码和字符串错误码。
+// Error 是 MBTA 库的标准错误类型。内嵌 ErrorCode，Num/Code 经字段提升可直接访问（e.Num / e.Code）。
 type Error struct {
-	NumCode int    // 数字错误码，用于程序快速匹配
-	Code    string // 字符串错误码，用于日志和线缆传输
-	Message string // 描述
-	Err     error  // 可选的被包装错误
+	ErrorCode        // 嵌入：Num（程序匹配）、Code（日志/线缆）
+	Message   string // 人类可读描述
+	Detail    any    // 可选结构化详情（字段名/值、frame header 等），nil 不输出
+	Err       error  // 可选的被包装错误
 }
 
 // Error 实现 error 接口。
 func (e *Error) Error() string {
-	if e.Err != nil {
-		return fmt.Sprintf("[%d %s] %s: %v", e.NumCode, e.Code, e.Message, e.Err)
+	out := fmt.Sprintf("[%d %s] %s", e.Num, e.Code, e.Message)
+	if e.Detail != nil {
+		out += fmt.Sprintf(":{%+v}", e.Detail)
 	}
-	return fmt.Sprintf("[%d %s] %s", e.NumCode, e.Code, e.Message)
+	if e.Err != nil {
+		out += fmt.Sprintf(": %v", e.Err)
+	}
+	return out
 }
 
-// Unwrap 返回被包装的错误，支持 errors.As/Is 链式查找。
+// Unwrap 返回被包装的错误，支持 errors.As 链式查找。
 func (e *Error) Unwrap() error { return e.Err }
 
-// Is 支持 errors.Is 匹配：当 target 也是 *Error 时比较 NumCode。
-func (e *Error) Is(target error) bool {
-	t, ok := target.(*Error)
-	if !ok {
-		return false
-	}
-	return e.NumCode == t.NumCode && t.NumCode != 0
-}
-
 // ---------------------------------------------------------------------------
-// 构造函数
+// 构造函数（均基于 ErrorCode，避免手动配对 Num/Code）
 // ---------------------------------------------------------------------------
 
 // NewError 创建一个不包装其他错误的标准错误。
-func NewError(numCode int, code, msg string) *Error {
-	return &Error{NumCode: numCode, Code: code, Message: msg}
+func NewError(c ErrorCode, msg string) *Error {
+	return &Error{ErrorCode: c, Message: msg}
 }
 
 // WrapError 创建一个包装其他错误的标准错误。
-func WrapError(numCode int, code, msg string, err error) *Error {
-	return &Error{NumCode: numCode, Code: code, Message: msg, Err: err}
+func WrapError(c ErrorCode, msg string, err error) *Error {
+	return &Error{ErrorCode: c, Message: msg, Err: err}
 }
-
-// ---------------------------------------------------------------------------
-// Sentinel errors — 支持 errors.Is 按错误类别匹配
-// ---------------------------------------------------------------------------
-//
-// 这些 sentinel 仅携带 NumCode。Error.Is 按 NumCode 比较，因此对任何由
-// NewError/WrapError 创建的、NumCode 相同的错误，errors.Is 均返回 true。
-//
-// 用法：
-//
-//	if errors.Is(err, core.ErrSession) { ... }   // 推荐
-//	// 等价于旧的数字比较：
-//	// if core.GetErrorCode(err) == core.NumSession { ... }
-//
-// sentinel 本身不应直接返回给调用方（它是类别标记，不是具体错误）；
-// 返回具体错误时仍用 NewError/WrapError 携带 Code 与 Message。
-var (
-	ErrConfig     = &Error{NumCode: NumConfig}
-	ErrCredential = &Error{NumCode: NumCredential}
-
-	ErrTransport = &Error{NumCode: NumTransport}
-	ErrTLS       = &Error{NumCode: NumTLS}
-	ErrStream    = &Error{NumCode: NumStream}
-
-	ErrHandshake = &Error{NumCode: NumHandshake}
-	ErrAuth      = &Error{NumCode: NumAuth}
-	ErrSession   = &Error{NumCode: NumSession}
-	ErrProtocol  = &Error{NumCode: NumProtocol}
-
-	ErrBatch      = &Error{NumCode: NumBatch}
-	ErrEnvelope   = &Error{NumCode: NumEnvelope}
-	ErrValidation = &Error{NumCode: NumValidation}
-	ErrHMAC       = &Error{NumCode: NumHMAC}
-
-	ErrWindowFull = &Error{NumCode: NumWindowFull}
-	ErrThrottle   = &Error{NumCode: NumThrottle}
-
-	ErrSpool = &Error{NumCode: NumSpool}
-
-	ErrVersion = &Error{NumCode: NumVersion}
-)
 
 // ---------------------------------------------------------------------------
 // 提取函数
 // ---------------------------------------------------------------------------
 
-// GetErrorCode 从 error 链中提取数字错误码。
-// 返回 0 如果链中没有 *Error。
-func GetErrorCode(err error) int {
-	e, ok := errors.AsType[*Error](err)
-	if ok {
-		return e.NumCode
-	}
-	return 0
-}
-
-// GetErrorCodeString 从 error 链中提取字符串错误码。
-// 返回空字符串如果链中没有 *Error。
-func GetErrorCodeString(err error) string {
-	e, ok := errors.AsType[*Error](err)
-	if ok {
+// CodeOf 从 error 链中提取 *Error 的 Code 字符串；非 *Error 返回空串。
+// 用于按 ErrorCode 匹配错误：if core.CodeOf(err) == core.ErrCodeHMACMismatch.Code { ... }
+func CodeOf(err error) string {
+	if e, ok := err.(*Error); ok {
 		return e.Code
 	}
 	return ""

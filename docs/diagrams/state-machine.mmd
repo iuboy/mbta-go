@@ -1,0 +1,62 @@
+---
+title: "MBTA 会话状态机 — 客户端 (上) / 服务端 (下)"
+---
+%%{init: {'theme':'default', 'themeVariables': {'background':'#ffffff', 'mainBkg':'#ffffff'}}}%%
+stateDiagram-v2
+    direction LR
+
+    %% ===== 客户端状态机 (core.State, validTransitions) =====
+    state "客户端 Client 状态机" as ClientSM {
+        [*] --> StateDisconnected : NewClient
+        StateDisconnected --> StateConnecting : Connect (SmTransitionConnecting)
+        StateConnecting --> StateControlStreamOpen : dial + 开 control stream
+        StateConnecting --> StateDisconnected : 握手失败/取消
+        StateControlStreamOpen --> StateHelloSent : SendHello
+        StateControlStreamOpen --> StateDisconnected : 失败
+        StateHelloSent --> StateHelloAcked : 收 HELLO_ACK
+        StateHelloSent --> StateDisconnected : 失败
+        StateHelloAcked --> StateAuthSent : SendAuth
+        StateHelloAcked --> StateDisconnected : 失败
+        StateAuthSent --> StateReady : AUTH_OK
+        StateAuthSent --> StateAuthSent : AUTH_FAIL(retryable) 自环重试
+        StateAuthSent --> StateDisconnected : AUTH_FAIL(终态)
+        StateReady --> StateDraining : Close() 发起 drain
+        StateReady --> StateClosed : 直接关闭
+        StateReady --> StateDisconnected : 连接终止
+        StateDraining --> StateClosed : drain 完成 (pendingAcks 归零/超时)
+        StateClosed --> StateDisconnected : 重置 (允许重新 Connect)
+    }
+
+    %% ===== 服务端状态机 (core.ServerState, ServerMachine.Transition) =====
+    state "服务端 Server 状态机" as ServerSM {
+        [*] --> ServerStateAccepted : Accept(conn)
+        ServerStateAccepted --> ServerStateControlWait : 唯一合法下一态
+        ServerStateControlWait --> ServerStateHelloReceived : 收 HELLO
+        ServerStateControlWait --> ServerStateClosed : 异常
+        ServerStateHelloReceived --> ServerStateAuthWait : 回 HELLO_ACK
+        ServerStateHelloReceived --> ServerStateClosed : 异常
+        ServerStateAuthWait --> ServerStateReady : AUTH_OK
+        ServerStateAuthWait --> ServerStateClosed : 异常 / AUTH_FAIL
+        ServerStateReady --> ServerStateDraining : 客户端发起 CLOSE
+        ServerStateReady --> ServerStateClosed : 异常
+        ServerStateDraining --> ServerStateClosed : drain 完成
+        ServerStateClosed --> [*] : 终态 (无出边, 不复用)
+    }
+
+    note right of StateAuthSent
+        自环语义:
+        AUTH_FAIL(retryable) 后
+        可重试 SendAuth 而不回退状态
+    end note
+
+    note right of StateClosed
+        出边 StateDisconnected 是关键:
+        允许握手失败/连接终止后
+        重置回初始态重新 Connect
+    end note
+
+    note right of ServerStateClosed
+        服务端 Closed 是真终态:
+        无任何出边, 连接不复用
+        (与客户端 Closed→Disconnected 不同)
+    end note

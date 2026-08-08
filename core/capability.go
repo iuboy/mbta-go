@@ -21,6 +21,29 @@ const (
 //nolint:gosec // G101 误报：这是协议 capability 标识符，非凭据
 const CapW3CTraceContext = "w3c_trace_context"
 
+// 导出的 stable capability 常量（core spec 附录 C）。值与 stableCapabilities 注册表
+// 保持一致——配置 Policy.SupportedCapabilities / 客户端 HELLO 时优先用这些常量，
+// 避免裸字符串拼错被静默吞掉（拼错的串既非 stable 也无前缀，Negotiate 会报协议错误）。
+const (
+	// 投递与可靠性（C.1）
+	CapPartialAck = "partial_ack"
+	CapDurableAck = "durable_ack"
+	CapDedup      = "dedup"
+	CapEarlyData  = "early_data"
+	// 压缩算法（C.4）
+	CapCompZstd = "comp_zstd"
+	CapCompLz4  = "comp_lz4"
+	CapCompGzip = "comp_gzip"
+	CapCompNone = "comp_none"
+	// 编码 codec（C.4）
+	CapCodecProto = "codec_proto"
+	CapCodecCbor  = "codec_cbor"
+	CapCodecJson  = "codec_json"
+	// 密码套件语境（C.4）
+	CapCSIntl = "cs_intl"
+	CapCSGM   = "cs_gm"
+)
+
 // stableCapabilities 是已注册的 stable capability 全集（core spec 附录 C）。
 // 值标 stable 后语义冻结（§1.4）。
 var stableCapabilities = map[string]bool{
@@ -99,21 +122,87 @@ type NegotiateResult struct {
 //
 // 算法选择：从客户端与服务端的公共 stable capability 集合推导 codec/compression/cipher，
 // 否则用 Policy 默认。selected 排序以保证 HELLO_ACK 确定性。
-//
-// 设计说明：HELLO 和 AUTH 分为两步，便于 token 轮换、AUTH payload 加密保护、
-// 以及 HELLO_ACK 下发 challenge nonce 用于挑战-响应。
-// maxClientCapabilities 限制客户端 HELLO 中可声明的能力数量，防 pre-auth DoS
-// （恶意客户端发送数千能力导致 toSet/FilterUnknownStable 内存与 CPU 放大）。
 const maxClientCapabilities = 256
+
+// Validate 校验 Policy 配置的合法性与内部一致性。供 NewServer 在构造期 fail-fast
+// 调用（避免错误 Policy 拖到 Negotiate 才暴露）。
+//
+// 校验项：
+//   - SupportedCapabilities 非空，且每项为已注册的 stable/deprecated capability，
+//     或带 experimental(x-)/deprecated(dep-) 前缀；未知项报错。
+//   - DefaultCodec / DefaultCompression 非 UNSPECIFIED，CipherSuite ∈ {INTL, GM}。
+//   - 一致性：DefaultCodec/DefaultCompression 对应的 capability 必须出现在
+//     SupportedCapabilities 中（否则协商时客户端未 offer 该算法、服务端又把它的
+//     同名 capability 从支持集里漏掉，回退默认值会选到一个双方都没宣告的算法）。
+func (p Policy) Validate() error {
+	if len(p.SupportedCapabilities) == 0 {
+		return NewError(ErrCodeConfig, "Policy.SupportedCapabilities is required")
+	}
+	for _, c := range p.SupportedCapabilities {
+		if !IsStableCapability(c) && !IsExperimentalCapability(c) && !IsDeprecatedCapability(c) {
+			return NewError(ErrCodeConfig, fmt.Sprintf("Policy.SupportedCapabilities: unknown capability %q", c))
+		}
+	}
+	if p.DefaultCodec == corepb.Codec_CODEC_UNSPECIFIED {
+		return NewError(ErrCodeConfig, "Policy.DefaultCodec is UNSPECIFIED")
+	}
+	if p.DefaultCompression == corepb.Compression_COMPRESSION_UNSPECIFIED {
+		return NewError(ErrCodeConfig, "Policy.DefaultCompression is UNSPECIFIED")
+	}
+	if p.CipherSuite != corepb.CipherSuite_CIPHER_SUITE_INTL && p.CipherSuite != corepb.CipherSuite_CIPHER_SUITE_GM {
+		return NewError(ErrCodeConfig, fmt.Sprintf("Policy.CipherSuite invalid: %v", p.CipherSuite))
+	}
+
+	// 一致性：默认算法对应的 capability 必须在支持集中（客户端未 offer 任何算法时
+	// 回退到 default，服务端必须自己声明支持该 default 对应的能力）。
+	// 例外：COMPRESSION_NONE 视为隐含支持——「不压缩」是无操作回退，无需显式声明
+	// comp_none（与项目既有约定一致：default=NONE 但 SupportedCapabilities 不含 comp_none）。
+	supported := toSet(p.SupportedCapabilities)
+	if req, ok := codecCapability(p.DefaultCodec); ok && !supported[req] {
+		return NewError(ErrCodeConfig, fmt.Sprintf("Policy.DefaultCodec=%v but %q not in SupportedCapabilities", p.DefaultCodec, req))
+	}
+	if p.DefaultCompression != corepb.Compression_COMPRESSION_NONE {
+		if req, ok := compressionCapability(p.DefaultCompression); ok && !supported[req] {
+			return NewError(ErrCodeConfig, fmt.Sprintf("Policy.DefaultCompression=%v but %q not in SupportedCapabilities", p.DefaultCompression, req))
+		}
+	}
+	return nil
+}
+
+// codecCapability 返回 codec 枚举对应的 capability 名（UNSPECIFIED 无对应，ok=false）。
+func codecCapability(c corepb.Codec) (string, bool) {
+	switch c {
+	case corepb.Codec_CODEC_PROTO:
+		return CapCodecProto, true
+	case corepb.Codec_CODEC_CBOR:
+		return CapCodecCbor, true
+	case corepb.Codec_CODEC_JSON:
+		return CapCodecJson, true
+	}
+	return "", false
+}
+
+// compressionCapability 返回 compression 枚举对应的 capability 名。
+func compressionCapability(c corepb.Compression) (string, bool) {
+	switch c {
+	case corepb.Compression_COMPRESSION_ZSTD:
+		return CapCompZstd, true
+	case corepb.Compression_COMPRESSION_LZ4:
+		return CapCompLz4, true
+	case corepb.Compression_COMPRESSION_GZIP:
+		return CapCompGzip, true
+	case corepb.Compression_COMPRESSION_NONE:
+		return CapCompNone, true
+	}
+	return "", false
+}
 
 func Negotiate(clientCaps []string, policy Policy) (NegotiateResult, error) {
 	if len(clientCaps) > maxClientCapabilities {
-		return NegotiateResult{}, NewError(NumProtocol, CodeProtocol,
-			fmt.Sprintf("too many capabilities advertised: %d (max %d)", len(clientCaps), maxClientCapabilities))
+		return NegotiateResult{}, NewError(ErrCodeProtocol, fmt.Sprintf("too many capabilities advertised: %d (max %d)", len(clientCaps), maxClientCapabilities))
 	}
 	if unknown := FilterUnknownStable(clientCaps); len(unknown) > 0 {
-		return NegotiateResult{}, NewError(NumProtocol, CodeProtocol,
-			fmt.Sprintf("unknown stable capabilities from client: %v", unknown))
+		return NegotiateResult{}, NewError(ErrCodeProtocol, fmt.Sprintf("unknown stable capabilities from client: %v", unknown))
 	}
 
 	serverSupported := toSet(policy.SupportedCapabilities)

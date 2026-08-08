@@ -35,13 +35,13 @@ func (c *CoreClient) SendHello(ctx context.Context) error {
 	}
 	payload, err := core.Encode(hello)
 	if err != nil {
-		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal hello", err)
+		return core.WrapError(core.ErrCodeProtocol, "marshal hello", err)
 	}
 	if err := c.tr.WriteFrame(ctx, core.TypeHello, core.FlagControl, core.ChannelControl, payload); err != nil {
 		return err
 	}
 	if err := c.sm.Transition(core.StateHelloSent); err != nil {
-		return core.WrapError(core.NumSession, core.CodeSession, "transition to HELLO_SENT", err)
+		return core.WrapError(core.ErrCodeSession, "transition to HELLO_SENT", err)
 	}
 	return nil
 }
@@ -59,13 +59,18 @@ func (c *CoreClient) RecvHelloAck(ctx context.Context) (*core.HelloAckMessage, e
 			slog.Warn("failed to decode TypeError payload, using raw bytes for diagnosis",
 				"decode_error", derr,
 				"raw_payload_len", len(f.Payload))
-			return nil, core.NewError(core.NumHandshake, core.CodeHandshake,
-				fmt.Sprintf("server error (decode failed: %v, raw=%x)", derr, f.Payload))
+			return nil, core.NewError(core.ErrCodeHandshake, fmt.Sprintf("server error (decode failed: %v, raw=%x)", derr, f.Payload))
 		}
-		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, fmt.Sprintf("server error: %s", errMsg.GetReason()))
+		// MatchWireCode 解析对端具体 wire 码（如 unsupported_version），
+		// 用其 Num 构造 *Error，使上层 errors.Is 可精确匹配；未知码回退 Handshake 大类。
+		ec := core.MatchWireCode(errMsg.GetCode())
+		if ec == core.ErrCodeUnknown {
+			ec = core.ErrCodeHandshake
+		}
+		return nil, core.NewError(ec, fmt.Sprintf("server error: %s", errMsg.GetReason()))
 	}
 	if f.Header.Type != core.TypeHelloAck {
-		return nil, core.NewError(core.NumProtocol, core.CodeProtocol, fmt.Sprintf("expected HELLO_ACK, got 0x%02x", f.Header.Type))
+		return nil, core.NewError(core.ErrCodeProtocol, fmt.Sprintf("expected HELLO_ACK, got 0x%02x", f.Header.Type))
 	}
 
 	var ack core.HelloAckMessage
@@ -76,10 +81,10 @@ func (c *CoreClient) RecvHelloAck(ctx context.Context) (*core.HelloAckMessage, e
 	// 先校验再 Store：避免校验失败时脏的 NegotiateResult（含 UNSPECIFIED cipher suite）
 	// 残留在 atomic 指针中，被并发 reader（buildAndSend/codecForMarshal）看到。
 	if ack.GetCipherSuite() == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
-		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server selected unspecified cipher suite")
+		return nil, core.NewError(core.ErrCodeHandshake, "server selected unspecified cipher suite")
 	}
 	if len(ack.GetChallengeNonce()) == 0 {
-		return nil, core.NewError(core.NumHandshake, core.CodeHandshake, "server did not provide challenge_nonce in HELLO_ACK")
+		return nil, core.NewError(core.ErrCodeHandshake, "server did not provide challenge_nonce in HELLO_ACK")
 	}
 	c.negotiated.Store(&core.NegotiateResult{
 		SelectedCapabilities: ack.GetSelectedCapabilities(),
@@ -108,19 +113,19 @@ func (c *CoreClient) getChallengeNonce() []byte {
 func (c *CoreClient) SendAuth(ctx context.Context) error {
 	challengeNonce := c.getChallengeNonce()
 	if len(challengeNonce) == 0 {
-		return core.NewError(core.NumAuth, core.CodeAuth, "server did not provide challenge_nonce in HELLO_ACK, cannot authenticate")
+		return core.NewError(core.ErrCodeAuth, "server did not provide challenge_nonce in HELLO_ACK, cannot authenticate")
 	}
 
 	auth := c.buildAuthMessage()
 	payload, err := core.Encode(auth)
 	if err != nil {
-		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal auth", err)
+		return core.WrapError(core.ErrCodeProtocol, "marshal auth", err)
 	}
 	if err := c.tr.WriteFrame(ctx, core.TypeAuth, core.FlagControl, core.ChannelControl, payload); err != nil {
 		return err
 	}
 	if err := c.sm.Transition(core.StateAuthSent); err != nil {
-		return core.WrapError(core.NumSession, core.CodeSession, "transition to AUTH_SENT", err)
+		return core.WrapError(core.ErrCodeSession, "transition to AUTH_SENT", err)
 	}
 	return nil
 }
@@ -160,8 +165,7 @@ func (c *CoreClient) RecvAuthResult(ctx context.Context) error {
 		// 安全交叉校验：AUTH_OK 的 cipher suite 必须与 HELLO_ACK 协商结果一致，
 		// 防止恶意/有缺陷的服务端在协商后下发不同套件导致密钥派生用错误算法。
 		if n := c.negotiated.Load(); n != nil && cs != n.CipherSuite {
-			return core.NewError(core.NumProtocol, core.CodeProtocol,
-				fmt.Sprintf("cipher suite mismatch: AUTH_OK=%s vs negotiated=%s", cs, n.CipherSuite))
+			return core.NewError(core.ErrCodeProtocol, fmt.Sprintf("cipher suite mismatch: AUTH_OK=%s vs negotiated=%s", cs, n.CipherSuite))
 		}
 		keys := core.NewSessionKeys(okMsg.GetKeyId(), cs, okMsg.GetHmacKey())
 		// AEAD 密钥按套件下发字段（intl=AesKey, gm=Sm4Key）。
@@ -172,22 +176,20 @@ func (c *CoreClient) RecvAuthResult(ctx context.Context) error {
 		case corepb.CipherSuite_CIPHER_SUITE_GM:
 			keys.SetAEADKey(okMsg.GetSm4Key())
 		default:
-			return core.NewError(core.NumProtocol, core.CodeProtocol,
-				fmt.Sprintf("unsupported cipher suite in AUTH_OK: %s", cs))
+			return core.NewError(core.ErrCodeProtocol, fmt.Sprintf("unsupported cipher suite in AUTH_OK: %s", cs))
 		}
 		c.keys.Store(keys)
 
 		// 服务端必须指定 session TTL（spec §9.5）。expires_at_unix=0 视为协议错误。
 		if okMsg.GetExpiresAtUnix() <= 0 {
-			return core.NewError(core.NumProtocol, core.CodeProtocol,
-				"AUTH_OK missing session expiry (expires_at_unix must be > 0)")
+			return core.NewError(core.ErrCodeProtocol, "AUTH_OK missing session expiry (expires_at_unix must be > 0)")
 		}
 		c.expiresAt.Store(okMsg.GetExpiresAtUnix())
 
 		// 先 Transition(StateReady) 再触发 onAuthed：binding 回调（v1 SetAuthed）
 		// 可能检查 StateReady 开放 data stream 门禁，若状态仍为 StateAuthSent 会行为异常。
 		if err := c.sm.Transition(core.StateReady); err != nil {
-			return core.WrapError(core.NumSession, core.CodeSession, "transition to READY", err)
+			return core.WrapError(core.ErrCodeSession, "transition to READY", err)
 		}
 		if c.onAuthed != nil {
 			// 使用调用方 ctx 而非 context.Background()：尊重上游超时/取消约束，
@@ -214,9 +216,9 @@ func (c *CoreClient) RecvAuthResult(ctx context.Context) error {
 			copy(nonce, failMsg.GetChallengeNonce())
 			c.challengeNonce.Store(nonce)
 		}
-		return core.NewError(core.NumAuth, core.CodeAuth, fmt.Sprintf("auth failed: %s (%s)", failMsg.GetReason(), failMsg.GetCode()))
+		return core.NewError(core.ErrCodeAuth, fmt.Sprintf("auth failed: %s (%s)", failMsg.GetReason(), failMsg.GetCode()))
 
 	default:
-		return core.NewError(core.NumProtocol, core.CodeProtocol, fmt.Sprintf("expected AUTH_OK/FAIL, got 0x%02x", f.Header.Type))
+		return core.NewError(core.ErrCodeProtocol, fmt.Sprintf("expected AUTH_OK/FAIL, got 0x%02x", f.Header.Type))
 	}
 }

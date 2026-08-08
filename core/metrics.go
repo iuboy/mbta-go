@@ -301,11 +301,7 @@ type noopHistogram struct{}
 
 func (noopHistogram) Observe(float64) {}
 
-// guardedCounter 包装 prometheus.Counter，防御负值 Add 导致的进程 panic。
-//
-// prometheus.Counter.Add 在入参为负时直接 panic 崩溃进程（Go client 设计约束）。
-// 本包装在 Add 前检查：负值安全丢弃并 warn 日志，保证进程存活。
-// Inc/Desc/Write/Collect/Describe 直接委托底层 Counter，零额外开销。
+// guardedCounter 包装 prometheus.Counter，丢弃负值 Add（避免 Go client panic）。
 type guardedCounter struct {
 	c prometheus.Counter
 }
@@ -330,11 +326,7 @@ var (
 	_ Counter            = guardedCounter{}
 )
 
-// registerOrExisting 尝试注册 collector；若已注册（重复调用 New），返回已有 collector 而非 panic。
-//
-// 对 ExistingCollector 用 type-switch 兜底而非裸类型断言：若同名指标被注册为不同类型
-// （跨包冲突），are.ExistingCollector.(T) 会 panic 崩溃进程。此处降级为返回新 collector
-// （不再注册）+ warn 日志，保证进程存活。
+// registerOrExisting 注册 collector；已注册（重复 New）时返回已有 collector，跨包类型冲突时降级返回新 collector（避免 panic）。
 func registerOrExisting[T prometheus.Collector](reg prometheus.Registerer, c T) T {
 	if err := reg.Register(c); err != nil {
 		var are prometheus.AlreadyRegisteredError

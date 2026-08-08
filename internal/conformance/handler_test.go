@@ -11,6 +11,7 @@ import (
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/protocol"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // doHandshake 完成完整 HELLO/AUTH 握手，返回 transport / 会话密钥 / 协商套件。
@@ -18,15 +19,17 @@ import (
 func doHandshake(t *testing.T, sink core.EventSink) (*FakeTransport, *core.SessionKeys, corepb.CipherSuite) {
 	t.Helper()
 	tr := NewFakeTransport(false)
+	// token/agent 对在握手两端必须一致，故在此函数内生成并贯穿 HELLO/AUTH。
+	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_proto", "codec_proto", "comp_zstd", "cs_intl", "durable_ack", "partial_ack"},
+		SupportedCapabilities: []string{core.CapCodecProto, core.CapCodecProto, core.CapCompZstd, core.CapCSIntl, core.CapDurableAck, core.CapPartialAck},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
-	auth := core.NewStaticTokenValidator(map[string]string{"secret-token": "agent-1"})
+	auth := core.NewStaticTokenValidator(map[string]string{tok: agentID})
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-		Auth: auth, Policy: policy, Sink: sink, ServerID: "srv-1",
+		Auth: auth, Policy: policy, Sink: sink, ServerID: "srv-" + testutil.RandString(4),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -34,9 +37,9 @@ func doHandshake(t *testing.T, sink core.EventSink) (*FakeTransport, *core.Sessi
 
 	// --- HELLO ---
 	hello := &corepb.HelloMessage{
-		AgentId:      "agent-1",
+		AgentId:      agentID,
 		FrameVersion: 1,
-		Capabilities: []string{"codec_proto", "cs_intl"},
+		Capabilities: []string{core.CapCodecProto, core.CapCSIntl},
 	}
 	hp, err := core.Encode(hello)
 	if err != nil {
@@ -66,10 +69,10 @@ func doHandshake(t *testing.T, sink core.EventSink) (*FakeTransport, *core.Sessi
 	}
 
 	// --- AUTH（challenge-response）---
-	authNonce := core.ComputeChallengeResponse("secret-token", string(ack.GetChallengeNonce()), cs)
+	authNonce := core.ComputeChallengeResponse(tok, string(ack.GetChallengeNonce()), cs)
 	authMsg := &corepb.AuthMessage{
-		Token:     "secret-token",
-		AgentId:   "agent-1",
+		Token:     tok,
+		AgentId:   agentID,
 		SessionId: ack.GetSessionId(),
 		AuthNonce: authNonce,
 	}
@@ -112,7 +115,7 @@ func TestCoreHandler_Delivery(t *testing.T) {
 
 	// 构造 BATCH：SignalBatch(JSON) → BatchMessage(proto) → SecureEnvelope → 帧
 	chunkID := core.NewChunkID()
-	batchJSON := makeSignalBatch("hi")
+	batchJSON := makeSignalBatch("")
 	batchMsg := &corepb.BatchMessage{
 		Seq:         1,
 		ChunkId:     chunkID.Bytes(),
@@ -124,7 +127,7 @@ func TestCoreHandler_Delivery(t *testing.T) {
 		t.Fatalf("encode batch message: %v", err)
 	}
 	params := core.BuildParams{
-		SessionID:    []byte("session-1"),
+		SessionID:    []byte(testutil.RandString(8)),
 		Seq:          1,
 		ChunkID:      chunkID,
 		Codec:        corepb.Codec_CODEC_PROTO,
@@ -172,13 +175,13 @@ func TestCoreHandler_Delivery(t *testing.T) {
 func TestCoreHandler_ReplayDedup(t *testing.T) {
 	tr, keys, cs := doHandshake(t, nil)
 
-	batchJSON := makeSignalBatch("hi")
+	batchJSON := makeSignalBatch("")
 	chunkID := core.NewChunkID()
 	buildEnv := func() []byte {
 		batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), Batch: batchJSON}
 		bp, _ := core.Encode(batchMsg)
 		params := core.BuildParams{
-			SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
+			SessionID: []byte(testutil.RandString(8)), Seq: 1, ChunkID: chunkID,
 			Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 			CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 			MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
@@ -229,14 +232,14 @@ func TestCoreHandler_Datagram(t *testing.T) {
 		Seq:         1,
 		ChunkId:     chunkID.Bytes(),
 		EventsCount: 1,
-		Batch:       makeSignalBatch("dg"),
+		Batch:       makeSignalBatch(""),
 	}
 	dgPayload, err := core.Encode(dgMsg)
 	if err != nil {
 		t.Fatalf("encode datagram message: %v", err)
 	}
 	params := core.BuildParams{
-		SessionID:    []byte("s"),
+		SessionID:    []byte(testutil.RandString(8)),
 		Seq:          1,
 		ChunkID:      chunkID,
 		Codec:        corepb.Codec_CODEC_PROTO,
@@ -273,25 +276,27 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 	store := core.NewSessionStore()
 	resumptionKeys, _ := core.GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
 	ticket, _ := core.NewTicket()
+	agentID := testutil.RandAgentID()
 	if err := store.Put(ticket, &core.SessionState{
 		Keys:    resumptionKeys,
-		AgentID: "agent-1",
+		AgentID: agentID,
 		Expiry:  time.Now().Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("store.Put: %v", err)
 	}
 
 	tr := NewFakeTransport(false)
+	tok := testutil.RandToken()
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_proto", "cs_intl"},
+		SupportedCapabilities: []string{core.CapCodecProto, core.CapCSIntl},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-		Auth:         core.NewStaticTokenValidator(map[string]string{"t": "agent-1"}),
+		Auth:         core.NewStaticTokenValidator(map[string]string{tok: agentID}),
 		Policy:       policy,
-		ServerID:     "srv-1",
+		ServerID:     "srv-" + testutil.RandString(4),
 		SessionStore: store,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -300,9 +305,9 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 
 	// HELLO 携带 ticket → handleHello 恢复 keys + earlyData
 	hello := &corepb.HelloMessage{
-		AgentId:       "agent-1",
+		AgentId:       agentID,
 		FrameVersion:  1,
-		Capabilities:  []string{"codec_proto", "cs_intl"},
+		Capabilities:  []string{core.CapCodecProto, core.CapCSIntl},
 		SessionTicket: ticket,
 	}
 	hp, _ := core.Encode(hello)
@@ -319,11 +324,11 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 		Seq:         1,
 		ChunkId:     chunkID.Bytes(),
 		EventsCount: 1,
-		Batch:       makeSignalBatch("0rtt"),
+		Batch:       makeSignalBatch(""),
 	}
 	batchPayload, _ := core.Encode(batchMsg)
 	params := core.BuildParams{
-		SessionID:    []byte("s"),
+		SessionID:    []byte(testutil.RandString(8)),
 		Seq:          1,
 		ChunkID:      chunkID,
 		Codec:        corepb.Codec_CODEC_PROTO,
@@ -358,14 +363,14 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 func TestCoreHandler_UnknownCapabilityRejected(t *testing.T) {
 	tr := NewFakeTransport(false)
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_proto"},
+		SupportedCapabilities: []string{core.CapCodecProto},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-		Auth:   core.NewStaticTokenValidator(map[string]string{"t": "a"}),
-		Policy: policy, ServerID: "srv-1",
+		Auth:   core.NewStaticTokenValidator(map[string]string{testutil.RandToken(): testutil.RandAgentID()}),
+		Policy: policy, ServerID: "srv-" + testutil.RandString(4),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -373,9 +378,9 @@ func TestCoreHandler_UnknownCapabilityRejected(t *testing.T) {
 
 	// HELLO 携带一个未注册的 stable capability（"bogus_cap"）
 	hello := &corepb.HelloMessage{
-		AgentId:      "agent-1",
+		AgentId:      testutil.RandAgentID(),
 		FrameVersion: 1,
-		Capabilities: []string{"codec_proto", "bogus_cap"},
+		Capabilities: []string{core.CapCodecProto, "bogus_cap"},
 	}
 	hp, _ := core.Encode(hello)
 	tr.ControlIn <- MakeFrame(core.TypeHello, core.FlagControl, core.ChannelControl, hp)
@@ -395,10 +400,10 @@ func TestCoreHandler_UnknownCapabilityRejected(t *testing.T) {
 func TestCoreHandler_HmacTampered(t *testing.T) {
 	tr, keys, cs := doHandshake(t, nil)
 	chunkID := core.NewChunkID()
-	batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 1, Batch: makeSignalBatch("x")}
+	batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 1, Batch: makeSignalBatch("")}
 	bp, _ := core.Encode(batchMsg)
 	params := core.BuildParams{
-		SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
+		SessionID: []byte(testutil.RandString(8)), Seq: 1, ChunkID: chunkID,
 		Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 		CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
@@ -428,10 +433,10 @@ func TestCoreHandler_BatchTooManyEvents(t *testing.T) {
 	sink := &mockRawSink{}
 	tr, keys, cs := doHandshake(t, sink)
 	chunkID := core.NewChunkID()
-	batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 10001, Batch: makeSignalBatch("x")}
+	batchMsg := &corepb.BatchMessage{Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 10001, Batch: makeSignalBatch("")}
 	bp, _ := core.Encode(batchMsg)
 	params := core.BuildParams{
-		SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
+		SessionID: []byte(testutil.RandString(8)), Seq: 1, ChunkID: chunkID,
 		Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 		CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
@@ -457,19 +462,19 @@ func TestCoreHandler_BatchTooManyEvents(t *testing.T) {
 func TestCoreHandler_PartialAckCapability(t *testing.T) {
 	tr := NewFakeTransport(false)
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_proto", "cs_intl", "partial_ack"},
+		SupportedCapabilities: []string{core.CapCodecProto, core.CapCSIntl, core.CapPartialAck},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-		Auth: core.NewStaticTokenValidator(map[string]string{"t": "a"}), Policy: policy, ServerID: "srv-1",
+		Auth: core.NewStaticTokenValidator(map[string]string{testutil.RandToken(): testutil.RandAgentID()}), Policy: policy, ServerID: "srv-" + testutil.RandString(4),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() { _ = h.Handle(ctx) }()
 
-	hello := &corepb.HelloMessage{AgentId: "a", FrameVersion: 1, Capabilities: []string{"codec_proto", "cs_intl", "partial_ack"}}
+	hello := &corepb.HelloMessage{AgentId: testutil.RandAgentID(), FrameVersion: 1, Capabilities: []string{core.CapCodecProto, core.CapCSIntl, core.CapPartialAck}}
 	hp, _ := core.Encode(hello)
 	tr.ControlIn <- MakeFrame(core.TypeHello, core.FlagControl, core.ChannelControl, hp)
 
@@ -479,7 +484,7 @@ func TestCoreHandler_PartialAckCapability(t *testing.T) {
 
 	found := false
 	for _, c := range ack.GetSelectedCapabilities() {
-		if c == "partial_ack" {
+		if c == core.CapPartialAck {
 			found = true
 		}
 	}
@@ -489,19 +494,23 @@ func TestCoreHandler_PartialAckCapability(t *testing.T) {
 }
 
 // makeSignalBatch creates a proto-encoded SignalBatch with one log signal.
+// body 为任意 fixture；省略时随机生成。
 func makeSignalBatch(body string) []byte {
+	if body == "" {
+		body = testutil.RandPayloadString(8)
+	}
 	sb := &core.SignalBatch{
 		Signals: []*core.SignalRecord{{SignalType: "log", Body: body}},
 	}
-	data, _ := core.MarshalSignalBatch(sb)
+	data, _ := core.MarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, sb)
 	return data
 }
 
 // validBatchTraceContext 返回合法 batch 级 TraceContext（供服务端 BATCH 构造复用）。
 func validBatchTraceContext() *corepb.TraceContext {
 	return &corepb.TraceContext{
-		TraceId:    "0123456789abcdef0123456789abcdef",
-		SpanId:     "0123456789abcdef",
+		TraceId:    testutil.RandTraceID(),
+		SpanId:     testutil.RandSpanID(),
 		TraceFlags: 0x01,
 	}
 }
@@ -512,7 +521,7 @@ func buildBatchEnvelope(t *testing.T, tr *FakeTransport, keys *core.SessionKeys,
 	t.Helper()
 	batchMsg := &corepb.BatchMessage{
 		Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 1,
-		Batch:        makeSignalBatch("hi"),
+		Batch:        makeSignalBatch(""),
 		TraceContext: tc,
 	}
 	bp, err := core.Encode(batchMsg)
@@ -628,9 +637,11 @@ func TestCoreHandler_MixedTraceBatch(t *testing.T) {
 	tr, keys, cs := doHandshake(t, sink)
 
 	// 两个 span 分属不同 trace_id（模拟 FIFO 混装多进程链）。
+	traceID1, traceID2 := testutil.RandTraceID(), testutil.RandTraceID()
+	spanID1, spanID2 := testutil.RandSpanID(), testutil.RandSpanID()
 	sb := &core.SignalBatch{Signals: []*core.SignalRecord{
-		{SignalType: "span", Name: "proc-A", TraceID: "11111111111111111111111111111111", SpanID: "aaaaaaaaaaaaaaaa"},
-		{SignalType: "span", Name: "proc-B", TraceID: "22222222222222222222222222222222", SpanID: "bbbbbbbbbbbbbbbb"},
+		{SignalType: "span", Name: "proc-A", TraceID: traceID1, SpanID: spanID1},
+		{SignalType: "span", Name: "proc-B", TraceID: traceID2, SpanID: spanID2},
 	}}
 	batchBytes, err := core.MarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, sb)
 	if err != nil {
@@ -643,7 +654,7 @@ func TestCoreHandler_MixedTraceBatch(t *testing.T) {
 		t.Fatalf("encode batch message: %v", err)
 	}
 	params := core.BuildParams{
-		SessionID: []byte("s"), Seq: 1, ChunkID: chunkID,
+		SessionID: []byte(testutil.RandString(8)), Seq: 1, ChunkID: chunkID,
 		Codec: corepb.Codec_CODEC_PROTO, Compression: corepb.Compression_COMPRESSION_NONE,
 		CipherSuite: cs, DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType: corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
@@ -684,10 +695,10 @@ func TestCoreHandler_MixedTraceBatch(t *testing.T) {
 	if got[0].TraceID == got[1].TraceID {
 		t.Errorf("trace_id not distinct across mixed signals: both %q", got[0].TraceID)
 	}
-	if got[0].TraceID != "11111111111111111111111111111111" || got[0].SpanID != "aaaaaaaaaaaaaaaa" {
+	if got[0].TraceID != traceID1 || got[0].SpanID != spanID1 {
 		t.Errorf("signal[0] trace = (%q,%q), want preserved", got[0].TraceID, got[0].SpanID)
 	}
-	if got[1].TraceID != "22222222222222222222222222222222" || got[1].SpanID != "bbbbbbbbbbbbbbbb" {
+	if got[1].TraceID != traceID2 || got[1].SpanID != spanID2 {
 		t.Errorf("signal[1] trace = (%q,%q), want preserved", got[1].TraceID, got[1].SpanID)
 	}
 }

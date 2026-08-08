@@ -60,7 +60,10 @@ func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 			if err := core.Decode(f.Payload, &errMsg); err != nil {
 				slog.Debug("invalid error payload", "error", err)
 			} else {
-				slog.Warn("server error", "code", errMsg.GetCode(), "reason", core.SanitizeForLog(errMsg.GetReason()), "fatal", errMsg.GetFatal())
+				// MatchWireCode 把对端 wire 码反查为 ErrorCode，日志携带大类 Num 便于过滤；
+				// 未注册码回退 ErrCodeUnknown（不影响 fatal 判定）。
+				ec := core.MatchWireCode(errMsg.GetCode())
+				slog.Warn("server error", "code", ec.Code, "num", ec.Num, "reason", core.SanitizeForLog(errMsg.GetReason()), "fatal", errMsg.GetFatal())
 				if errMsg.GetFatal() {
 					return
 				}
@@ -71,7 +74,7 @@ func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 	}
 }
 
-// handleAck 处理 ACK：清除 inflight，回调。
+// handleAck 处理 ACK：释放 tracker slot（seq+chunkID 校验），观测 latency，回调。
 func (c *CoreClient) handleAck(payload []byte) {
 	var ack core.AckMessage
 	if err := core.Decode(payload, &ack); err != nil {
@@ -79,28 +82,27 @@ func (c *CoreClient) handleAck(payload []byte) {
 		return
 	}
 
-	chunkID, valid := ulidText(ack.GetChunkId())
+	chunkID, valid := chunkIDFromWire(ack.GetChunkId())
 	if !valid {
-		// chunk_id 非 ULID：服务端返回了无法解析的 chunk_id，pendingAcks 无法匹配，
-		// 记录告警便于定位（不递减 pendingCount，避免与 pendingAcks 不一致）。
+		// chunk_id 非 16 字节 ULID：服务端返回了无法解析的 chunk_id，tracker 无法定位 slot，
+		// 记录告警便于定位（不调用 Release，计数器不变）。
 		slog.Warn("ack chunk_id not valid ULID, cannot match pending batch", "len", len(ack.GetChunkId()))
 		return
 	}
-	if val, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
-		c.pendingCount.Add(-1)
-		if pb, ok := val.(*pendingBatch); ok {
-			c.inflight.Remove(pb.Events, pb.Bytes)
-			c.metrics.BatchLatency().Observe(time.Since(pb.SentAt).Seconds())
-		}
+	// Release 用 ACK 帧自带的 seq 取模定位 slot，chunkID 二次校验。
+	// 三路并发 claim（ack/nack/reaper）中首个成功者清空 slot.seq，后续见 seq==0 失败。
+	if slot, ok := c.tracker.Release(ack.GetSeq(), chunkID); ok {
+		c.metrics.BatchLatency().Observe(time.Since(slot.SentAt).Seconds())
 	}
 
-	c.dispatchACK(chunkID, ackModeString(ack.GetAckMode()))
+	chunkIDText := chunkID.String()
+	c.dispatchACK(chunkIDText, ackModeString(ack.GetAckMode()))
 	c.notifyDrainIfEmpty()
 
-	slog.Debug("ack received", "seq", ack.GetSeq(), "chunk", chunkID, "count", ack.GetCount(), "mode", ackModeString(ack.GetAckMode()))
+	slog.Debug("ack received", "seq", ack.GetSeq(), "chunk", chunkIDText, "count", ack.GetCount(), "mode", ackModeString(ack.GetAckMode()))
 }
 
-// handleNack 处理 NACK：清除 inflight。
+// handleNack 处理 NACK：释放 tracker slot（seq+chunkID 校验），回调。
 func (c *CoreClient) handleNack(payload []byte) {
 	var nack core.NackMessage
 	if err := core.Decode(payload, &nack); err != nil {
@@ -108,19 +110,16 @@ func (c *CoreClient) handleNack(payload []byte) {
 		return
 	}
 
-	chunkID, valid := ulidText(nack.GetChunkId())
+	chunkID, valid := chunkIDFromWire(nack.GetChunkId())
 	if !valid {
 		slog.Warn("nack chunk_id not valid ULID, cannot match pending batch", "len", len(nack.GetChunkId()))
 		return
 	}
-	if val, ok := c.pendingAcks.LoadAndDelete(chunkID); ok {
-		c.pendingCount.Add(-1)
-		if pb, ok := val.(*pendingBatch); ok {
-			c.inflight.Remove(pb.Events, pb.Bytes)
-		}
-	}
+	// NACK 同样释放 slot（不计 latency：被拒 batch 的 latency 无意义）。
+	c.tracker.Release(nack.GetSeq(), chunkID)
 
-	c.dispatchACK(chunkID, "nack")
+	chunkIDText := chunkID.String()
+	c.dispatchACK(chunkIDText, "nack")
 	c.notifyDrainIfEmpty()
 
 	slog.Warn("nack received", "seq", nack.GetSeq(), "code", nack.GetCode(), "reason", core.SanitizeForLog(nack.GetReason()), "retryable", nack.GetRetryable())
@@ -132,7 +131,7 @@ func (c *CoreClient) handleWindow(payload []byte) {
 		slog.Debug("invalid window payload", "error", err)
 		return
 	}
-	c.window.Update(int(win.GetMaxInflightBatches()), int(win.GetMaxInflightEvents()), win.GetMaxInflightBytes())
+	c.tracker.UpdateLimits(int(win.GetMaxInflightBatches()), int(win.GetMaxInflightEvents()), win.GetMaxInflightBytes())
 	slog.Debug("window updated", "batches", win.GetMaxInflightBatches(), "events", win.GetMaxInflightEvents())
 }
 
@@ -203,15 +202,14 @@ func ackModeString(m corepb.AckMode) string {
 	return "accepted"
 }
 
-// ulidText 把 wire chunk_id（ULID 16B）转为文本，匹配 pendingAcks key。
-// 第二个返回值 ok 表示 chunk_id 是否为合法 ULID；ok=false 时调用方不应调整 pendingCount
-// （fallback 字符串与存储 key 不匹配，LoadAndDelete 必返回 ok=false），
-// 避免 pendingCount 持续正向漂移与 pendingAcks 条目泄漏。
-func ulidText(chunkID []byte) (text string, ok bool) {
+// chunkIDFromWire 把 wire chunk_id（ULID 16B）解析为 ChunkID。
+// 第二个返回值 ok 表示 chunk_id 是否为合法 16 字节 ULID；ok=false 时调用方不应
+// 调用 tracker.Release（seq 索引虽可定位 slot，但 chunkID 校验会失败，且计数器不应变动）。
+func chunkIDFromWire(chunkID []byte) (core.ChunkID, bool) {
 	if c, err := core.ChunkIDFromBytes(chunkID); err == nil {
-		return c.String(), true
+		return c, true
 	}
-	return string(chunkID), false
+	return core.ChunkID{}, false
 }
 
 // isTemporaryError 报告错误是否为可恢复的临时 I/O 错误（如 EAGAIN/EINTR）。

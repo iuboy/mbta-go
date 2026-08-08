@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/proto"
+
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 func TestApplySendOptions(t *testing.T) {
@@ -14,19 +16,20 @@ func TestApplySendOptions(t *testing.T) {
 	}
 
 	// WithTraceContext 设置字段（内部 proto.Clone 防御性拷贝，故用 proto.Equal 比较值）。
-	tc := &TraceContext{TraceId: "0123456789abcdef0123456789abcdef", SpanId: "0123456789abcdef"}
+	traceID, spanID := testutil.RandTraceID(), testutil.RandSpanID()
+	tc := &TraceContext{TraceId: traceID, SpanId: spanID}
 	sc = ApplySendOptions([]SendOption{WithTraceContext(tc)})
 	if !proto.Equal(sc.TraceContext, tc) {
 		t.Errorf("TraceContext not set: got %v, want %v", sc.TraceContext, tc)
 	}
 	// 防御性拷贝：修改原始 tc 不应影响已设置的 SendConfig。
 	tc.TraceId = "modified"
-	if sc2 := ApplySendOptions([]SendOption{WithTraceContext(&TraceContext{TraceId: "0123456789abcdef0123456789abcdef", SpanId: "0123456789abcdef"})}); proto.Equal(sc2.TraceContext, tc) {
+	if sc2 := ApplySendOptions([]SendOption{WithTraceContext(&TraceContext{TraceId: testutil.RandTraceID(), SpanId: testutil.RandSpanID()})}); proto.Equal(sc2.TraceContext, tc) {
 		t.Error("WithTraceContext should clone, not share pointer")
 	}
 
 	// 多次 opts：后者覆盖前者（函数式选项语义）。
-	tc2 := &TraceContext{TraceId: "fedcba9876543210fedcba9876543210", SpanId: "fedcba9876543210"}
+	tc2 := &TraceContext{TraceId: testutil.RandTraceID(), SpanId: testutil.RandSpanID()}
 	sc = ApplySendOptions([]SendOption{WithTraceContext(tc), WithTraceContext(tc2)})
 	if !proto.Equal(sc.TraceContext, tc2) {
 		t.Error("last WithTraceContext should win")

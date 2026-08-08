@@ -2,6 +2,7 @@ package ntls
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -13,9 +14,8 @@ import (
 )
 
 // Client 是 MBTA-NTLS 客户端：单 TCP（TLCP）连接上多路复用 control/data 帧。
-//
-// Phase 2 重构后，Client 是一个薄包装：协议逻辑（状态机/握手/ACK/drain/heartbeat）
-// 全部委托给 protocol.CoreClient，自身仅保留传输适配（ntlsClientTransport）。
+// 协议逻辑（状态机/握手/ACK/drain/heartbeat）全部委托给 protocol.CoreClient，
+// 自身仅保留传输适配（ntlsClientTransport）。
 //
 // 可靠投递语义：仅在内存追踪已发送未 ACK 的 batch。进程崩溃/重连后未 ACK 的
 // batch 会丢失——持久化与重发由调用方负责。
@@ -46,7 +46,7 @@ func (t *ntlsClientTransport) ReadFrame(ctx context.Context) (core.Frame, error)
 		dl = time.Now().Add(ntlsReadDefaultTimeout)
 	}
 	if err := t.conn.SetReadDeadline(dl); err != nil {
-		return core.Frame{}, core.WrapError(core.NumStream, core.CodeStream, "set read deadline", err)
+		return core.Frame{}, core.WrapError(core.ErrCodeStream, "set read deadline", err)
 	}
 	defer func() { _ = t.conn.SetReadDeadline(time.Time{}) }()
 	f, err := core.Read(t.conn, core.DefaultLimits())
@@ -73,7 +73,7 @@ func (t *ntlsClientTransport) WriteFrame(ctx context.Context, typ uint8, flags, 
 		dl = time.Now().Add(ntlsWriteDefaultTimeout)
 	}
 	if err := t.conn.SetWriteDeadline(dl); err != nil {
-		return core.WrapError(core.NumStream, core.CodeStream, "set write deadline", err)
+		return core.WrapError(core.ErrCodeStream, "set write deadline", err)
 	}
 	defer func() { _ = t.conn.SetWriteDeadline(time.Time{}) }()
 	return core.Write(t.conn, core.Version, typ, flags, channel, payload)
@@ -86,10 +86,19 @@ func (t *ntlsClientTransport) CloseConn() error {
 	return t.conn.Close()
 }
 
-// NewClient 创建一个 MBTA-NTLS 客户端。
 func NewClient(cfg ClientConfig) (*Client, error) {
-	if cfg.Server == "" {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "server address required")
+	// fail-fast：构造期校验必填字段与格式，避免拖到 Connect 的 dial 层才报错。
+	if cfg.AgentID == "" {
+		return nil, core.NewError(core.ErrCodeConfig, "AgentID required")
+	}
+	if cfg.Token == "" {
+		return nil, core.NewError(core.ErrCodeConfig, "Token required")
+	}
+	if err := core.ValidateHostPort(cfg.Server); err != nil {
+		return nil, core.WrapError(core.ErrCodeConfig, "Server", err)
+	}
+	if unknown := core.FilterUnknownStable(cfg.Capabilities); len(unknown) > 0 {
+		return nil, core.NewError(core.ErrCodeProtocol, fmt.Sprintf("unknown stable capabilities: %v", unknown))
 	}
 	cc := protocol.NewCoreClient(nil, protocol.CoreClientConfig{
 		AgentID:      cfg.AgentID,
@@ -120,29 +129,27 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	if c.conn != nil {
 		c.mu.Unlock()
-		return core.NewError(core.NumSession, core.CodeSession, "already connected")
+		return core.NewError(core.ErrCodeSession, "already connected")
 	}
 	c.mu.Unlock()
 
 	tr := &ntlsClientTransport{}
-	// connSet 标记本协程是否实际设置了 c.conn。并发 Connect 时，失败协程必须仅关闭
-	// 自己设置的连接——若用 c.conn != nil 判断会错误关闭胜出协程的连接。
+	// connSet 标记本协程是否实际设置了 c.conn：并发 Connect 时失败协程只关自己的连接。
 	var connSet bool
 	err := binding.Handshake(ctx, c.core,
 		// dial: 建立 TCP（TLCP/TLS1.3）连接
 		func(ctx context.Context) error {
 			conn, err := Dial(ctx, &c.cfg)
 			if err != nil {
-				return core.WrapError(core.NumTransport, core.CodeTransport, "dial", err)
+				return core.WrapError(core.ErrCodeTransport, "dial", err)
 			}
-			// dial 回调内二次检查：消除「入口 c.conn==nil 检查」与「此处赋值」之间的
-			// TOCTOU 窗口——两个并发 Connect 可能同时通过入口检查，后者覆盖前者致 fd 泄漏。
+			// dial 回调内二次检查：消除入口 c.conn==nil 检查与赋值之间的 TOCTOU 窗口。
 			c.mu.Lock()
 			if c.conn != nil {
 				// 另一个并发 Connect 已设置连接，关闭当前 conn 避免泄漏。
 				c.mu.Unlock()
 				_ = conn.Close()
-				return core.NewError(core.NumSession, core.CodeSession, "already connected (race)")
+				return core.NewError(core.ErrCodeSession, "already connected (race)")
 			}
 			c.conn = conn
 			tr.conn = conn
@@ -158,10 +165,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		// postAuth: ntls 无 post-auth 工作
 		nil,
 	)
-	// 握手失败兜底：binding.Handshake 的 defer 调用 cc.Close() 仅在 transport 已注册
-	// (setupTransport 成功) 时才关闭 tr.conn。若 dial 成功但 setupTransport 之前/之中失败，
-	// cc.Close() 不会关闭 c.conn，必须在此显式关闭以避免 fd 泄漏。
-	// 仅当本协程设置了 c.conn 时才关闭——并发竞态中失败协程不能关闭胜出协程的连接。
+	// 握手失败：cc.Close() 仅在 transport 已注册时关闭连接，dial 成功但 setupTransport 失败时需在此显式关闭（仅关本协程设置的连接）。
 	if err != nil {
 		c.mu.Lock()
 		if connSet {
@@ -195,12 +199,10 @@ func (c *Client) Close() error {
 	return c.core.Close()
 }
 
-// State 返回当前连接状态。
 func (c *Client) State() core.State {
 	return c.core.State()
 }
 
-// SessionID 返回会话 ID。
 func (c *Client) SessionID() string {
 	return c.core.SessionID()
 }

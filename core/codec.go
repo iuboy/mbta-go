@@ -57,12 +57,11 @@ func LookupCodec(codec corepb.Codec) SignalCodec {
 // codec 未注册返回错误（不应发生在协商后的正常路径——协商保证双方都注册了该 codec）。
 func MarshalSignalBatchCodec(codec corepb.Codec, sb *SignalBatch) ([]byte, error) {
 	if sb == nil {
-		return nil, NewError(NumValidation, CodeValidation, "nil signal batch")
+		return nil, NewError(ErrCodeValidation, "nil signal batch")
 	}
 	c := LookupCodec(codec)
 	if c == nil {
-		return nil, NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("codec not registered: %v", codec))
+		return nil, NewError(ErrCodeValidation, fmt.Sprintf("codec not registered: %v", codec))
 	}
 	return c.Marshal(sb)
 }
@@ -70,26 +69,11 @@ func MarshalSignalBatchCodec(codec corepb.Codec, sb *SignalBatch) ([]byte, error
 // UnmarshalSignalBatchCodec 按 codec 分发解码 SignalBatch。
 func UnmarshalSignalBatchCodec(codec corepb.Codec, data []byte) (*SignalBatch, error) {
 	if len(data) == 0 {
-		return nil, NewError(NumValidation, CodeValidation, "empty signal batch data")
+		return nil, NewError(ErrCodeValidation, "empty signal batch data")
 	}
 	c := LookupCodec(codec)
 	if c == nil {
-		return nil, NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("codec not registered: %v", codec))
+		return nil, NewError(ErrCodeValidation, fmt.Sprintf("codec not registered: %v", codec))
 	}
 	return c.Unmarshal(data)
-}
-
-// MarshalSignalBatch 以 PROTO 编码 SignalBatch（baseline 默认，core spec §6.3）。
-//
-// 保留无 codec 参数的便捷形式，向后兼容历史调用方与 bench；内部转发到 proto 实现。
-// 生产路径（client_batch.go / handler_batch.go）应优先用 MarshalSignalBatchCodec
-// 以尊重协商结果。
-func MarshalSignalBatch(sb *SignalBatch) ([]byte, error) {
-	return MarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, sb)
-}
-
-// UnmarshalSignalBatch 以 PROTO 解码 SignalBatch（baseline 默认）。
-func UnmarshalSignalBatch(data []byte) (*SignalBatch, error) {
-	return UnmarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, data)
 }

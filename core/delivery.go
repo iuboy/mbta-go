@@ -178,22 +178,3 @@ func (rc *ReplayCache) Update(agentID, chunkID string, status ReplayStatus) {
 		n.el = rc.processingList.PushBack(n)
 	}
 }
-
-// Get retrieves the current entry for a (agentID, chunkID) pair.
-func (rc *ReplayCache) Get(agentID, chunkID string) *ReplayEntry {
-	key := replayKey(agentID, chunkID)
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
-	if n, ok := rc.entries[key]; ok {
-		entry := n.entry // 返回拷贝，避免外部并发读与 Update 写竞争
-		return &entry
-	}
-	return nil
-}
-
-// Len returns the number of entries.
-func (rc *ReplayCache) Len() int {
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
-	return len(rc.entries)
-}

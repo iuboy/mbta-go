@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 func TestHMACKeyLen(t *testing.T) {
@@ -84,11 +85,12 @@ func TestNewHMAC_RoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewHMAC(%v): %v", cs, err)
 			}
-			h.Write([]byte("payload"))
+			payload := []byte(testutil.RandPayloadString(16))
+			h.Write(payload)
 			mac1 := h.Sum(nil)
 
 			h2, _ := NewHMAC(cs, key)
-			h2.Write([]byte("payload"))
+			h2.Write(payload)
 			mac2 := h2.Sum(nil)
 			if !bytes.Equal(mac1, mac2) {
 				t.Error("HMAC not deterministic for same key+payload")
@@ -109,7 +111,7 @@ func TestNewAEAD_SealOpenRoundTrip(t *testing.T) {
 				t.Fatalf("NewAEAD(%v): %v", cs, err)
 			}
 			nonce := make([]byte, aead.NonceSize())
-			plaintext := []byte("secret payload")
+			plaintext := []byte(testutil.RandPayloadString(32))
 			ct := aead.Seal(nil, nonce, plaintext, nil)
 			pt, err := aead.Open(nil, nonce, ct, nil)
 			if err != nil {

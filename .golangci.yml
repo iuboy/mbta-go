@@ -69,7 +69,9 @@ linters:
         text: G304
       - linters:
           - gosec
-        path: _test\.go
+        # G404（弱随机数）：测试 fixture 与 testutil 随机生成器豁免。
+        # 生产代码的随机数若用于安全场景（nonce/token/key）必须用 crypto/rand。
+        path: (_test\.go|internal/testutil/)
         text: G404
       - linters:
           - goconst

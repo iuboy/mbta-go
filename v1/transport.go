@@ -20,16 +20,12 @@ import (
 const ALPNProtocol = "mbta/1"
 
 // 默认传输参数：配置未显式指定时使用。(H-3)
-// 之前 IdleTimeout 只被映射到 KeepAlivePeriod，从未设为 quic.Config.MaxIdleTimeout，
-// 导致未显式配置 IdleTimeout 的连接在空闲时永不超时，可被慢速攻击长期占用。
 const (
 	defaultIdleTimeout        = 60 * time.Second // 未配置时的连接最大空闲时长
 	defaultMaxIncomingStreams = 256              // 单连接并发 QUIC 流上限
 )
 
-// QUIC 流控接收窗口。默认窗口偏小（~512KB-1MB），小于 maxBatchBytes(8MiB)，
-// 大 batch 会触发额外的 BLOCKED 帧往返。这里按 batch 上限调优，跨地域高 BDP 链路
-// 下避免每帧多一个 RTT。
+// QUIC 流控接收窗口，按 maxBatchBytes 调优（默认窗口偏小会触发额外 BLOCKED 帧往返）。
 const (
 	initialStreamWnd     = 8 * 1024 * 1024   // 8 MiB，匹配单 batch 上限
 	initialConnectionWnd = 64 * 1024 * 1024  // 64 MiB
@@ -73,12 +69,12 @@ type QUICClientConfig struct {
 // buildServerTLS creates a tls.Config for the server.
 func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 	if cfg == nil {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "server credentials required")
+		return nil, core.NewError(core.ErrCodeCredential, "server credentials required")
 	}
 
 	cert, err := tlshelper.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
-		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load server cert/key", err)
+		return nil, core.WrapError(core.ErrCodeTLS, "load server cert/key", err)
 	}
 
 	tlsCfg := &tls.Config{
@@ -90,7 +86,7 @@ func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 	if pool, err := tlshelper.LoadCertPool(cfg.CAFile); err == nil {
 		tlsCfg.ClientCAs = pool
 	} else if !errors.Is(err, tlshelper.ErrNoCAFile) {
-		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load server CA", err)
+		return nil, core.WrapError(core.ErrCodeTLS, "load server CA", err)
 	}
 
 	switch cfg.ClientAuth {
@@ -102,8 +98,7 @@ func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 	default:
 		// fail-closed：未识别的 ClientAuth 值报错，而非静默降级到 NoClientCert（禁用 mTLS）。
-		return nil, core.WrapError(core.NumConfig, core.CodeConfig,
-			fmt.Sprintf("invalid ClientAuth value: %q", cfg.ClientAuth), nil)
+		return nil, core.WrapError(core.ErrCodeConfig, fmt.Sprintf("invalid ClientAuth value: %q", cfg.ClientAuth), nil)
 	}
 
 	return tlsCfg, nil
@@ -112,7 +107,7 @@ func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 // buildClientTLS creates a tls.Config for the client.
 func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 	if cfg == nil {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "client TLS credentials required: provide ClientCredentials or explicitly set InsecureSkipVerify for development")
+		return nil, core.NewError(core.ErrCodeCredential, "client TLS credentials required: provide ClientCredentials or explicitly set InsecureSkipVerify for development")
 	}
 	tlsCfg := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
@@ -129,13 +124,13 @@ func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 	if pool, err := tlshelper.LoadCertPool(cfg.CAFile); err == nil {
 		tlsCfg.RootCAs = pool
 	} else if !errors.Is(err, tlshelper.ErrNoCAFile) {
-		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client CA", err)
+		return nil, core.WrapError(core.ErrCodeTLS, "load client CA", err)
 	}
 
 	if cfg.CertFile != "" && cfg.KeyFile != "" {
 		cert, err := tlshelper.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client cert/key", err)
+			return nil, core.WrapError(core.ErrCodeTLS, "load client cert/key", err)
 		}
 		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
@@ -174,26 +169,24 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 		InitialConnectionReceiveWindow: initialConnectionWnd,
 		MaxStreamReceiveWindow:         maxStreamWnd,
 		MaxConnectionReceiveWindow:     maxConnectionWnd,
-		Allow0RTT:                      true, // 接受 0-RTT resumption（core spec §11.6）。
-		// 0-RTT 重放防护由应用层提供：(1) handler_handshake.go 票据单次使用（Get 后 Delete）；
-		// (2) processBatch 的 ReplayCache 按 chunk_id 去重。传输层 Allow0RTT 依赖这两道防线。
-		EnableDatagrams: true, // SupportsDatagram()=true 的前置条件（RFC 9221，§11.4）
+		Allow0RTT:                      true, // 接受 0-RTT resumption（core spec §11.6）。重放防护由应用层票据单次使用 + ReplayCache 去重提供。
+		EnableDatagrams:                true, // SupportsDatagram()=true 的前置条件（RFC 9221，§11.4）
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Address)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "resolve address", err)
+		return nil, core.WrapError(core.ErrCodeTransport, "resolve address", err)
 	}
 
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen UDP", err)
+		return nil, core.WrapError(core.ErrCodeTransport, "listen UDP", err)
 	}
 
 	ql, err := quic.Listen(udpConn, tlsCfg, quicCfg)
 	if err != nil {
 		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to listen error
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen QUIC", err)
+		return nil, core.WrapError(core.ErrCodeTransport, "listen QUIC", err)
 	}
 
 	return &Listener{listener: ql, conn: udpConn, config: cfg}, nil
@@ -225,10 +218,7 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 
 // Close shuts down the listener.
 func (l *Listener) Close() error {
-	// quic.Listener.Close does not close the underlying PacketConn, so the UDP
-	// socket (and its bound port) would leak. Closing it explicitly lets the
-	// same address be rebound on a generation switch instead of failing with
-	// "address already in use".
+	// quic.Listener.Close 不会关闭底层 PacketConn，需显式关闭 UDP socket 以释放端口。
 	_ = l.listener.Close()
 	return l.conn.Close()
 }
@@ -240,15 +230,12 @@ func (l *Listener) Addr() net.Addr {
 
 // OpenControlStream opens the control stream. Must be called before OpenDataStream.
 //
-// 持锁检查 controlClaimed 并**在解锁前置位**，再 OpenStreamSync：消除旧实现「检查 → 解锁 →
-// OpenStreamSync → 加锁置位」的 TOCTOU 窗口（两个并发调用都能通过检查，各自 open 一个流，
-// 对端只把第一个 AcceptStream 当 control stream，第二个流协议错位）。
-// OpenStreamSync 在锁内调用是可接受的（控制流仅开一次，无热路径竞争）。
+// 持锁检查 controlClaimed 并在解锁前置位，再 OpenStreamSync：消除检查与置位之间的 TOCTOU 窗口（控制流仅开一次，锁内调用无热路径竞争）。
 func (c *Conn) OpenControlStream(ctx context.Context) (*quic.Stream, error) {
 	c.controlMu.Lock()
 	if c.controlClaimed {
 		c.controlMu.Unlock()
-		return nil, core.NewError(core.NumStream, core.CodeStream, "control stream already opened")
+		return nil, core.NewError(core.ErrCodeStream, "control stream already opened")
 	}
 	c.controlClaimed = true
 	c.controlMu.Unlock()
@@ -259,7 +246,7 @@ func (c *Conn) OpenControlStream(ctx context.Context) (*quic.Stream, error) {
 		c.controlMu.Lock()
 		c.controlClaimed = false
 		c.controlMu.Unlock()
-		return nil, core.WrapError(core.NumStream, core.CodeStream, "open control stream", err)
+		return nil, core.WrapError(core.ErrCodeStream, "open control stream", err)
 	}
 	return s, nil
 }
@@ -284,7 +271,7 @@ func (c *Conn) AcceptStream(ctx context.Context) (*quic.Stream, string, error) {
 // OpenDataStream opens a new data stream. Requires auth to be completed.
 func (c *Conn) OpenDataStream(ctx context.Context) (*quic.Stream, error) {
 	if !c.authed.Load() {
-		return nil, core.NewError(core.NumStream, core.CodeStream, "cannot open data stream before auth")
+		return nil, core.NewError(core.ErrCodeStream, "cannot open data stream before auth")
 	}
 	return c.QC.OpenStreamSync(ctx)
 }
@@ -311,8 +298,7 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 // 0-RTT 数据（可能含凭证）发送给未验证身份的服务端。此组合被拒绝。
 func DialEarly(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 	if cfg.Credentials != nil && cfg.Credentials.InsecureSkipVerify {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig,
-			"DialEarly cannot be used with InsecureSkipVerify: 0-RTT data would be sent without server identity verification")
+		return nil, core.NewError(core.ErrCodeConfig, "DialEarly cannot be used with InsecureSkipVerify: 0-RTT data would be sent without server identity verification")
 	}
 	return dial(ctx, cfg, true)
 }
@@ -341,11 +327,11 @@ func dial(ctx context.Context, cfg QUICClientConfig, early bool) (*Conn, error) 
 
 	udpAddr, err := net.ResolveUDPAddr("udp", cfg.Server)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "resolve address", err)
+		return nil, core.WrapError(core.ErrCodeTransport, "resolve address", err)
 	}
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen UDP", err)
+		return nil, core.WrapError(core.ErrCodeTransport, "listen UDP", err)
 	}
 
 	var (
@@ -361,7 +347,7 @@ func dial(ctx context.Context, cfg QUICClientConfig, early bool) (*Conn, error) 
 	}
 	if err != nil {
 		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to dial error
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, msg, err)
+		return nil, core.WrapError(core.ErrCodeTransport, msg, err)
 	}
 
 	cs := qc.ConnectionState().TLS

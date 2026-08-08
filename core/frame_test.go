@@ -5,9 +5,16 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 func TestWriteFrame(t *testing.T) {
+	// 任意 payload fixture（协议 type/flag/channel 保持常量）。
+	helloPayload := []byte(testutil.RandAgentID())
+	batchData := []byte(testutil.RandPayloadString(12))
+	dgPayload := []byte(testutil.RandString(4))
+	singleByte := []byte(testutil.RandString(1))
 	tests := []struct {
 		name      string
 		typ       uint8
@@ -17,14 +24,14 @@ func TestWriteFrame(t *testing.T) {
 		wantErr   bool
 		errSubstr string
 	}{
-		{name: "valid HELLO frame", typ: TypeHello, flags: FlagControl, channelID: ChannelControl, payload: []byte("agent-123")},
-		{name: "valid BATCH frame with envelope flag", typ: TypeBatch, flags: FlagData | FlagEnvelope, channelID: ChannelData, payload: []byte("batch data")},
-		{name: "valid DATAGRAM frame", typ: TypeDatagram, flags: FlagData | FlagEnvelope, channelID: ChannelData, payload: []byte("dg")},
+		{name: "valid HELLO frame", typ: TypeHello, flags: FlagControl, channelID: ChannelControl, payload: helloPayload},
+		{name: "valid BATCH frame with envelope flag", typ: TypeBatch, flags: FlagData | FlagEnvelope, channelID: ChannelData, payload: batchData},
+		{name: "valid DATAGRAM frame", typ: TypeDatagram, flags: FlagData | FlagEnvelope, channelID: ChannelData, payload: dgPayload},
 		{name: "empty payload", typ: TypeHello, flags: FlagControl, channelID: ChannelControl, payload: []byte{}},
-		{name: "reserved FlowClass=3", typ: TypeHello, flags: FlagControl | (3 << FlagFlowClassShift), channelID: ChannelControl, payload: []byte("t"), wantErr: true, errSubstr: "FlowClass"},
-		{name: "Control and Data both set", typ: TypeHello, flags: FlagControl | FlagData, channelID: ChannelControl, payload: []byte("t"), wantErr: true, errSubstr: "exclusive"},
-		{name: "MoreFollows and Coalesced both set", typ: TypeBatch, flags: FlagData | FlagMoreFollows | FlagCoalesced, channelID: ChannelData, payload: []byte("t"), wantErr: true, errSubstr: "exclusive"},
-		{name: "neither Control nor Data", typ: TypeHello, flags: FlagEnvelope, channelID: ChannelControl, payload: []byte("t"), wantErr: true, errSubstr: "exclusive"},
+		{name: "reserved FlowClass=3", typ: TypeHello, flags: FlagControl | (3 << FlagFlowClassShift), channelID: ChannelControl, payload: singleByte, wantErr: true, errSubstr: "FlowClass"},
+		{name: "Control and Data both set", typ: TypeHello, flags: FlagControl | FlagData, channelID: ChannelControl, payload: singleByte, wantErr: true, errSubstr: "exclusive"},
+		{name: "MoreFollows and Coalesced both set", typ: TypeBatch, flags: FlagData | FlagMoreFollows | FlagCoalesced, channelID: ChannelData, payload: singleByte, wantErr: true, errSubstr: "exclusive"},
+		{name: "neither Control nor Data", typ: TypeHello, flags: FlagEnvelope, channelID: ChannelControl, payload: singleByte, wantErr: true, errSubstr: "exclusive"},
 		{name: "large payload (1MB)", typ: TypeBatch, flags: FlagData, channelID: ChannelData, payload: make([]byte, 1<<20)},
 	}
 
@@ -67,6 +74,8 @@ func TestWriteFrame(t *testing.T) {
 }
 
 func TestReadFrame(t *testing.T) {
+	helloPayload := []byte(testutil.RandString(8))
+	shortPayload := []byte(testutil.RandString(2))
 	tests := []struct {
 		name      string
 		frame     []byte
@@ -77,7 +86,7 @@ func TestReadFrame(t *testing.T) {
 	}{
 		{
 			name:   "valid frame with payload",
-			frame:  buildTestFrame(TypeHello, FlagControl, ChannelControl, []byte("hello")),
+			frame:  buildTestFrame(TypeHello, FlagControl, ChannelControl, helloPayload),
 			limits: DefaultLimits(),
 			check: func(t *testing.T, f Frame) {
 				if f.Header.Version != Version {
@@ -92,11 +101,11 @@ func TestReadFrame(t *testing.T) {
 				if f.Header.ChannelID != ChannelControl {
 					t.Errorf("%s: got %v, want %v", "channelID", f.Header.ChannelID, ChannelControl)
 				}
-				if f.Header.Length != uint32(5) {
-					t.Errorf("%s: got %v, want %v", "length", f.Header.Length, uint32(5))
+				if f.Header.Length != uint32(len(helloPayload)) {
+					t.Errorf("%s: got %v, want %v", "length", f.Header.Length, uint32(len(helloPayload)))
 				}
-				if !bytes.Equal(f.Payload, []byte("hello")) {
-					t.Errorf("payload = %q, want %q", f.Payload, "hello")
+				if !bytes.Equal(f.Payload, helloPayload) {
+					t.Errorf("payload = %q, want %q", f.Payload, helloPayload)
 				}
 			},
 		},
@@ -110,9 +119,9 @@ func TestReadFrame(t *testing.T) {
 				}
 			},
 		},
-		{name: "invalid magic", frame: buildTestFrameWithMagic("XXXX", TypeHello, FlagControl, ChannelControl, []byte("t")), limits: DefaultLimits(), wantErr: true, errSubstr: "invalid magic"},
-		{name: "unsupported version", frame: buildTestFrameWithVersion(0xFF, TypeHello, FlagControl, ChannelControl, []byte("t")), limits: DefaultLimits(), wantErr: true, errSubstr: "unsupported version"},
-		{name: "reserved FlowClass", frame: buildTestFrame(TypeHello, FlagControl|(3<<FlagFlowClassShift), ChannelControl, []byte("t")), limits: DefaultLimits(), wantErr: true, errSubstr: "FlowClass"},
+		{name: "invalid magic", frame: buildTestFrameWithMagic("XXXX", TypeHello, FlagControl, ChannelControl, shortPayload), limits: DefaultLimits(), wantErr: true, errSubstr: "invalid magic"},
+		{name: "unsupported version", frame: buildTestFrameWithVersion(0xFF, TypeHello, FlagControl, ChannelControl, shortPayload), limits: DefaultLimits(), wantErr: true, errSubstr: "unsupported version"},
+		{name: "reserved FlowClass", frame: buildTestFrame(TypeHello, FlagControl|(3<<FlagFlowClassShift), ChannelControl, shortPayload), limits: DefaultLimits(), wantErr: true, errSubstr: "FlowClass"},
 		{name: "payload too large", frame: buildTestFrameWithLength(TypeHello, FlagControl, ChannelControl, MaxPayloadSize+1), limits: DefaultLimits(), wantErr: true, errSubstr: "payload too large"},
 		{name: "large payload within limit", frame: buildTestFrame(TypeBatch, FlagData, ChannelData, make([]byte, 1<<20)), limits: DefaultLimits()},
 		{name: "custom limit smaller than payload", frame: buildTestFrame(TypeBatch, FlagData, ChannelData, make([]byte, 1024)), limits: Limits{MaxPayloadSize: 512}, wantErr: true, errSubstr: "payload too large"},
@@ -181,9 +190,9 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		channelID uint8
 		payload   []byte
 	}{
-		{name: "HELLO", typ: TypeHello, flags: FlagControl, channelID: ChannelControl, payload: []byte("agent-id-123")},
-		{name: "BATCH envelope", typ: TypeBatch, flags: FlagData | FlagEnvelope, channelID: ChannelData, payload: []byte(`{"signals":[]}`)},
-		{name: "ACK", typ: TypeAck, flags: FlagControl, channelID: ChannelControl, payload: []byte("chunk-123:durable")},
+		{name: "HELLO", typ: TypeHello, flags: FlagControl, channelID: ChannelControl, payload: []byte(testutil.RandAgentID())},
+		{name: "BATCH envelope", typ: TypeBatch, flags: FlagData | FlagEnvelope, channelID: ChannelData, payload: []byte(testutil.RandPayloadString(16))},
+		{name: "ACK", typ: TypeAck, flags: FlagControl, channelID: ChannelControl, payload: []byte(testutil.RandString(10) + ":" + testutil.RandString(8))},
 		{name: "empty payload", typ: TypeWindow, flags: FlagControl, channelID: ChannelControl, payload: []byte{}},
 		{name: "large payload", typ: TypeBatch, flags: FlagData, channelID: ChannelData, payload: make([]byte, 100*1024)},
 	}
@@ -298,7 +307,7 @@ func writeVarintBuf(buf *bytes.Buffer, v uint64) {
 }
 
 func TestReadFromPartialStream(t *testing.T) {
-	payload := []byte("test payload data")
+	payload := []byte(testutil.RandPayloadString(24))
 	frameData := buildTestFrame(TypeBatch, FlagData, ChannelData, payload)
 	frame, err := Read(&chunkReader{data: frameData, chunkSize: 3}, DefaultLimits())
 	if err != nil {
@@ -317,7 +326,7 @@ func TestReadFromPartialStream(t *testing.T) {
 // 回归：此前 Version 硬编码为常量，v2 帧无法生成也无法解析。
 func TestReadMultiVersion(t *testing.T) {
 	const v2 = byte(0x02)
-	payload := []byte("multi-version payload")
+	payload := []byte(testutil.RandPayloadString(20))
 
 	// v2 帧由 Write(version=0x02) 生成
 	buf := &bytes.Buffer{}
@@ -409,7 +418,8 @@ func TestVarintRejectsNonCanonical(t *testing.T) {
 // conventions used by a follower replica redirecting an agent to the leader.
 func TestFrameTypeRedirect(t *testing.T) {
 	var buf bytes.Buffer
-	payload := []byte(`{"leaderAddr":"10.0.0.1:8443","leaderId":"pod-abc"}`)
+	// HA 重定向控制帧 payload（任意 leader 地址/ID fixture）。
+	payload := []byte(`{"leaderAddr":"` + testutil.RandString(12) + `","leaderId":"` + testutil.RandString(8) + `"}`)
 	if err := Write(&buf, Version, TypeRedirect, FlagControl, ChannelControl, payload); err != nil {
 		t.Fatal(err)
 	}

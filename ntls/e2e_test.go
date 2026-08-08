@@ -11,6 +11,7 @@ import (
 	corepb "github.com/iuboy/mbta-go/corepb"
 
 	"github.com/iuboy/mbta-go/core"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // e2eSink 收集投递的 batch（EventSink 最小实现）。
@@ -41,16 +42,17 @@ func waitAddr(t *testing.T, srv *Server) string {
 // 验证 TLCP binding 完整 r2 链路（TLCP SM2 双证书握手 + HELLO/AUTH + envelope + BATCH + route + ACK）。
 func TestE2E_NTLS_SendBatch(t *testing.T) {
 	sink := &e2eSink{}
+	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	server, err := NewServer(ServerConfig{
 		Address:      "127.0.0.1:0",
-		SignCertFile: "../testdata/ntls/sm2_sign_cert.pem",
-		SignKeyFile:  "../testdata/ntls/sm2_sign_key.pem",
-		EncCertFile:  "../testdata/ntls/sm2_enc_cert.pem",
-		EncKeyFile:   "../testdata/ntls/sm2_enc_key.pem",
-		CAFile:       "../testdata/ntls/sm2_ca.pem",
-		Auth:         core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
+		SignCertFile: "../test/data/ntls/sm2_sign_cert.pem",
+		SignKeyFile:  "../test/data/ntls/sm2_sign_key.pem",
+		EncCertFile:  "../test/data/ntls/sm2_enc_cert.pem",
+		EncKeyFile:   "../test/data/ntls/sm2_enc_key.pem",
+		CAFile:       "../test/data/ntls/sm2_ca.pem",
+		Auth:         core.NewStaticTokenValidator(map[string]string{tok: agentID}),
 		Policy: core.Policy{
-			SupportedCapabilities: []string{"codec_proto", "cs_gm"},
+			SupportedCapabilities: []string{core.CapCodecProto, core.CapCSGM},
 			DefaultCodec:          corepb.Codec_CODEC_PROTO,
 			DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 			CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_GM,
@@ -70,15 +72,15 @@ func TestE2E_NTLS_SendBatch(t *testing.T) {
 	client, err := NewClient(ClientConfig{
 		Server: addr,
 		Credentials: &ClientCredentials{
-			SignCertFile: "../testdata/ntls/sm2_sign_cert.pem",
-			SignKeyFile:  "../testdata/ntls/sm2_sign_key.pem",
-			EncCertFile:  "../testdata/ntls/sm2_enc_cert.pem",
-			EncKeyFile:   "../testdata/ntls/sm2_enc_key.pem",
-			CAFile:       "../testdata/ntls/sm2_ca.pem",
+			SignCertFile: "../test/data/ntls/sm2_sign_cert.pem",
+			SignKeyFile:  "../test/data/ntls/sm2_sign_key.pem",
+			EncCertFile:  "../test/data/ntls/sm2_enc_cert.pem",
+			EncKeyFile:   "../test/data/ntls/sm2_enc_key.pem",
+			CAFile:       "../test/data/ntls/sm2_ca.pem",
 		},
-		AgentID:      "agent-1",
-		Token:        "test-token",
-		Capabilities: []string{"codec_proto", "cs_gm"},
+		AgentID:      agentID,
+		Token:        tok,
+		Capabilities: []string{core.CapCodecProto, core.CapCSGM},
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -88,7 +90,7 @@ func TestE2E_NTLS_SendBatch(t *testing.T) {
 	}
 	defer client.Close()
 
-	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "hello ntls e2e"}}}
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: testutil.RandPayloadString(16)}}}
 
 	chunkID, err := client.SendBatch(ctx, sb, "tag", "source")
 	if err != nil {
@@ -111,14 +113,15 @@ func TestE2E_NTLS_SendBatch(t *testing.T) {
 // 验证第三 binding（§10 对称补齐）完整 r2 链路（TLS1.3 握手 + HELLO/AUTH + envelope + BATCH + route + ACK）。
 func TestE2E_MBTATLS_SendBatch(t *testing.T) {
 	sink := &e2eSink{}
+	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	server, err := NewServer(ServerConfig{
 		Address:  "127.0.0.1:0",
 		TLSMode:  true,
-		CertFile: "../testdata/certificates/server.crt",
-		KeyFile:  "../testdata/certificates/server.key",
-		Auth:     core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
+		CertFile: "../test/data/certificates/server.crt",
+		KeyFile:  "../test/data/certificates/server.key",
+		Auth:     core.NewStaticTokenValidator(map[string]string{tok: agentID}),
 		Policy: core.Policy{
-			SupportedCapabilities: []string{"codec_proto", "cs_intl"},
+			SupportedCapabilities: []string{core.CapCodecProto, core.CapCSIntl},
 			DefaultCodec:          corepb.Codec_CODEC_PROTO,
 			DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 			CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
@@ -141,9 +144,9 @@ func TestE2E_MBTATLS_SendBatch(t *testing.T) {
 			TLSMode:            true,
 			InsecureSkipVerify: true,
 		},
-		AgentID:      "agent-1",
-		Token:        "test-token",
-		Capabilities: []string{"codec_proto", "cs_intl"},
+		AgentID:      agentID,
+		Token:        tok,
+		Capabilities: []string{core.CapCodecProto, core.CapCSIntl},
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -153,7 +156,7 @@ func TestE2E_MBTATLS_SendBatch(t *testing.T) {
 	}
 	defer client.Close()
 
-	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "hello mbta-tls e2e"}}}
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: testutil.RandPayloadString(16)}}}
 
 	chunkID, err := client.SendBatch(ctx, sb, "tag", "source")
 	if err != nil {

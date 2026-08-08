@@ -76,7 +76,7 @@ type ClientConfig struct {
 	AgentID      string
 	Hostname     string
 	Token        string
-	Capabilities []string     // 客户端能力（HELLO 携带，与服务端协商）
+	Capabilities []string // 客户端能力（HELLO 携带，与服务端协商）
 	// OS / AgentVersion 写入 HELLO（空则不发/回退默认）。
 	OS           string
 	AgentVersion string
@@ -90,24 +90,24 @@ func buildServerTLCP(cfg *ServerConfig) (*tlcp.Config, error) {
 	// 用 pollux-go/cert 加载 SM2 双证书（标准 tls.LoadX509KeyPair 不识别 SM2 曲线）
 	dual, err := cert.LoadDualCertificateFiles(cfg.SignCertFile, cfg.SignKeyFile, cfg.EncCertFile, cfg.EncKeyFile)
 	if err != nil {
-		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load dual SM2 cert", err)
+		return nil, core.WrapError(core.ErrCodeTLS, "load dual SM2 cert", err)
 	}
 	tc.SignCertificate = &dual.Sign
 	tc.EncCertificate = &dual.Enc
 	if cfg.CAFile != "" {
 		if err := tc.LoadRootCAs(cfg.CAFile, cfg.CAFile); err != nil {
-			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load root CA", err)
+			return nil, core.WrapError(core.ErrCodeTLS, "load root CA", err)
 		}
 	}
 	if err := tc.Validate(); err != nil {
-		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "validate tlcp config", err)
+		return nil, core.WrapError(core.ErrCodeTLS, "validate tlcp config", err)
 	}
 	return tc, nil
 }
 
 func buildClientTLCP(cfg *ClientCredentials) (*tlcp.Config, error) {
 	if cfg == nil {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "ntls credentials required")
+		return nil, core.NewError(core.ErrCodeCredential, "ntls credentials required")
 	}
 	tc := tlcp.NewConfig()
 	tc.ServerName = cfg.ServerName
@@ -118,14 +118,14 @@ func buildClientTLCP(cfg *ClientCredentials) (*tlcp.Config, error) {
 	if cfg.SignCertFile != "" && cfg.EncCertFile != "" {
 		dual, err := cert.LoadDualCertificateFiles(cfg.SignCertFile, cfg.SignKeyFile, cfg.EncCertFile, cfg.EncKeyFile)
 		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load dual SM2 cert", err)
+			return nil, core.WrapError(core.ErrCodeTLS, "load dual SM2 cert", err)
 		}
 		tc.SignCertificate = &dual.Sign
 		tc.EncCertificate = &dual.Enc
 	}
 	if cfg.CAFile != "" {
 		if err := tc.LoadRootCAs(cfg.CAFile, cfg.CAFile); err != nil {
-			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load root CA", err)
+			return nil, core.WrapError(core.ErrCodeTLS, "load root CA", err)
 		}
 	}
 	return tc, nil
@@ -137,7 +137,7 @@ func buildClientTLCP(cfg *ClientCredentials) (*tlcp.Config, error) {
 func buildServerTLS13(cfg *ServerConfig) (*tls.Config, error) {
 	cert, err := tlshelper.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
-		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load TLS1.3 cert/key", err)
+		return nil, core.WrapError(core.ErrCodeTLS, "load TLS1.3 cert/key", err)
 	}
 	tc := &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -148,7 +148,7 @@ func buildServerTLS13(cfg *ServerConfig) (*tls.Config, error) {
 		tc.ClientCAs = pool
 		tc.ClientAuth = tls.RequireAndVerifyClientCert
 	} else if !errors.Is(err, tlshelper.ErrNoCAFile) {
-		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load server CA", err)
+		return nil, core.WrapError(core.ErrCodeTLS, "load server CA", err)
 	}
 	return tc, nil
 }
@@ -156,7 +156,7 @@ func buildServerTLS13(cfg *ServerConfig) (*tls.Config, error) {
 // buildClientTLS13 构建 TLS 1.3 client 配置。
 func buildClientTLS13(cfg *ClientCredentials) (*tls.Config, error) {
 	if cfg == nil {
-		return nil, core.NewError(core.NumCredential, core.CodeCredential, "TLS1.3 credentials required")
+		return nil, core.NewError(core.ErrCodeCredential, "TLS1.3 credentials required")
 	}
 	tc := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
@@ -171,12 +171,12 @@ func buildClientTLS13(cfg *ClientCredentials) (*tls.Config, error) {
 	if pool, err := tlshelper.LoadCertPool(cfg.CAFile); err == nil {
 		tc.RootCAs = pool
 	} else if !errors.Is(err, tlshelper.ErrNoCAFile) {
-		return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client CA", err)
+		return nil, core.WrapError(core.ErrCodeTLS, "load client CA", err)
 	}
 	if cfg.CertFile != "" && cfg.KeyFile != "" {
 		cert, err := tlshelper.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
-			return nil, core.WrapError(core.NumTLS, core.CodeTLS, "load client cert/key", err)
+			return nil, core.WrapError(core.ErrCodeTLS, "load client cert/key", err)
 		}
 		tc.Certificates = []tls.Certificate{cert}
 	}
@@ -201,7 +201,7 @@ func Listen(cfg *ServerConfig) (*Listener, error) {
 		}
 		ln, err := tls.Listen("tcp", cfg.Address, tc)
 		if err != nil {
-			return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen tls1.3", err)
+			return nil, core.WrapError(core.ErrCodeTransport, "listen tls1.3", err)
 		}
 		return &Listener{inner: ln}, nil
 	}
@@ -211,7 +211,7 @@ func Listen(cfg *ServerConfig) (*Listener, error) {
 	}
 	ln, err := tlcp.Listen("tcp", cfg.Address, tc)
 	if err != nil {
-		return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen tlcp", err)
+		return nil, core.WrapError(core.ErrCodeTransport, "listen tlcp", err)
 	}
 	return &Listener{inner: ln}, nil
 }
@@ -239,8 +239,7 @@ func Dial(ctx context.Context, cfg *ClientConfig) (net.Conn, error) {
 			ch <- result{nil, err}
 			return
 		}
-		// 先用 DialContext 建立可取消的 TCP 连接，再在其上做 TLCP 握手。
-		// 避免 tlcp.Dial（不接受 context）在 ctx 取消时内部 goroutine 永久泄漏。
+		// 先 DialContext 建立可取消 TCP 连接，再在其上做 TLCP 握手（tlcp.Dial 不接受 context）。
 		rawConn, dErr := (&net.Dialer{}).DialContext(ctx, "tcp", cfg.Server)
 		if dErr != nil {
 			ch <- result{nil, dErr}
@@ -264,7 +263,7 @@ func Dial(ctx context.Context, cfg *ClientConfig) (net.Conn, error) {
 		return nil, ctx.Err()
 	case r := <-ch:
 		if r.err != nil {
-			return nil, core.WrapError(core.NumTransport, core.CodeTransport, "dial", r.err)
+			return nil, core.WrapError(core.ErrCodeTransport, "dial", r.err)
 		}
 		return r.c, nil
 	}
@@ -279,25 +278,25 @@ type Server struct {
 
 func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Address == "" {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "address required")
+		return nil, core.NewError(core.ErrCodeConfig, "address required")
 	}
 	// fail-fast：Auth/Sink/Policy 缺失属严重误配。
 	if cfg.Auth == nil {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Auth (TokenValidator) is required")
+		return nil, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
 	}
 	if cfg.Sink == nil {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Sink (EventSink) is required")
+		return nil, core.NewError(core.ErrCodeConfig, "Sink (EventSink) is required")
 	}
-	if len(cfg.Policy.SupportedCapabilities) == 0 {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Policy.SupportedCapabilities is required")
+	if err := cfg.Policy.Validate(); err != nil {
+		return nil, core.WrapError(core.ErrCodeConfig, "Policy", err)
 	}
 	if cfg.TLSMode {
 		if cfg.CertFile == "" || cfg.KeyFile == "" {
-			return nil, core.NewError(core.NumConfig, core.CodeConfig, "TLS1.3 cert/key required for mbta-tls/1")
+			return nil, core.NewError(core.ErrCodeConfig, "TLS1.3 cert/key required for mbta-tls/1")
 		}
 	} else {
 		if cfg.SignCertFile == "" || cfg.SignKeyFile == "" || cfg.EncCertFile == "" || cfg.EncKeyFile == "" {
-			return nil, core.NewError(core.NumConfig, core.CodeConfig, "dual SM2 certificates (sign + enc, cert + key) required for mbta-ntls/1")
+			return nil, core.NewError(core.ErrCodeConfig, "dual SM2 certificates (sign + enc, cert + key) required for mbta-ntls/1")
 		}
 	}
 	if cfg.ServerID == "" {

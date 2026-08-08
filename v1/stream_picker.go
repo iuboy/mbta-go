@@ -4,6 +4,8 @@ import (
 	"io"
 	"sort"
 	"sync"
+
+	"github.com/iuboy/mbta-go/core"
 )
 
 // FNV-1a 32-bit 常量。手写以消除 hash/fnv 的对象分配（每帧一次的发送热路径）。
@@ -76,7 +78,7 @@ func (h *hashStreamPicker) Pick(tag, source string) (DataStream, error) {
 	defer h.mu.RUnlock()
 
 	if len(h.ring) == 0 {
-		return nil, ErrNoStreams
+		return nil, core.NewError(core.ErrCodeNoStreams, "no data streams available")
 	}
 
 	target := hashTagSource(tag, source)

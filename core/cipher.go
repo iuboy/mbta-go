@@ -25,7 +25,7 @@ const (
 //
 // 未知套件返回 -1（哨兵值，避免被当作合法长度）。调用方 MUST 检查返回值 < 0
 // 或在调用前校验套件合法性；直接 make([]byte, HMACKeyLen(cs)) 对未知套件会
-// panic（负长度），这是有意为之的 fail-fast——旧实现返回 0 会静默生成空密钥。
+// panic（负长度），这是有意为之的 fail-fast：返回 0 会静默生成空密钥。
 func HMACKeyLen(cs corepb.CipherSuite) int {
 	switch cs {
 	case corepb.CipherSuite_CIPHER_SUITE_INTL:

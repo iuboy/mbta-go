@@ -62,17 +62,17 @@ var knownTypes = map[uint8]bool{
 // ValidateFlags 校验 flags 的位组合合法性（core spec §3.1）。
 func ValidateFlags(flags byte) error {
 	if FlowClassOf(flags) == FlowClassOf(FlowClassReserved) {
-		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("reserved FlowClass: 0x%02x", flags&FlagFlowClassMask))
+		return NewError(ErrCodeProtocol, fmt.Sprintf("reserved FlowClass: 0x%02x", flags&FlagFlowClassMask))
 	}
 	if flags&FlagReserved4 != 0 {
-		return NewError(NumProtocol, CodeProtocol, "reserved flag bit set (0x10)")
+		return NewError(ErrCodeProtocol, "reserved flag bit set (0x10)")
 	}
 	cd := flags & FlagControlDataMask
 	if cd == 0 || cd == FlagControlDataMask {
-		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("Control/Data must be exclusive: 0x%02x", flags))
+		return NewError(ErrCodeProtocol, fmt.Sprintf("Control/Data must be exclusive: 0x%02x", flags))
 	}
 	if flags&FlagMoreFollows != 0 && flags&FlagCoalesced != 0 {
-		return NewError(NumProtocol, CodeProtocol, "MoreFollows and Coalesced are mutually exclusive")
+		return NewError(ErrCodeProtocol, "MoreFollows and Coalesced are mutually exclusive")
 	}
 	return nil
 }
@@ -95,16 +95,16 @@ func Write(w io.Writer, version byte, typ uint8, flags byte, channelID uint8, pa
 	// 写入端 version 白名单：与 Read 端对称校验，避免生成对端无法解析的帧。
 	// 当前支持 v1(0x01) 与计划中的 v2(0x02)。
 	if version != Version && version != 0x02 {
-		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("unsupported frame version 0x%02x", version))
+		return NewError(ErrCodeProtocol, fmt.Sprintf("unsupported frame version 0x%02x", version))
 	}
 	if err := ValidateFlags(flags); err != nil {
 		return err
 	}
 	if !knownTypes[typ] {
-		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("unknown frame type 0x%02x", typ))
+		return NewError(ErrCodeProtocol, fmt.Sprintf("unknown frame type 0x%02x", typ))
 	}
 	if uint32(len(payload)) > MaxPayloadSize {
-		return NewError(NumProtocol, CodeProtocol, fmt.Sprintf("payload exceeds max size (%d > %d)", len(payload), MaxPayloadSize))
+		return NewError(ErrCodeProtocol, fmt.Sprintf("payload exceeds max size (%d > %d)", len(payload), MaxPayloadSize))
 	}
 
 	var hdr [FixedHeaderSz]byte
@@ -118,14 +118,14 @@ func Write(w io.Writer, version byte, typ uint8, flags byte, channelID uint8, pa
 	lenN := putVarint(lenBuf[:], uint64(len(payload)))
 
 	if _, err := w.Write(hdr[:]); err != nil {
-		return WrapError(NumProtocol, CodeProtocol, "write header", err)
+		return WrapError(ErrCodeProtocol, "write header", err)
 	}
 	if _, err := w.Write(lenBuf[:lenN]); err != nil {
-		return WrapError(NumProtocol, CodeProtocol, "write length", err)
+		return WrapError(ErrCodeProtocol, "write length", err)
 	}
 	if len(payload) > 0 {
 		if _, err := w.Write(payload); err != nil {
-			return WrapError(NumProtocol, CodeProtocol, "write payload", err)
+			return WrapError(ErrCodeProtocol, "write payload", err)
 		}
 	}
 	return nil
@@ -142,14 +142,14 @@ func Write(w io.Writer, version byte, typ uint8, flags byte, channelID uint8, pa
 func Read(r io.Reader, lim Limits, supportedVersions ...byte) (Frame, error) {
 	var hdr [FixedHeaderSz]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return Frame{}, WrapError(NumProtocol, CodeProtocol, "read header", err)
+		return Frame{}, WrapError(ErrCodeProtocol, "read header", err)
 	}
 
 	if string(hdr[0:4]) != Magic {
-		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("invalid magic %q", hdr[0:4]))
+		return Frame{}, NewError(ErrCodeProtocol, fmt.Sprintf("invalid magic %q", hdr[0:4]))
 	}
 	if !versionAllowed(hdr[4], supportedVersions) {
-		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("unsupported version 0x%02x", hdr[4]))
+		return Frame{}, NewError(ErrCodeProtocol, fmt.Sprintf("unsupported version 0x%02x", hdr[4]))
 	}
 	flags := hdr[5]
 	if err := ValidateFlags(flags); err != nil {
@@ -158,15 +158,15 @@ func Read(r io.Reader, lim Limits, supportedVersions ...byte) (Frame, error) {
 	typ := hdr[6]
 	channelID := hdr[7]
 	if !knownTypes[typ] {
-		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("unknown frame type 0x%02x", typ))
+		return Frame{}, NewError(ErrCodeProtocol, fmt.Sprintf("unknown frame type 0x%02x", typ))
 	}
 
 	length, _, err := readVarint(r)
 	if err != nil {
-		return Frame{}, WrapError(NumProtocol, CodeProtocol, "read length", err)
+		return Frame{}, WrapError(ErrCodeProtocol, "read length", err)
 	}
 	if length > uint64(lim.MaxPayloadSize) {
-		return Frame{}, NewError(NumProtocol, CodeProtocol, fmt.Sprintf("payload too large (%d bytes)", length))
+		return Frame{}, NewError(ErrCodeProtocol, fmt.Sprintf("payload too large (%d bytes)", length))
 	}
 
 	payload := make([]byte, length)
@@ -178,7 +178,7 @@ func Read(r io.Reader, lim Limits, supportedVersions ...byte) (Frame, error) {
 			if remaining := int64(length) - int64(n); remaining > 0 {
 				_, _ = io.CopyN(io.Discard, r, remaining)
 			}
-			return Frame{}, WrapError(NumProtocol, CodeProtocol, "read payload", err)
+			return Frame{}, WrapError(ErrCodeProtocol, "read payload", err)
 		}
 	}
 

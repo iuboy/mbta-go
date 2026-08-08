@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // TestPressureStateString tests PressureState enum values.
@@ -51,9 +53,10 @@ func TestACKStatusString(t *testing.T) {
 // TestRouteResult tests RouteResult structure.
 func TestRouteResult(t *testing.T) {
 	t.Run("successful routing result", func(t *testing.T) {
+		eventsCount := testutil.RandInt(1, 1000)
 		result := &RouteResult{
 			Status:      ACKStatusDurable,
-			EventsCount: 100,
+			EventsCount: eventsCount,
 			QueueType:   "memory",
 			Pressure:    PressureNormal,
 			Error:       nil,
@@ -62,8 +65,8 @@ func TestRouteResult(t *testing.T) {
 		if result.Status != ACKStatusDurable {
 			t.Errorf("Status = %q, want 'durable'", result.Status)
 		}
-		if result.EventsCount != 100 {
-			t.Errorf("EventsCount = %d, want 100", result.EventsCount)
+		if result.EventsCount != eventsCount {
+			t.Errorf("EventsCount = %d, want %d", result.EventsCount, eventsCount)
 		}
 		if result.Pressure != PressureNormal {
 			t.Errorf("Pressure = %q, want 'normal'", result.Pressure)
@@ -77,7 +80,7 @@ func TestRouteResult(t *testing.T) {
 		err := errors.New("queue pressure critical")
 		result := &RouteResult{
 			Status:      ACKStatusThrottle,
-			EventsCount: 50,
+			EventsCount: testutil.RandInt(1, 500),
 			QueueType:   "memory",
 			Pressure:    PressureCritical,
 			Error:       err,
@@ -100,7 +103,7 @@ func TestEventSinkInterface(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	agentID := testAgentID
+	agentID := testutil.RandAgentID()
 	batch := &SignalBatch{
 		Signals: []*SignalRecord{{SignalType: "log"}},
 	}
@@ -127,7 +130,7 @@ func TestDurableEventSinkInterface(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	agentID := testAgentID
+	agentID := testutil.RandAgentID()
 	batch := &SignalBatch{
 		Signals: []*SignalRecord{{SignalType: "log"}},
 	}
@@ -150,35 +153,40 @@ func TestDurableEventSinkInterface(t *testing.T) {
 func TestInflight(t *testing.T) {
 	t.Run("Add inflight counters", func(t *testing.T) {
 		inf := &Inflight{}
+		events := testutil.RandInt(1, 100)
+		nbytes := int64(testutil.RandInt(1, 10000))
 
-		inf.Add(10, 1024)
+		inf.Add(events, nbytes)
 
 		if inf.batches.Load() != 1 {
 			t.Errorf("batches = %d, want 1", inf.batches.Load())
 		}
-		if inf.events.Load() != 10 {
-			t.Errorf("events = %d, want 10", inf.events.Load())
+		if inf.events.Load() != int64(events) {
+			t.Errorf("events = %d, want %d", inf.events.Load(), events)
 		}
-		if inf.bytes.Load() != 1024 {
-			t.Errorf("bytes = %d, want 1024", inf.bytes.Load())
+		if inf.bytes.Load() != nbytes {
+			t.Errorf("bytes = %d, want %d", inf.bytes.Load(), nbytes)
 		}
 	})
 
 	t.Run("Add multiple times", func(t *testing.T) {
 		inf := &Inflight{}
+		e1, b1 := testutil.RandInt(1, 100), int64(testutil.RandInt(1, 10000))
+		e2, b2 := testutil.RandInt(1, 100), int64(testutil.RandInt(1, 10000))
+		e3, b3 := testutil.RandInt(1, 100), int64(testutil.RandInt(1, 10000))
 
-		inf.Add(10, 1024)
-		inf.Add(20, 2048)
-		inf.Add(30, 4096)
+		inf.Add(e1, b1)
+		inf.Add(e2, b2)
+		inf.Add(e3, b3)
 
 		if inf.batches.Load() != 3 {
 			t.Errorf("batches = %d, want 3", inf.batches.Load())
 		}
-		if inf.events.Load() != 60 {
-			t.Errorf("events = %d, want 60", inf.events.Load())
+		if inf.events.Load() != int64(e1+e2+e3) {
+			t.Errorf("events = %d, want %d", inf.events.Load(), e1+e2+e3)
 		}
-		if inf.bytes.Load() != 7168 {
-			t.Errorf("bytes = %d, want 7168", inf.bytes.Load())
+		if inf.bytes.Load() != b1+b2+b3 {
+			t.Errorf("bytes = %d, want %d", inf.bytes.Load(), b1+b2+b3)
 		}
 	})
 
@@ -186,10 +194,11 @@ func TestInflight(t *testing.T) {
 		inf := &Inflight{}
 		done := make(chan bool)
 		concurrency := 10
+		events, nbytes := testutil.RandInt(1, 100), int64(testutil.RandInt(1, 10000))
 
 		for i := 0; i < concurrency; i++ {
 			go func() {
-				inf.Add(10, 1024)
+				inf.Add(events, nbytes)
 				done <- true
 			}()
 		}
@@ -202,8 +211,8 @@ func TestInflight(t *testing.T) {
 		if inf.batches.Load() != int64(concurrency) {
 			t.Errorf("batches = %d, want %d", inf.batches.Load(), concurrency)
 		}
-		if inf.events.Load() != int64(concurrency)*10 {
-			t.Errorf("events = %d, want %d", inf.events.Load(), concurrency*10)
+		if inf.events.Load() != int64(concurrency)*int64(events) {
+			t.Errorf("events = %d, want %d", inf.events.Load(), concurrency*events)
 		}
 	})
 }
@@ -213,20 +222,22 @@ func TestInflightRemove(t *testing.T) {
 	inf := &Inflight{}
 
 	// Add some inflight
-	inf.Add(100, 10240)
-	inf.Add(50, 5120)
+	e1, b1 := testutil.RandInt(10, 1000), int64(testutil.RandInt(100, 100000))
+	e2, b2 := testutil.RandInt(10, 1000), int64(testutil.RandInt(100, 100000))
+	inf.Add(e1, b1)
+	inf.Add(e2, b2)
 
 	// Mark one batch as done (remove)
-	inf.Remove(50, 5120)
+	inf.Remove(e2, b2)
 
 	if inf.batches.Load() != 1 {
 		t.Errorf("batches = %d, want 1", inf.batches.Load())
 	}
-	if inf.events.Load() != 100 {
-		t.Errorf("events = %d, want 100", inf.events.Load())
+	if inf.events.Load() != int64(e1) {
+		t.Errorf("events = %d, want %d", inf.events.Load(), e1)
 	}
-	if inf.bytes.Load() != 10240 {
-		t.Errorf("bytes = %d, want 10240", inf.bytes.Load())
+	if inf.bytes.Load() != b1 {
+		t.Errorf("bytes = %d, want %d", inf.bytes.Load(), b1)
 	}
 }
 
@@ -235,19 +246,20 @@ func TestInflightSnapshot(t *testing.T) {
 	inf := &Inflight{}
 
 	// Add inflight
-	inf.Add(100, 10240)
+	events, nbytes := testutil.RandInt(10, 1000), int64(testutil.RandInt(100, 100000))
+	inf.Add(events, nbytes)
 
 	// Get current values via Snapshot
-	batches, events, bytes := inf.Snapshot()
+	batches, gotEvents, gotBytes := inf.Snapshot()
 
 	if batches != 1 {
 		t.Errorf("Snapshot().batches = %d, want 1", batches)
 	}
-	if events != 100 {
-		t.Errorf("Snapshot().events = %d, want 100", events)
+	if gotEvents != events {
+		t.Errorf("Snapshot().events = %d, want %d", gotEvents, events)
 	}
-	if bytes != 10240 {
-		t.Errorf("Snapshot().bytes = %d, want 10240", bytes)
+	if gotBytes != nbytes {
+		t.Errorf("Snapshot().bytes = %d, want %d", gotBytes, nbytes)
 	}
 }
 
@@ -318,15 +330,6 @@ func TestWindow_CanSend_NilReceiver(t *testing.T) {
 	inf := &Inflight{}
 	if w.CanSend(inf, 1, 1) {
 		t.Error("nil Window CanSend should return false")
-	}
-}
-
-func TestWindow_Update_And_Snapshot(t *testing.T) {
-	w := NewWindow(10, 100, 1000)
-	w.Update(20, 200, 2000)
-	mb, me, mby := w.Snapshot()
-	if mb != 20 || me != 200 || mby != 2000 {
-		t.Errorf("Snapshot after Update = (%d,%d,%d), want (20,200,2000)", mb, me, mby)
 	}
 }
 

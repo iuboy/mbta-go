@@ -22,8 +22,23 @@
 
 | 文档 | 说明 |
 |------|------|
-| [performance-optimization.md](./performance-optimization.md) | Go 参考实现的性能与架构笔记。对象池/atomic/分片等属 Go 优化，不构成协议一致性要求。 |
-| [0-rtt-design.md](./0-rtt-design.md) | 0-RTT（early_data）实现状态：QUIC binding 支持，TCP binding 不支持。 |
+| [performance-optimization.md](./performance-optimization.md) | Go 参考实现的性能与架构笔记。对象池/ring buffer/分片等属 Go 优化，不构成协议一致性要求。 |
+
+### 客户端函数调用图（client-side）
+
+| 图 | 路径 |
+|----|------|
+| [client-call-graph.mmd](./diagrams/client-call-graph.mmd) | ① 连接建立 Connect（含 4 个后台 goroutine） |
+| [client-send-batch.mmd](./diagrams/client-send-batch.mmd) | ② SendBatch 核心数据路径（标注锁内外 + AckTracker） |
+| [client-control-close.mmd](./diagrams/client-control-close.mmd) | ③ ACK/NACK 处理 ④ 流控反馈 ⑤ 关闭 8 步 |
+
+### 服务端函数调用图（server-side）
+
+| 图 | 路径 |
+|----|------|
+| [server-startup-handshake.mmd](./diagrams/server-startup-handshake.mmd) | ① 启动 + 接受连接 ② 握手 HELLO/AUTH（含 0-RTT） |
+| [server-process-batch.mmd](./diagrams/server-process-batch.mmd) | ③ processBatch 核心数据路径（Inflight/Window 流控 + Sink 投递） |
+| [server-datagram-flow.mmd](./diagrams/server-datagram-flow.mmd) | ④ DATAGRAM 不可靠通道 ⑤ 流控背压下发 S→C |
 
 ## 阅读顺序
 
@@ -58,5 +73,5 @@
 | `internal/conformance` | ✅ codec 协商 + algo_mismatch + handler + early_data（FakeTransport，传输无关） | ✅ |
 
 ### 待后续
-- 持久化 spool（跨进程崩溃的 at-least-once；当前为内存 pendingAcks，见 [performance-optimization.md](./performance-optimization.md) §七）
+- 持久化 spool（跨进程崩溃的 at-least-once；当前为内存 AckTracker，见 [performance-optimization.md](./performance-optimization.md) §八）
 - mbta-quic-binding.md（QUIC binding 规范文档）

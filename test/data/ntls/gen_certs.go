@@ -9,7 +9,7 @@
 //
 // 满足 pollux-go ValidateTLCPCertificate（dualcert.go）与 gotlcp 握手校验。
 //
-// 运行：go run testdata/ntls/gen_certs.go
+// 运行：go run test/data/ntls/gen_certs.go
 package main
 
 import (

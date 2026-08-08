@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // r2 envelope 测试基线：corepb.SecureEnvelope + 原生 bytes + canonical HMAC +
@@ -12,8 +15,8 @@ import (
 
 func makeBuildParams(cs corepb.CipherSuite, comp corepb.Compression, hmacKey, aeadKey []byte, payload []byte) BuildParams {
 	return BuildParams{
-		SessionID:    []byte("sess-1"),
-		KeyID:        "key-1",
+		SessionID:    []byte(testutil.RandString(8)),
+		KeyID:        "key-" + testutil.RandString(6),
 		Seq:          1,
 		ChunkID:      NewChunkID(),
 		Codec:        corepb.Codec_CODEC_PROTO,
@@ -30,7 +33,7 @@ func makeBuildParams(cs corepb.CipherSuite, comp corepb.Compression, hmacKey, ae
 func TestBuildOpenRoundTrip_Intl_AESGCM(t *testing.T) {
 	hmacKey := make([]byte, HMACKeyLenIntl)
 	aeadKey := make([]byte, AEADKeyLenIntl)
-	payload := []byte("hello intl envelope")
+	payload := []byte(testutil.RandPayloadString(24))
 
 	env, err := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, payload))
 	if err != nil {
@@ -63,7 +66,7 @@ func TestBuildOpenRoundTrip_Intl_AESGCM(t *testing.T) {
 func TestBuildOpenRoundTrip_GM_SM4GCM(t *testing.T) {
 	hmacKey := make([]byte, HMACKeyLenGM)
 	aeadKey := make([]byte, AEADKeyLenGM)
-	payload := []byte("hello gm envelope 国密")
+	payload := []byte(testutil.RandPayloadString(24))
 
 	env, err := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_GM, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, payload))
 	if err != nil {
@@ -121,7 +124,7 @@ func TestBuildOpen_Compressions(t *testing.T) {
 func TestVerifyMAC_WrongKey(t *testing.T) {
 	hmacKey := make([]byte, HMACKeyLenIntl)
 	aeadKey := make([]byte, AEADKeyLenIntl)
-	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte("x")))
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte(testutil.RandPayloadString(4))))
 
 	wrong := make([]byte, HMACKeyLenIntl)
 	wrong[0] = 1
@@ -137,7 +140,7 @@ func TestVerifyMAC_WrongKey(t *testing.T) {
 func TestVerifyMAC_TamperedPayload(t *testing.T) {
 	hmacKey := make([]byte, HMACKeyLenIntl)
 	aeadKey := make([]byte, AEADKeyLenIntl)
-	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte("plaintext")))
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte(testutil.RandPayloadString(16))))
 
 	if len(env.Payload) > 0 {
 		env.Payload[0] ^= 0xFF
@@ -161,7 +164,7 @@ func TestBuild_RejectsUnspecifiedCipherSuite(t *testing.T) {
 func TestBuild_OpenDecryptionFailure(t *testing.T) {
 	hmacKey := make([]byte, HMACKeyLenIntl)
 	aeadKey := make([]byte, AEADKeyLenIntl)
-	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte("secret")))
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte(testutil.RandPayloadString(16))))
 
 	wrong := make([]byte, AEADKeyLenIntl)
 	wrong[0] = 1
@@ -200,7 +203,7 @@ func TestBuild_LargeAndEmptyPayload(t *testing.T) {
 func TestCanonicalMAC_Deterministic(t *testing.T) {
 	hmacKey := make([]byte, HMACKeyLenIntl)
 	aeadKey := make([]byte, AEADKeyLenIntl)
-	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte("deterministic")))
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_NONE, hmacKey, aeadKey, []byte(testutil.RandPayloadString(16))))
 
 	m1, _ := canonicalMAC(env.CipherSuite, hmacKey, env)
 	m2, _ := canonicalMAC(env.CipherSuite, hmacKey, env)
@@ -215,9 +218,9 @@ func TestCanonicalMAC_Deterministic(t *testing.T) {
 func TestEncodeDecodeEnvelopeRoundTrip(t *testing.T) {
 	hmacKey := make([]byte, HMACKeyLenIntl)
 	aeadKey := make([]byte, AEADKeyLenIntl)
-	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_GZIP, hmacKey, aeadKey, []byte("wire trip")))
+	env, _ := Build(makeBuildParams(corepb.CipherSuite_CIPHER_SUITE_INTL, corepb.Compression_COMPRESSION_GZIP, hmacKey, aeadKey, []byte(testutil.RandPayloadString(16))))
 
-	wire, err := EncodeEnvelope(env)
+	wire, err := proto.Marshal(env)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}

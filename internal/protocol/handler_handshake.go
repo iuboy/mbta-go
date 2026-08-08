@@ -17,11 +17,11 @@ import (
 func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	var msg corepb.HelloMessage
 	if err := core.Decode(payload, &msg); err != nil {
-		return core.WrapError(core.NumProtocol, core.CodeProtocol, "decode hello", err)
+		return core.WrapError(core.ErrCodeProtocol, "decode hello", err)
 	}
 	if err := core.ValidateHello(&msg); err != nil {
 		slog.Debug("HELLO validation failed", "error", err)
-		h.sendError(ctx, core.CodeDecodeFailed, "invalid hello message", true)
+		h.sendError(ctx, core.ErrCodeDecodeFailed, "invalid hello message", true)
 		return err
 	}
 
@@ -31,7 +31,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	nonce, err := randBytes(challengeNonceLen)
 	if err != nil {
 		// 密码学随机源不可用：中断握手，拒绝该连接（不回退弱随机）。
-		return core.WrapError(core.NumAuth, core.CodeAuth, "generate challenge nonce", err)
+		return core.WrapError(core.ErrCodeAuth, "generate challenge nonce", err)
 	}
 	h.setChallengeNonce(nonce)
 
@@ -59,17 +59,17 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	}
 
 	// 先 Negotiate 成功再 Transition：避免协商失败时状态机已前移到 HelloReceived
-	// 却无法回退（旧实现先 Transition 再 Negotiate，失败后状态残留干扰 cleanup/metrics）。
+	// 却无法回退（先 Transition 再 Negotiate，失败后状态残留干扰 cleanup/metrics）。
 	result, err := core.Negotiate(msg.GetCapabilities(), h.config.Policy)
 	if err != nil {
 		slog.Debug("negotiation failed", "error", err)
-		h.sendError(ctx, core.CodeUnsupportedMessage, "capability negotiation failed", true)
+		h.sendError(ctx, core.ErrCodeUnsupportedMessage, "capability negotiation failed", true)
 		return err
 	}
 	h.negotiated.Store(&result)
 
 	if err := h.sm.Transition(core.ServerStateHelloReceived); err != nil {
-		return core.WrapError(core.NumSession, core.CodeSession, "transition HELLO_RECEIVED", err)
+		return core.WrapError(core.ErrCodeSession, "transition HELLO_RECEIVED", err)
 	}
 
 	ack := &corepb.HelloAckMessage{
@@ -93,14 +93,14 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	}
 	ackPayload, err := core.Encode(ack)
 	if err != nil {
-		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal hello_ack", err)
+		return core.WrapError(core.ErrCodeProtocol, "marshal hello_ack", err)
 	}
 	if err := SendControlFrame(ctx, h.tr, core.TypeHelloAck, core.FlagControl, ackPayload); err != nil {
-		return core.WrapError(core.NumStream, core.CodeStream, "write hello_ack", err)
+		return core.WrapError(core.ErrCodeStream, "write hello_ack", err)
 	}
 
 	if err := h.sm.Transition(core.ServerStateAuthWait); err != nil {
-		return core.WrapError(core.NumSession, core.CodeSession, "transition AUTH_WAIT", err)
+		return core.WrapError(core.ErrCodeSession, "transition AUTH_WAIT", err)
 	}
 	slog.Info("hello processed", "agent", core.SanitizeForLog(h.getAgentID()), "session", string(h.getSessionID()))
 	return nil
@@ -117,39 +117,39 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	h.handshakeMu.Lock()
 	if h.authAttempts >= maxAuthAttempts {
 		h.handshakeMu.Unlock()
-		h.sendAuthFail(ctx, "too_many_attempts", "authentication retry limit exceeded", false)
-		return core.NewError(core.NumAuth, core.CodeAuth, "too many auth attempts")
+		h.sendAuthFail(ctx, core.ErrCodeTooManyAttempts, "authentication retry limit exceeded", false)
+		return core.NewError(core.ErrCodeAuth, "too many auth attempts")
 	}
 	h.authAttempts++
 	h.handshakeMu.Unlock()
 
 	var msg corepb.AuthMessage
 	if err := core.Decode(payload, &msg); err != nil {
-		return core.WrapError(core.NumProtocol, core.CodeProtocol, "decode auth", err)
+		return core.WrapError(core.ErrCodeProtocol, "decode auth", err)
 	}
 	if err := core.ValidateAuth(&msg); err != nil {
 		slog.Warn("auth validation failed", "session", string(h.getSessionID()), "error", err)
-		h.failAuth(ctx, "invalid_auth", "authentication failed")
+		h.failAuth(ctx, core.ErrCodeInvalidAuth, "authentication failed")
 		return nil // 可重试：连接保持打开
 	}
 	if msg.GetAgentId() != h.getAgentID() {
-		h.failAuth(ctx, "invalid_auth", "authentication failed")
+		h.failAuth(ctx, core.ErrCodeInvalidAuth, "authentication failed")
 		return nil
 	}
 	if !bytes.Equal(msg.GetSessionId(), h.getSessionID()) {
-		h.failAuth(ctx, "invalid_auth", "authentication failed")
+		h.failAuth(ctx, core.ErrCodeInvalidAuth, "authentication failed")
 		return nil
 	}
 
 	token, _, err := h.resolveAuthToken(&msg)
 	if err != nil {
-		h.failAuth(ctx, "invalid_token", "token resolution failed")
+		h.failAuth(ctx, core.ErrCodeInvalidToken, "token resolution failed")
 		return nil //nolint:nilerr // 可重试：已发 AUTH_FAIL，连接保持打开
 	}
 	// token 必填校验：resolveAuthToken 返回空 token 说明既非 tokenless（无 TokenResolver）
 	// 也非 legacy 明文 token（客户端未传 token）。空 token 不能进行 challenge-response。
 	if token == "" {
-		h.failAuth(ctx, "invalid_token", "token is required")
+		h.failAuth(ctx, core.ErrCodeInvalidToken, "token is required")
 		return nil //nolint:nilerr // 可重试
 	}
 
@@ -160,20 +160,20 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 
 	if h.config.Auth != nil {
 		if _, err := h.config.Auth.Validate(token); err != nil {
-			h.failAuth(ctx, "invalid_token", "token validation failed")
+			h.failAuth(ctx, core.ErrCodeInvalidToken, "token validation failed")
 			h.config.Metrics.AuthFailure().Inc()
 			return nil //nolint:nilerr // 可重试
 		}
 	}
 
 	if negotiated == nil {
-		h.sendAuthFail(ctx, "internal_error", "no negotiation result", true)
-		return core.NewError(core.NumConfig, core.CodeConfig, "missing negotiation result")
+		h.sendAuthFail(ctx, core.ErrCodeInternalError, "no negotiation result", true)
+		return core.NewError(core.ErrCodeConfig, "missing negotiation result")
 	}
 	keys, err := core.GenerateSessionKeys(negotiated.CipherSuite)
 	if err != nil {
-		h.sendAuthFail(ctx, "internal_error", "key generation failed", true)
-		return core.WrapError(core.NumConfig, core.CodeConfig, "session key generation", err)
+		h.sendAuthFail(ctx, core.ErrCodeInternalError, "key generation failed", true)
+		return core.WrapError(core.ErrCodeConfig, "session key generation", err)
 	}
 	h.keys.Store(keys)
 	h.expiresAt.Store(time.Now().Add(core.DefaultSessionTTL).Unix())
@@ -197,8 +197,8 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	if h.config.SessionStore != nil {
 		ticket, err := core.NewTicket()
 		if err != nil {
-			h.sendAuthFail(ctx, "internal_error", "ticket generation failed", true)
-			return core.WrapError(core.NumAuth, core.CodeAuth, "generate session ticket", err)
+			h.sendAuthFail(ctx, core.ErrCodeInternalError, "ticket generation failed", true)
+			return core.WrapError(core.ErrCodeAuth, "generate session ticket", err)
 		}
 		if err := h.config.SessionStore.Put(ticket, &core.SessionState{
 			Keys:    keys,
@@ -214,14 +214,14 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 	}
 	okPayload, err := core.Encode(okMsg)
 	if err != nil {
-		return core.WrapError(core.NumProtocol, core.CodeProtocol, "marshal auth_ok", err)
+		return core.WrapError(core.ErrCodeProtocol, "marshal auth_ok", err)
 	}
 	if err := SendControlFrame(ctx, h.tr, core.TypeAuthOK, core.FlagControl, okPayload); err != nil {
-		return core.WrapError(core.NumStream, core.CodeStream, "write auth_ok", err)
+		return core.WrapError(core.ErrCodeStream, "write auth_ok", err)
 	}
 
 	if err := h.sm.Transition(core.ServerStateReady); err != nil {
-		return core.WrapError(core.NumSession, core.CodeSession, "transition READY", err)
+		return core.WrapError(core.ErrCodeSession, "transition READY", err)
 	}
 	slog.Info("auth succeeded", "agent", core.SanitizeForLog(agentID), "session", string(sessionID), "key_id", keys.KeyID)
 
@@ -266,14 +266,14 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 				// 使 binding/server.go 的 errors.Is 判定为正常 HA 流程（Debug 级日志），
 				// 而非被当作普通 handler error 误记为 ERROR 级。
 				slog.Warn("send redirect frame failed", "error", err, "agent", core.SanitizeForLog(agentID))
-				return core.ErrRedirected
+				return core.NewError(core.ErrCodeRedirected, "redirect frame send failed")
 			}
 			slog.Info("redirected client to leader", "agent", core.SanitizeForLog(agentID), "leader", info.LeaderAddr)
-			return core.ErrRedirected
+			return core.NewError(core.ErrCodeRedirected, "client redirected to leader")
 		}
 	}
 	// AuthSuccess 在 redirect 检查之后递增：redirect 的会话由 leader 处理，不应在
-	// follower 上计入成功——否则指标虚高（旧实现将 Inc() 放在 redirect 之前）。
+	// follower 上计入成功——否则指标虚高（Inc() 放在 redirect 之前会虚高）。
 	h.config.Metrics.AuthSuccess().Inc()
 	return nil
 }
@@ -286,14 +286,14 @@ func (h *CoreHandler) verifyChallenge(ctx context.Context, msg *corepb.AuthMessa
 	challengeNonce := h.getChallengeNonce()
 	if len(challengeNonce) == 0 || negotiated == nil {
 		slog.Warn("challenge nonce or negotiation result missing", "session", string(h.getSessionID()))
-		h.failAuth(ctx, "internal_error", "challenge nonce or negotiation result missing")
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "missing challenge nonce or negotiation result")
+		h.failAuth(ctx, core.ErrCodeInternalError, "challenge nonce or negotiation result missing")
+		return nil, core.NewError(core.ErrCodeConfig, "missing challenge nonce or negotiation result")
 	}
 	expected := core.ComputeChallengeResponse(token, string(challengeNonce), negotiated.CipherSuite)
 	if !hmac.Equal(msg.GetAuthNonce(), expected) {
 		slog.Warn("auth challenge mismatch", "session", string(h.getSessionID()))
-		h.failAuth(ctx, "challenge_mismatch", "auth_nonce HMAC verification failed")
-		return nil, core.NewError(core.NumAuth, core.CodeAuth, "challenge nonce mismatch")
+		h.failAuth(ctx, core.ErrCodeChallengeMismatch, "auth_nonce HMAC verification failed")
+		return nil, core.NewError(core.ErrCodeAuth, "challenge nonce mismatch")
 	}
 	return negotiated, nil
 }
@@ -308,7 +308,7 @@ func (h *CoreHandler) resolveAuthToken(msg *corepb.AuthMessage) (token string, t
 		t, rerr := resolver.ResolveToken(msg.GetAgentId())
 		if rerr != nil {
 			// Resolver 失败必须作为认证错误传播，否则服务端会静默降级到明文 token，形成降级攻击面。
-			return "", false, core.WrapError(core.NumAuth, core.CodeAuth, "resolve token", rerr)
+			return "", false, core.WrapError(core.ErrCodeAuth, "resolve token", rerr)
 		}
 		return t, true, nil
 	}

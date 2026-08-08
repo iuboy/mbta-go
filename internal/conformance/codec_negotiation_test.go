@@ -9,6 +9,7 @@ import (
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/protocol"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // countingSink 统计收到的 signal batch 数与事件数，用于验证非 proto codec 的解码成功。
@@ -25,12 +26,12 @@ func (s *countingSink) OnPressure(agentID string) core.PressureState { return co
 // TestCoreHandler_CodecNegotiation_CBOR 验证 HELLO 协商 codec_cbor 后，
 // 客户端发 CBOR 编码 batch，服务端能解码并路由到 sink（正向非 proto codec 端到端）。
 func TestCoreHandler_CodecNegotiation_CBOR(t *testing.T) {
-	testCodecNegotiation(t, "codec_cbor", corepb.Codec_CODEC_CBOR)
+	testCodecNegotiation(t, core.CapCodecCbor, corepb.Codec_CODEC_CBOR)
 }
 
 // TestCoreHandler_CodecNegotiation_JSON 验证 codec_json 的正向端到端路径。
 func TestCoreHandler_CodecNegotiation_JSON(t *testing.T) {
-	testCodecNegotiation(t, "codec_json", corepb.Codec_CODEC_JSON)
+	testCodecNegotiation(t, core.CapCodecJson, corepb.Codec_CODEC_JSON)
 }
 
 func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec) {
@@ -41,15 +42,16 @@ func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec)
 	// sink，这里用一个独立实现：先握手（sink=nil），再单独构造带 sink 的 handler 走 batch。
 	// 更简洁的方式：扩展 doHandshakeCodec 接受 sink。为保持 helper 通用，这里直接内联。
 	tr := NewFakeTransport(false)
+	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_proto", "codec_cbor", "codec_json", "cs_intl"},
+		SupportedCapabilities: []string{core.CapCodecProto, core.CapCodecCbor, core.CapCodecJson, core.CapCSIntl},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
-	auth := core.NewStaticTokenValidator(map[string]string{"secret-token": "agent-1"})
+	auth := core.NewStaticTokenValidator(map[string]string{tok: agentID})
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-		Auth: auth, Policy: policy, Sink: sink, ServerID: "srv-1",
+		Auth: auth, Policy: policy, Sink: sink, ServerID: "srv-" + testutil.RandString(4),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -57,9 +59,9 @@ func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec)
 
 	// HELLO
 	hello := &corepb.HelloMessage{
-		AgentId:      "agent-1",
+		AgentId:      agentID,
 		FrameVersion: 1,
-		Capabilities: []string{codecCap, "cs_intl"},
+		Capabilities: []string{codecCap, core.CapCSIntl},
 	}
 	hp, err := core.Encode(hello)
 	if err != nil {
@@ -77,9 +79,9 @@ func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec)
 	cs := ack.GetCipherSuite()
 
 	// AUTH
-	authNonce := core.ComputeChallengeResponse("secret-token", string(ack.GetChallengeNonce()), cs)
+	authNonce := core.ComputeChallengeResponse(tok, string(ack.GetChallengeNonce()), cs)
 	authMsg := &corepb.AuthMessage{
-		Token: "secret-token", AgentId: "agent-1",
+		Token: tok, AgentId: agentID,
 		SessionId: ack.GetSessionId(), AuthNonce: authNonce,
 	}
 	ap, _ := core.Encode(authMsg)
@@ -96,8 +98,8 @@ func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec)
 	chunkID := core.NewChunkID()
 	sb := &core.SignalBatch{
 		Signals: []*core.SignalRecord{
-			{SignalType: "log", Body: "cbor/json codec test", EventID: "e1"},
-			{SignalType: "log", Body: "second event", EventID: "e2"},
+			{SignalType: "log", Body: testutil.RandPayloadString(12), EventID: testutil.RandEventID()},
+			{SignalType: "log", Body: testutil.RandPayloadString(10), EventID: testutil.RandEventID()},
 		},
 	}
 	batchBytes, err := core.MarshalSignalBatchCodec(wantCodec, sb)
@@ -141,28 +143,27 @@ func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec)
 	}
 }
 
-// TestCoreHandler_CodecNegotiation_DefaultProtoStillWorks 验证客户端 offer 全部三种 codec
-// 时，服务端按优先级选 proto（回归保护：确保引入 cbor/json 不破坏 proto baseline 默认）。
+// TestCoreHandler_CodecNegotiation_DefaultProtoStillWorks 验证客户端 offer 全部三种 codec 时，服务端按优先级选 proto。
 func TestCoreHandler_CodecNegotiation_DefaultProtoStillWorks(t *testing.T) {
 	tr := NewFakeTransport(false)
 	policy := core.Policy{
-		SupportedCapabilities: []string{"codec_proto", "codec_cbor", "codec_json", "cs_intl"},
+		SupportedCapabilities: []string{core.CapCodecProto, core.CapCodecCbor, core.CapCodecJson, core.CapCSIntl},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
 	}
-	auth := core.NewStaticTokenValidator(map[string]string{"secret-token": "agent-1"})
+	auth := core.NewStaticTokenValidator(map[string]string{testutil.RandToken(): testutil.RandAgentID()})
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-		Auth: auth, Policy: policy, Sink: nil, ServerID: "srv-1",
+		Auth: auth, Policy: policy, Sink: nil, ServerID: "srv-" + testutil.RandString(4),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() { _ = h.Handle(ctx) }()
 
 	hello := &corepb.HelloMessage{
-		AgentId: "agent-1", FrameVersion: 1,
+		AgentId: testutil.RandAgentID(), FrameVersion: 1,
 		// 客户端 offer 全部三种 codec，服务端应优先选 proto。
-		Capabilities: []string{"codec_proto", "codec_cbor", "codec_json", "cs_intl"},
+		Capabilities: []string{core.CapCodecProto, core.CapCodecCbor, core.CapCodecJson, core.CapCSIntl},
 	}
 	hp, _ := core.Encode(hello)
 	tr.ControlIn <- MakeFrame(core.TypeHello, core.FlagControl, core.ChannelControl, hp)

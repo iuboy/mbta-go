@@ -11,7 +11,7 @@ import (
 type PressureState string
 
 const (
-	PressureNormal   PressureState = "normal" //
+	PressureNormal   PressureState = "normal"
 	PressureDegraded PressureState = "degraded"
 	PressureCritical PressureState = "critical"
 )
@@ -96,8 +96,8 @@ func (inf *Inflight) Add(events int, bytes int64) {
 // Remove decreases inflight counters after receiving a response.
 //
 // 仅对实际出现负值的计数器执行 clampNonNeg，避免在「某个计数器 underflow」时
-// 把并发 Add 写入的合法正值计数器一并清零（旧实现对三个计数器无条件 clamp，
-// 导致 inflight 持续低估，Window.CanSend 允许超额发送）。
+// 把并发 Add 写入的合法正值计数器一并清零（对三个计数器无条件 clamp 会导致
+// inflight 持续低估，Window.CanSend 允许超额发送）。
 func (inf *Inflight) Remove(events int, bytes int64) {
 	nb := inf.batches.Add(-1)
 	ne := inf.events.Add(int64(-events))
@@ -134,14 +134,6 @@ func (inf *Inflight) Snapshot() (batches int, events int, bytes int64) {
 	return int(inf.batches.Load()), int(inf.events.Load()), inf.bytes.Load()
 }
 
-// Reset clears all inflight counters. Called on disconnect or reconnect
-// to prevent stale counters from permanently blocking the window.
-func (inf *Inflight) Reset() {
-	inf.batches.Store(0)
-	inf.events.Store(0)
-	inf.bytes.Store(0)
-}
-
 // Window represents the server's current flow-control window.
 // 三个上限用 atomic 存储，CanSend/Snapshot 无锁读，消除 Window↔Inflight 双锁的 TOCTOU 窗口。
 type Window struct {
@@ -168,9 +160,7 @@ func (w *Window) Update(maxBatches int, maxEvents int, maxBytes int64) {
 
 // CanSend checks whether a batch of the given size fits in the window.
 // A max of 0 means that dimension is paused (no sending allowed).
-//
-// 全程原子读，无锁。check 与随后 inflight.Add 之间仍非原子——服务端多流并发下可能
-// 轻微 over-commit，由 routeAndACK 的 window_exceeded 回退兜底；客户端由 sendMu 保证原子性。
+// 原子读无锁；check 与 inflight.Add 之间非原子，服务端 over-commit 由 routeAndACK 回退处理，客户端由 sendMu 保证原子性。
 func (w *Window) CanSend(inf *Inflight, events int, bytes int64) bool {
 	if w == nil || inf == nil {
 		return false
@@ -189,11 +179,6 @@ func (w *Window) CanSend(inf *Inflight, events int, bytes int64) bool {
 	return (ib+1 <= int(winBatches)) &&
 		(ie+events <= int(winEvents)) &&
 		(iby+bytes <= winBytes)
-}
-
-// Snapshot returns current window limits.
-func (w *Window) Snapshot() (maxBatches int, maxEvents int, maxBytes int64) {
-	return int(w.maxBatches.Load()), int(w.maxEvents.Load()), w.maxBytes.Load()
 }
 
 // MaxThrottleDelay 是客户端接受的最大限流延迟（5分钟）。

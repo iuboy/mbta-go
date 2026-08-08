@@ -20,7 +20,7 @@ func (jsonCodec) Codec() corepb.Codec { return corepb.Codec_CODEC_JSON }
 func (jsonCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 	out, err := json.Marshal(sb)
 	if err != nil {
-		return nil, WrapError(NumValidation, CodeValidation, "marshal signal batch (json)", err)
+		return nil, WrapError(ErrCodeValidation, "marshal signal batch (json)", err)
 	}
 	return out, nil
 }
@@ -28,7 +28,7 @@ func (jsonCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 func (jsonCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	var sb SignalBatch
 	if err := json.Unmarshal(data, &sb); err != nil {
-		return nil, WrapError(NumValidation, CodeValidation, "unmarshal signal batch (json)", err)
+		return nil, WrapError(ErrCodeValidation, "unmarshal signal batch (json)", err)
 	}
 	return &sb, nil
 }

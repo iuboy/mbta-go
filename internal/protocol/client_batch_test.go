@@ -7,6 +7,7 @@ import (
 	corepb "github.com/iuboy/mbta-go/corepb"
 
 	"github.com/iuboy/mbta-go/core"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // noopClientTransport 满足 ClientTransport 接口；本测试组的门控/校验/白盒路径
@@ -24,8 +25,8 @@ func (noopClientTransport) CloseConn() error { return nil }
 // validBatchTC 返回一个合法的 batch 级 TraceContext（32 hex trace_id / 16 hex span_id）。
 func validBatchTC() *core.TraceContext {
 	return &core.TraceContext{
-		TraceId:    "0123456789abcdef0123456789abcdef",
-		SpanId:     "0123456789abcdef",
+		TraceId:    testutil.RandTraceID(),
+		SpanId:     testutil.RandSpanID(),
 		TraceFlags: 0x01,
 	}
 }
@@ -60,16 +61,16 @@ func newTraceTestClient(negotiatedCaps []string) *CoreClient {
 // TestSendBatch_TraceContextCapabilityGate 验证：携带 TraceContext 但未协商
 // w3c_trace_context → 显式 CodeBatch 错误（不静默丢弃）。
 func TestSendBatch_TraceContextCapabilityGate(t *testing.T) {
-	c := newTraceTestClient([]string{"codec_proto"}) // 不含 w3c_trace_context
-	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "x"}}}
+	c := newTraceTestClient([]string{core.CapCodecProto}) // 不含 w3c_trace_context
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: testutil.RandPayloadString(4)}}}
 
-	_, err := c.SendBatch(context.Background(), sb, "tag", "src",
+	_, err := c.SendBatch(context.Background(), sb, testutil.RandString(4), testutil.RandString(4),
 		core.WithTraceContext(validBatchTC()))
 	if err == nil {
 		t.Fatal("expected capability-gate error, got nil")
 	}
 	mbe, ok := err.(*core.Error)
-	if !ok || mbe.Code != core.CodeBatch {
+	if !ok || mbe.Code != core.ErrCodeBatch.Code {
 		t.Errorf("expected CodeBatch error, got %v", err)
 	}
 }
@@ -78,18 +79,18 @@ func TestSendBatch_TraceContextCapabilityGate(t *testing.T) {
 // CodeValidation 错误（门控通过后前置校验拦截，不浪费往返）。
 func TestSendBatch_TraceContextValidation(t *testing.T) {
 	c := newTraceTestClient([]string{core.CapW3CTraceContext})
-	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "x"}}}
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: testutil.RandPayloadString(4)}}}
 
 	// 全零 trace_id 非法。
 	bad := validBatchTC()
 	bad.TraceId = "00000000000000000000000000000000"
-	_, err := c.SendBatch(context.Background(), sb, "tag", "src",
+	_, err := c.SendBatch(context.Background(), sb, testutil.RandString(4), testutil.RandString(4),
 		core.WithTraceContext(bad))
 	if err == nil {
 		t.Fatal("expected validation error for all-zero trace_id, got nil")
 	}
 	mbe, ok := err.(*core.Error)
-	if !ok || mbe.Code != core.CodeValidation {
+	if !ok || mbe.Code != core.ErrCodeValidation.Code {
 		t.Errorf("expected CodeValidation error, got %v", err)
 	}
 }
@@ -98,14 +99,14 @@ func TestSendBatch_TraceContextValidation(t *testing.T) {
 // 状态相关错误而非 capability 错误），证明变参对旧调用零影响。
 func TestSendBatch_NoOpts_NoGate(t *testing.T) {
 	c := newTraceTestClient(nil) // negotiated==nil
-	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "x"}}}
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: testutil.RandPayloadString(4)}}}
 
-	_, err := c.SendBatch(context.Background(), sb, "tag", "src")
+	_, err := c.SendBatch(context.Background(), sb, testutil.RandString(4), testutil.RandString(4))
 	if err == nil {
 		// 走到状态检查会因非 Ready 报错；无论哪种，都不应是 capability 门控错误。
 		return
 	}
-	if mbe, ok := err.(*core.Error); ok && mbe.Code == core.CodeBatch {
+	if mbe, ok := err.(*core.Error); ok && mbe.Code == core.ErrCodeBatch.Code {
 		t.Errorf("no-opts call must not hit capability gate, got CodeBatch: %v", err)
 	}
 }
@@ -114,11 +115,12 @@ func TestSendBatch_NoOpts_NoGate(t *testing.T) {
 // BatchMessage proto（field 7）；nil 时不设（wire 与旧版一致）。
 func TestReserveInflight_TraceContextPassthrough(t *testing.T) {
 	c := newTraceTestClient(nil)
-	batchJSON := []byte("any-payload")
+	batchJSON := []byte(testutil.RandPayloadString(16))
 
 	// 非 nil → BatchMessage.TraceContext 携带其值。
 	tc := validBatchTC()
-	_, _, payload, err := c.reserveInflight("tag", "src", batchJSON, 1, tc)
+	tag, src := testutil.RandString(4), testutil.RandString(4)
+	_, _, payload, err := c.reserveInflight(tag, src, batchJSON, 1, tc)
 	if err != nil {
 		t.Fatalf("reserveInflight with tc failed: %v", err)
 	}
@@ -134,7 +136,7 @@ func TestReserveInflight_TraceContextPassthrough(t *testing.T) {
 	}
 
 	// nil → TraceContext 不设（与旧版 wire 一致）。
-	_, _, payloadNil, err := c.reserveInflight("tag", "src", batchJSON, 1, nil)
+	_, _, payloadNil, err := c.reserveInflight(tag, src, batchJSON, 1, nil)
 	if err != nil {
 		t.Fatalf("reserveInflight without tc failed: %v", err)
 	}

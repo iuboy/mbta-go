@@ -3,6 +3,8 @@ package core
 import (
 	"strings"
 	"testing"
+
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 func TestHasControlChars(t *testing.T) {
@@ -42,9 +44,11 @@ func TestValidateTextField(t *testing.T) {
 
 func TestValidateBatchTraceContext(t *testing.T) {
 	// 合法 W3C trace 上下文：trace_id(32 hex)/span_id(16 hex) 非空非全零，parent 可空。
+	validTraceID := testutil.RandTraceID()
+	validSpanID := testutil.RandSpanID()
 	valid := &TraceContext{
-		TraceId:    "0123456789abcdef0123456789abcdef",
-		SpanId:     "0123456789abcdef",
+		TraceId:    validTraceID,
+		SpanId:     validSpanID,
 		TraceFlags: 0x01,
 	}
 	if err := ValidateBatchTraceContext(valid); err != nil {
@@ -55,33 +59,33 @@ func TestValidateBatchTraceContext(t *testing.T) {
 		t.Errorf("nil trace context rejected: %v", err)
 	}
 	// parent_span_id 可空，也可填合法值。
-	valid.ParentSpanId = "fedcba9876543210"
+	valid.ParentSpanId = testutil.RandSpanID()
 	if err := ValidateBatchTraceContext(valid); err != nil {
 		t.Errorf("valid parent_span_id rejected: %v", err)
 	}
 
 	// batch 级语义：trace_id / span_id 必须非空（与 signal 级「空=不参与」不同）。
-	if err := ValidateBatchTraceContext(&TraceContext{SpanId: "0123456789abcdef"}); err == nil {
+	if err := ValidateBatchTraceContext(&TraceContext{SpanId: validSpanID}); err == nil {
 		t.Error("empty trace_id accepted")
 	}
-	if err := ValidateBatchTraceContext(&TraceContext{TraceId: "0123456789abcdef0123456789abcdef"}); err == nil {
+	if err := ValidateBatchTraceContext(&TraceContext{TraceId: validTraceID}); err == nil {
 		t.Error("empty span_id accepted")
 	}
 	// 全零 trace_id 非法。
 	if err := ValidateBatchTraceContext(&TraceContext{
-		TraceId: "00000000000000000000000000000000", SpanId: "0123456789abcdef",
+		TraceId: "00000000000000000000000000000000", SpanId: validSpanID,
 	}); err == nil {
 		t.Error("all-zero trace_id accepted")
 	}
 	// 错误长度。
 	if err := ValidateBatchTraceContext(&TraceContext{
-		TraceId: "0123456789abcdef", SpanId: "0123456789abcdef",
+		TraceId: "0123456789abcdef", SpanId: validSpanID,
 	}); err == nil {
 		t.Error("short trace_id accepted")
 	}
 	// 大写 hex 拒绝（W3C 要求小写）。
 	if err := ValidateBatchTraceContext(&TraceContext{
-		TraceId: "0123456789ABCDEF0123456789abcdef", SpanId: "0123456789abcdef",
+		TraceId: "0123456789ABCDEF0123456789abcdef", SpanId: validSpanID,
 	}); err == nil {
 		t.Error("uppercase hex trace_id accepted")
 	}
@@ -134,7 +138,7 @@ func TestSignalBatchValidate_FieldLimits(t *testing.T) {
 	})
 	t.Run("control char in trace_id rejected", func(t *testing.T) {
 		b := &SignalBatch{Signals: []*SignalRecord{
-			{SignalType: "span", Name: "op", TraceID: "bad\x00id"},
+			{SignalType: "span", Name: "op-" + testutil.RandString(4), TraceID: "bad\x00id"},
 		}}
 		if err := b.Validate(); err == nil {
 			t.Error("expected error for control char in trace_id")
@@ -142,7 +146,7 @@ func TestSignalBatchValidate_FieldLimits(t *testing.T) {
 	})
 	t.Run("legit multiline status_message accepted", func(t *testing.T) {
 		b := &SignalBatch{Signals: []*SignalRecord{
-			{SignalType: "log", Body: "x", StatusMessage: "line1\nline2"},
+			{SignalType: "log", Body: testutil.RandString(1), StatusMessage: "line1\nline2"},
 		}}
 		if err := b.Validate(); err != nil {
 			t.Errorf("legit multiline status_message rejected: %v", err)
@@ -150,7 +154,7 @@ func TestSignalBatchValidate_FieldLimits(t *testing.T) {
 	})
 	t.Run("legit short fields accepted", func(t *testing.T) {
 		b := &SignalBatch{Signals: []*SignalRecord{
-			{SignalType: "counter", MetricName: "cpu.usage", Unit: "%"},
+			{SignalType: "counter", MetricName: "m-" + testutil.RandString(6), Unit: "%"},
 		}}
 		if err := b.Validate(); err != nil {
 			t.Errorf("legit short fields rejected: %v", err)
@@ -162,8 +166,8 @@ func TestSignalBatchValidate_FieldLimits(t *testing.T) {
 // 非空时必须是指定长度的小写 hex + 非全零。这是 signal_type="span" 无损映射
 // OTLP Traces Span 的正确性保证。
 func TestValidateHexID(t *testing.T) {
-	validTraceID := "0123456789abcdef0123456789abcdef" // 32 hex (16 bytes)
-	validSpanID := "0123456789abcdef"                  // 16 hex (8 bytes)
+	validTraceID := testutil.RandTraceID() // 32 hex (16 bytes)
+	validSpanID := testutil.RandSpanID()   // 16 hex (8 bytes)
 
 	tests := []struct {
 		name      string
@@ -192,6 +196,39 @@ func TestValidateHexID(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Errorf("validateHexID(%q) unexpected error: %v", tt.val, err)
+			}
+		})
+	}
+}
+
+// TestValidateHostPort 覆盖 ValidateHostPort 的合法/非法分支：v1 UDP 与 ntls TCP
+// 地址共用此校验，构造期 fail-fast 拒绝缺端口/缺 host/越界端口。
+func TestValidateHostPort(t *testing.T) {
+	tests := []struct {
+		name    string
+		addr    string
+		wantErr bool
+	}{
+		{"valid host:port", "localhost:7400", false},
+		{"valid ipv4", "127.0.0.1:443", false},
+		{"valid ipv6", "[::1]:7400", false},
+		{"valid port boundary 1", "host:1", false},
+		{"valid port boundary 65535", "host:65535", false},
+		{"empty", "", true},
+		{"missing port", "localhost", true},
+		{"missing host", ":7400", true},
+		{"port zero", "host:0", true},
+		{"port out of range", "host:65536", true},
+		{"port non-numeric", "host:abc", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateHostPort(tt.addr)
+			if tt.wantErr && err == nil {
+				t.Errorf("ValidateHostPort(%q) expected error, got nil", tt.addr)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ValidateHostPort(%q) unexpected error: %v", tt.addr, err)
 			}
 		})
 	}

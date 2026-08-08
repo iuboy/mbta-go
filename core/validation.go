@@ -3,6 +3,8 @@ package core
 import (
 	"encoding/hex"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -14,7 +16,7 @@ const MaxSignalFieldLen = 4096
 
 // MaxTraceStateFieldLen 是 W3C tracestate 单个 key/value 的最大字符数（W3C Trace
 // Context 规范）。tracestate 成员用于跨服务传播 trace 厂商信息，长度必须严格符合
-// 规范以保证互操作；旧实现误用 MaxSignalFieldLen(4096) 校验，远超规范上限。
+// 规范以保证互操作；误用 MaxSignalFieldLen(4096) 校验会远超规范上限。
 const MaxTraceStateFieldLen = 256
 
 // MaxAgentIDLen 是 agent_id 字段的最大字节长度。agent_id 作为 ReplayCache key、
@@ -26,14 +28,13 @@ const MaxAgentIDLen = 256
 // （syslog/ELK 行伪造），因此使用 hasStrictControlChars 而非 hasControlChars。
 func validateAgentID(agentID string) error {
 	if len(agentID) == 0 {
-		return NewError(NumValidation, CodeValidation, "agent_id must not be empty")
+		return NewError(ErrCodeValidation, "agent_id must not be empty")
 	}
 	if len(agentID) > MaxAgentIDLen {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("agent_id exceeds maximum length %d", MaxAgentIDLen))
+		return NewError(ErrCodeValidation, fmt.Sprintf("agent_id exceeds maximum length %d", MaxAgentIDLen))
 	}
 	if hasStrictControlChars(agentID) {
-		return NewError(NumValidation, CodeValidation, "agent_id contains control characters")
+		return NewError(ErrCodeValidation, "agent_id contains control characters")
 	}
 	return nil
 }
@@ -66,12 +67,10 @@ func hasStrictControlChars(s string) bool {
 // 返回的 error 已包含字段名，便于定位。
 func validateTextField(name, val string) error {
 	if len(val) > MaxSignalFieldLen {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("%s exceeds maximum length %d", name, MaxSignalFieldLen))
+		return NewError(ErrCodeValidation, fmt.Sprintf("%s exceeds maximum length %d", name, MaxSignalFieldLen))
 	}
 	if hasControlChars(val) {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("%s contains control characters", name))
+		return NewError(ErrCodeValidation, fmt.Sprintf("%s contains control characters", name))
 	}
 	return nil
 }
@@ -89,23 +88,20 @@ func validateHexID(name, val string, wantBytes int) error {
 	}
 	wantHexLen := wantBytes * 2
 	if len(val) != wantHexLen {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("%s must be %d lowercase hex chars (%d bytes), got len %d",
-				name, wantHexLen, wantBytes, len(val)))
+		return NewError(ErrCodeValidation, fmt.Sprintf("%s must be %d lowercase hex chars (%d bytes), got len %d",
+			name, wantHexLen, wantBytes, len(val)))
 	}
 	// 必须是小写 hex（解码同时校验字符集；hex.DecodeString 接受大小写，但 W3C
 	// 规定小写，这里对大写显式拒绝以保证互操作一致）。
 	for _, r := range val {
 		isLowerHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')
 		if !isLowerHex {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("%s must be lowercase hex, contains invalid char %q", name, r))
+			return NewError(ErrCodeValidation, fmt.Sprintf("%s must be lowercase hex, contains invalid char %q", name, r))
 		}
 	}
 	decoded := make([]byte, wantBytes)
 	if _, err := hex.Decode(decoded, []byte(val)); err != nil {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("%s is not valid hex: %v", name, err))
+		return NewError(ErrCodeValidation, fmt.Sprintf("%s is not valid hex: %v", name, err))
 	}
 	// 全零值非法（对齐 OTel）。
 	allZero := true
@@ -116,8 +112,7 @@ func validateHexID(name, val string, wantBytes int) error {
 		}
 	}
 	if allZero {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("%s must not be all zeros", name))
+		return NewError(ErrCodeValidation, fmt.Sprintf("%s must not be all zeros", name))
 	}
 	return nil
 }
@@ -126,12 +121,10 @@ func validateHexID(name, val string, wantBytes int) error {
 // W3C Trace Context 规范（MaxTraceStateFieldLen=256），且不含控制字符。
 func validateTraceStateEntryField(name, val string) error {
 	if len(val) > MaxTraceStateFieldLen {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("%s exceeds maximum length %d", name, MaxTraceStateFieldLen))
+		return NewError(ErrCodeValidation, fmt.Sprintf("%s exceeds maximum length %d", name, MaxTraceStateFieldLen))
 	}
 	if hasControlChars(val) {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("%s contains control characters", name))
+		return NewError(ErrCodeValidation, fmt.Sprintf("%s contains control characters", name))
 	}
 	return nil
 }
@@ -141,13 +134,11 @@ func validateTraceStateEntryField(name, val string) error {
 // 控制字符。多余成员不静默截断——返回错误让调用方显式收敛，避免无声丢语义。
 func validateTraceState(entries []*TraceStateEntry) error {
 	if len(entries) > 32 {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("trace_state exceeds 32 entries (got %d)", len(entries)))
+		return NewError(ErrCodeValidation, fmt.Sprintf("trace_state exceeds 32 entries (got %d)", len(entries)))
 	}
 	for i, e := range entries {
 		if e == nil || e.Key == "" {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("trace_state[%d]: empty key", i))
+			return NewError(ErrCodeValidation, fmt.Sprintf("trace_state[%d]: empty key", i))
 		}
 		if err := validateTraceStateEntryField(fmt.Sprintf("trace_state[%d].key", i), e.Key); err != nil {
 			return err
@@ -175,10 +166,10 @@ func ValidateBatchTraceContext(tc *TraceContext) error {
 		fieldTCParent = "trace_context.parent_span_id"
 	)
 	if tc.TraceId == "" {
-		return NewError(NumValidation, CodeValidation, fieldTCID+" must not be empty")
+		return NewError(ErrCodeValidation, fieldTCID+" must not be empty")
 	}
 	if tc.SpanId == "" {
-		return NewError(NumValidation, CodeValidation, fieldTCSpan+" must not be empty")
+		return NewError(ErrCodeValidation, fieldTCSpan+" must not be empty")
 	}
 	if err := validateHexID(fieldTCID, tc.TraceId, 16); err != nil {
 		return err
@@ -191,11 +182,28 @@ func ValidateBatchTraceContext(tc *TraceContext) error {
 	}
 	// trace-flags 是 W3C traceparent 的 1 字节字段（仅低 8 位有效）。
 	if tc.TraceFlags > 0xff {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("trace_context.trace_flags exceeds 8-bit W3C range (0x%x)", tc.TraceFlags))
+		return NewError(ErrCodeValidation, fmt.Sprintf("trace_context.trace_flags exceeds 8-bit W3C range (0x%x)", tc.TraceFlags))
 	}
 	if err := validateTraceState(tc.TraceState); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateHostPort 校验 host:port 格式的网络地址（v1 UDP / ntls TCP 共用）。
+// 在 NewClient 构造期 fail-fast 调用，避免错误地址拖到 Connect 的 dial 层才报
+// 一个低层 resolver 错误（错误归因不准）。接受 IPv6 字面量如 "[::1]:7400"。
+func ValidateHostPort(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return NewError(ErrCodeConfig, fmt.Sprintf("invalid address %q: %v", addr, err))
+	}
+	if host == "" {
+		return NewError(ErrCodeConfig, fmt.Sprintf("invalid address %q: missing host", addr))
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
+		return NewError(ErrCodeConfig, fmt.Sprintf("invalid address %q: port out of range", addr))
 	}
 	return nil
 }

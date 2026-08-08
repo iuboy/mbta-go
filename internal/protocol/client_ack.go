@@ -19,8 +19,8 @@ func (c *CoreClient) loadACKHandler() func(chunkID, ackMode string) {
 }
 
 // dispatchACK 入队用户 ACK/NACK 回调异步执行。永不阻塞：队列满时丢弃回调（warn）。
-// 仅回调通知丢失——pendingAcks/inflight 在 handleAck/handleNack 同步更新，
-// ackReaper 仍会回收未 ACK batch 的 inflight。
+// 仅回调通知丢失——AckTracker 在 handleAck/handleNack 同步释放 slot，
+// ackReaper 仍会回收未 ACK batch 的 inflight 配额。
 func (c *CoreClient) dispatchACK(chunkID, mode string) {
 	select {
 	case c.ackQueue <- ackTask{chunkID: chunkID, mode: mode}:
@@ -69,7 +69,8 @@ func (c *CoreClient) invokeACKHandler(t ackTask) {
 }
 
 // ackReaper 周期回收超时未 ACK 的 batch 的 inflight 配额（30s ticker）。
-// 防止对端永不 ACK 时 inflight 永久占用窗口。
+// 防止对端永不 ACK 时 inflight 永久占用窗口。同时为序号跨度检查兜底：回收队头
+// 超时 slot 后 oldestSeq 前移，解除 CanSend 的队头阻塞。
 func (c *CoreClient) ackReaper(ctx context.Context) {
 	const reaperInterval = 30 * time.Second
 	ticker := time.NewTicker(reaperInterval)
@@ -80,32 +81,21 @@ func (c *CoreClient) ackReaper(ctx context.Context) {
 			return
 		case <-ticker.C:
 			now := time.Now()
-			c.pendingAcks.Range(func(key, val any) bool {
-				pb, ok := val.(*pendingBatch)
-				if !ok {
-					return true
-				}
-				if now.After(pb.Deadline) {
-					// 用 LoadAndDelete 原子 claim：避免与 handleAck/Nack 的 LoadAndDelete 竞争，
-					// 否则两条路径都执行清理会导致 pendingCount 双减（无下溢保护）和 inflight 双扣。
-					if _, loaded := c.pendingAcks.LoadAndDelete(key); loaded {
-						c.pendingCount.Add(-1)
-						c.inflight.Remove(pb.Events, pb.Bytes)
-						slog.Warn("reaped expired unacked batch",
-							"chunk", key, "seq", pb.Seq, "age", now.Sub(pb.SentAt).Round(time.Second))
-						c.notifyDrainIfEmpty()
-					}
-				}
-				return true
-			})
+			// ReapExpired 在 tracker.mu 下批量扫描固定 AckRingSize 个 slot，
+			// 回收 deadline 过期的 slot 并重算 oldestSeq。每个回收的 slot 已扣减聚合计数。
+			for _, slot := range c.tracker.ReapExpired(now) {
+				slog.Warn("reaped expired unacked batch",
+					"seq", slot.Seq, "age", now.Sub(slot.SentAt).Round(time.Second))
+				c.notifyDrainIfEmpty()
+			}
 		}
 	}
 }
 
-// notifyDrainIfEmpty 在 drain 状态且 pendingAcks 归零时通知 close 的 drain 循环。
+// notifyDrainIfEmpty 在 drain 状态且 tracker 归零时通知 close 的 drain 循环。
 // 非阻塞：drainCh 容量 1，重复通知无妨。
 func (c *CoreClient) notifyDrainIfEmpty() {
-	if c.pendingCount.Load() == 0 {
+	if c.tracker.Empty() {
 		select {
 		case c.drainCh <- struct{}{}:
 		default:
@@ -115,5 +105,5 @@ func (c *CoreClient) notifyDrainIfEmpty() {
 
 // countPendingAcks 返回当前待 ACK 的 batch 数（用于 close 日志）。
 func (c *CoreClient) countPendingAcks() int {
-	return int(c.pendingCount.Load())
+	return c.tracker.PendingCount()
 }

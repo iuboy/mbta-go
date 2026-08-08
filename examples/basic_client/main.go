@@ -31,13 +31,11 @@ func main() {
 	}
 	defer client.Close()
 
-	// 连接服务端
 	if err := client.Connect(ctx); err != nil {
 		log.Fatalf("connect: %v", err)
 	}
 	fmt.Println("connected to MBTA server")
 
-	// 构造信号批次
 	batch := &core.SignalBatch{
 		Signals: []*core.SignalRecord{
 			{
@@ -51,7 +49,6 @@ func main() {
 		},
 	}
 
-	// 发送批次
 	chunkID, err := client.SendBatch(ctx, batch, "example", "demo")
 	if err != nil {
 		log.Fatalf("send batch: %v", err)

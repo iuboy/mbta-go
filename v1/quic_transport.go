@@ -32,18 +32,17 @@ type quicTransport struct {
 	wg      sync.WaitGroup // 追踪活跃的 readDataStream goroutine，保证 dataCh 关闭前全部退出
 }
 
-// newQuicTransport accept 第一个 stream 作为 control stream，启动 data accept 循环。
-// 失败时关闭底层 QUIC 连接避免泄漏（调用方可能仅处理 error 而不显式 Close conn）。
+// newQuicTransport accept 第一个 stream 作为 control stream，启动 data accept 循环；失败时关闭底层 QUIC 连接。
 func newQuicTransport(conn *Conn) (*quicTransport, error) {
 	s, role, err := conn.AcceptStream(context.Background())
 	if err != nil {
 		_ = conn.CloseWithError(0, "accept control stream failed")
-		return nil, core.WrapError(core.NumStream, core.CodeStream, "accept control stream", err)
+		return nil, core.WrapError(core.ErrCodeStream, "accept control stream", err)
 	}
 	if role != core.StreamRoleControl {
 		_ = s.Close()
 		_ = conn.CloseWithError(0, "first stream not control")
-		return nil, core.NewError(core.NumProtocol, core.CodeProtocol, "first stream must be control")
+		return nil, core.NewError(core.ErrCodeProtocol, "first stream must be control")
 	}
 	t := &quicTransport{
 		conn:       conn,
@@ -100,10 +99,7 @@ func (t *quicTransport) readDataStream(s *quic.Stream) {
 }
 
 // RecvControlFrame 读 control stream 下一帧，受调用方 ctx 约束。
-//
-// 旧实现忽略 ctx（_ = ctx），shutdown 时 CoreHandler 无法靠 ctx 超时退出 control loop，
-// 只能依赖 transport 关闭触发 stream EOF。现在通过 SetReadDeadline 让 ctx.Deadline()
-// 或 ctx 取消能中断阻塞读。模式对称于 quicStreamWrapper.writeFrameCtx（写路径）。
+// 通过 SetReadDeadline 让 ctx.Deadline()/取消中断阻塞读（模式对称于 writeFrameCtx 写路径）。
 func (t *quicTransport) RecvControlFrame(ctx context.Context) (core.Frame, error) {
 	if err := ctx.Err(); err != nil {
 		return core.Frame{}, err
@@ -114,11 +110,10 @@ func (t *quicTransport) RecvControlFrame(ctx context.Context) (core.Frame, error
 		dl = time.Now().Add(controlReadDefaultTimeout)
 	}
 	if err := t.controlStr.SetReadDeadline(dl); err != nil {
-		return core.Frame{}, core.WrapError(core.NumStream, core.CodeStream, "set control read deadline", err)
+		return core.Frame{}, core.WrapError(core.ErrCodeStream, "set control read deadline", err)
 	}
 	defer func() { _ = t.controlStr.SetReadDeadline(time.Time{}) }()
-	// 二次检查 ctx 取消：缩小 ctx.Err() 检查与 SetReadDeadline 之间的 TOCTOU 窗口，
-	// 避免 ctx 在窗口内被取消后 Read 仍阻塞至 deadline（rolling restart 场景下影响显著）。
+	// 二次检查 ctx 取消：缩小 ctx.Err() 与 SetReadDeadline 之间的 TOCTOU 窗口。
 	if err := ctx.Err(); err != nil {
 		return core.Frame{}, err
 	}
@@ -138,18 +133,12 @@ func (t *quicTransport) RecvControlFrame(ctx context.Context) (core.Frame, error
 const controlReadDefaultTimeout = 5 * time.Minute
 
 // RecvDataFrame 从聚合 data channel 读下一帧。
-//
-// 修复 default 分支吞错误：旧实现在 dataCh 关闭后用非阻塞 select 读 dataErr，
-// 若 dataErr 已被先前 RecvDataFrame 读过（cap=1），default 分支返回 io.EOF，
-// 丢失真正的 accept 错误。改为阻塞读 dataErr，确保真实错误不丢失。
+// dataCh 关闭时阻塞读 dataErr 拿真实错误（cap=1 非阻塞发送可能丢错误，空则返回 io.EOF）。
 func (t *quicTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 	select {
 	case f, ok := <-t.dataCh:
 		if !ok {
-			// dataCh 关闭：尝试读 dataErr 拿真实错误（acceptDataStreams 发送）。
-			// acceptDataStreams 用非阻塞发送（cap=1），错误可能因缓冲满被丢弃；
-			// 此时 dataErr 为空，用 default 返回 io.EOF 而非永久阻塞
-			// （即使 ctx 是 context.Background() 也不会 goroutine 泄漏）。
+			// dataCh 关闭：读 dataErr 拿真实错误，空则返回 io.EOF。
 			select {
 			case e := <-t.dataErr:
 				if e != nil {
@@ -168,10 +157,8 @@ func (t *quicTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 	}
 }
 
-// SendFrame 写帧（server 端均走 control stream，按 ChannelID=0）。
-//
-// 旧实现忽略 ctx（_ = ctx），若 QUIC 流控背压导致 Write 阻塞，发送方 goroutine
-// 无法被 ctx 取消而永久挂起。现通过 SetWriteDeadline 实现 ctx 感知写。
+// SendFrame 写帧（server 端走 control stream，ChannelID=0）。
+// 通过 SetWriteDeadline 实现 ctx 感知写（QUIC 流控背压下 Write 阻塞需可被 ctx 取消）。
 func (t *quicTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -183,17 +170,13 @@ func (t *quicTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	t.controlMu.Lock()
 	defer t.controlMu.Unlock()
 	if err := t.controlStr.SetWriteDeadline(dl); err != nil {
-		return core.WrapError(core.NumStream, core.CodeStream, "set control write deadline", err)
+		return core.WrapError(core.ErrCodeStream, "set control write deadline", err)
 	}
 	defer func() { _ = t.controlStr.SetWriteDeadline(time.Time{}) }()
 	return core.Write(t.controlStr, f.Header.Version, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
 }
 
-// SupportsDatagram 报告是否支持 QUIC DATAGRAM。
-//
-// 检查 QUIC 连接实际是否启用了 datagram 扩展（EnableDatagrams），而非硬编码 true。
-// 旧实现无条件返回 true，若未来连接以 EnableDatagrams=false 建立，会误导上层使用
-// 不支持的 datagram 通道。
+// SupportsDatagram 报告是否支持 QUIC DATAGRAM（检查连接实际是否启用 datagram 扩展，不硬编码 true）。
 func (t *quicTransport) SupportsDatagram() bool {
 	// 防御：连接尚未完全建立时返回 false（QC 可能在握手完成前为 nil）。
 	if t.conn == nil || t.conn.QC == nil {
@@ -211,10 +194,10 @@ func (t *quicTransport) SendDatagram(ctx context.Context, payload []byte) error 
 	}
 	// nil guard：连接尚未完全建立时 QC 为 nil（与 SupportsDatagram 防御一致）。
 	if t.conn == nil || t.conn.QC == nil {
-		return core.NewError(core.NumStream, core.CodeStream, "QUIC connection not established")
+		return core.NewError(core.ErrCodeStream, "QUIC connection not established")
 	}
 	if err := t.conn.QC.SendDatagram(payload); err != nil {
-		return core.WrapError(core.NumStream, core.CodeStream, "send datagram", err)
+		return core.WrapError(core.ErrCodeStream, "send datagram", err)
 	}
 	return nil
 }

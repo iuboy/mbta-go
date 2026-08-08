@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strconv"
 	"testing"
+
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
 // 量化 SignalBatch / BatchMessage / SecureEnvelope 各层序列化开销，
@@ -28,7 +30,7 @@ func BenchmarkMarshalSignalBatch(b *testing.B) {
 		b.Run(scaleName(n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := MarshalSignalBatch(batch); err != nil {
+				if _, err := MarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, batch); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -39,11 +41,11 @@ func BenchmarkMarshalSignalBatch(b *testing.B) {
 func BenchmarkUnmarshalSignalBatch(b *testing.B) {
 	for _, n := range []int{100, 1000, 10000} {
 		batch := makeBenchBatch(n)
-		data, _ := MarshalSignalBatch(batch) // proto 编码（baseline 默认）
+		data, _ := MarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, batch) // proto 编码（baseline 默认）
 		b.Run(scaleName(n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := UnmarshalSignalBatch(data); err != nil {
+				if _, err := UnmarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, data); err != nil {
 					b.Fatal(err)
 				}
 			}

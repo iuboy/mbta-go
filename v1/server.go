@@ -24,7 +24,7 @@ type ServerConfig struct {
 }
 
 // Server accepts and handles MBTA agent connections.
-// 内嵌 binding.Server（消除与 ntls 的服务端外壳重复，对称客户端 Phase 2），
+// 内嵌 binding.Server（消除与 ntls 的服务端外壳重复），
 // 自身仅保留 QUIC 专属的 Start/Addr/Close 入口。
 type Server struct {
 	*binding.Server[*Listener, *Conn]
@@ -33,16 +33,15 @@ type Server struct {
 
 // NewServer creates a new MBTA server.
 func NewServer(cfg ServerConfig) (*Server, error) {
-	// fail-fast 校验：Auth/Sink/Policy 为空时静默接受任意连接或丢弃全部数据，
-	// 属严重误配，应在构造时暴露而非在生产中静默失败。
+	// fail-fast：Auth/Sink/Policy 为空属严重误配，构造时暴露。
 	if cfg.Auth == nil {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Auth (TokenValidator) is required")
+		return nil, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
 	}
 	if cfg.Sink == nil {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Sink (EventSink) is required")
+		return nil, core.NewError(core.ErrCodeConfig, "Sink (EventSink) is required")
 	}
-	if len(cfg.Policy.SupportedCapabilities) == 0 {
-		return nil, core.NewError(core.NumConfig, core.CodeConfig, "Policy.SupportedCapabilities is required")
+	if err := cfg.Policy.Validate(); err != nil {
+		return nil, core.WrapError(core.ErrCodeConfig, "Policy", err)
 	}
 	if cfg.ServerID == "" {
 		cfg.ServerID = core.NewChunkID().String()
@@ -71,14 +70,13 @@ func (s *Server) Start(ctx context.Context) error {
 		Listen: func(ctx context.Context) (*Listener, error) {
 			l, err := Listen(ctx, s.config.Transport)
 			if err != nil {
-				return nil, core.WrapError(core.NumTransport, core.CodeTransport, "listen", err)
+				return nil, core.WrapError(core.ErrCodeTransport, "listen", err)
 			}
 			return l, nil
 		},
 		Accept:       func(ctx context.Context, l *Listener) (*Conn, error) { return l.Accept(ctx) },
 		NewTransport: func(ctx context.Context, c *Conn) (protocol.Transport, error) { return newQuicTransport(c) },
-		// CloseConn 用非零 application error code 关闭连接：code 0 在 QUIC 语义中表示
-		// "no error"/正常关闭，会误导对端以为连接是优雅终止而非异常清理。
+		// CloseConn 用非零 error code 关闭连接（code 0 表示 "no error"，会误导对端）。
 		CloseConn:     func(c *Conn) { _ = c.CloseWithError(1, "transport setup failure") },
 		AddrOf:        func(l *Listener) net.Addr { return l.Addr() },
 		CloseListener: func(l *Listener) error { return l.Close() },

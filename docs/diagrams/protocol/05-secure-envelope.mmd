@@ -1,0 +1,62 @@
+%%{init: {'theme':'default', 'themeVariables': {'background':'#ffffff'}}}%%
+classDiagram
+    direction LR
+    class SecureEnvelope {
+        wire 信封: BATCH/DATAGRAM 的 Payload 实际是这个
+        FlagEnvelope 置位时帧 Payload = 编码后的 SecureEnvelope
+        双层完整性: 传输层 AEAD + 应用层 HMAC (MAC 字段)
+    }
+
+    class Metadata {
+        元数据 (明文 / 协商参数)
+        ──────────────────────────
+        EnvelopeVersion uint32
+        MessageType     EnvelopeMsgType
+        SessionId       []byte
+        KeyId           []byte
+        Seq             uint64  (仅 reliable BATCH)
+        ChunkId         []byte  (ULID 16B, 仅 reliable)
+        CreatedAtUnixMs int64
+        Codec           Codec       (协商结果)
+        Compression     Compression (协商结果)
+        CipherSuite     CipherSuite (协商结果)
+        DeliveryMode    DeliveryMode
+    }
+
+    class Crypto {
+        加密载荷 + 认证
+        ──────────────────────────
+        Nonce   []byte  显式 nonce, 同密钥下禁止复用
+        Payload []byte  压缩后→加密后的密文
+        MAC     []byte  HMAC 输出 (canonicalMAC over header+payload)
+    }
+
+    class CodecEnum {
+        Codec (协商)
+        0 UNSPECIFIED
+        1 PROTO  (baseline 默认)
+        2 CBOR   (constrained)
+        3 JSON   (仅调试)
+    }
+    class CompEnum {
+        Compression (协商)
+        0 UNSPECIFIED
+        1 ZSTD (baseline 默认)
+        2 LZ4  (constrained / 低延迟)
+        3 NONE
+        4 GZIP (legacy)
+    }
+    class CipherEnum {
+        CipherSuite (跟随 binding 合规语境 §8.3)
+        0 UNSPECIFIED
+        1 INTL  SHA-256 + AES-256-GCM + ECDSA/Ed25519
+        2 GM    SM3 + SM4-GCM + SM2  (国密 / TLCP)
+    }
+
+    SecureEnvelope --> Metadata : 字段 1–11
+    SecureEnvelope --> Crypto : 字段 12–14
+    Metadata ..> CodecEnum : Codec
+    Metadata ..> CompEnum : Compression
+    Metadata ..> CipherEnum : CipherSuite
+
+    note for SecureEnvelope "校验顺序 (handler_batch.go):<br/>① 先 HMAC (Open 内 VerifyMAC)<br/>② 后算法一致性复核 (verifyEnvelopeAlgo)<br/>未认证方注入帧无法探测协商算法集"

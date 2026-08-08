@@ -1,0 +1,33 @@
+%%{init: {'theme':'default', 'themeVariables': {'background':'#ffffff'}}}%%
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: ① HELLO (C→S) — TypeHello=1, control
+    C->>S: HELLO
+    Note right of C: agent_id, hostname, instance_id,<br/>agent_version, frame_version,<br/>capabilities[], resource_class?,<br/>mem_limit_kb?, conn_id,<br/>started_at_unix,<br/>session_ticket? (0-RTT r2),<br/>os? (runtime.GOOS)
+
+    Note over C,S: ② HELLO_ACK (S→C) — TypeHelloAck=2
+    S-->>C: HELLO_ACK
+    Note right of S: session_id[16B], server_id,<br/>selected_capabilities[],<br/>codec, compression, cipher_suite,<br/>max_frame_payload_bytes,<br/>max_batch_bytes, max_batch_events,<br/>max_event_bytes,<br/>initial_window(WindowMessage),<br/>heartbeat_interval_sec,<br/>challenge_nonce (一次性, 供 AUTH)
+
+    Note over C: 协商落地: codec/cipher/compression 确定<br/>窗口与心跳间隔生效
+
+    Note over C,S: ③ AUTH (C→S) — TypeAuth=3, control
+    C->>S: AUTH
+    Note right of C: token, agent_id, session_id,<br/>auth_nonce (基于 challenge_nonce 应答),<br/>sm2_cert_pem? (sm2_cert_auth 协商时)
+
+    Note over C,S: ④ AUTH_OK / ⑤ AUTH_FAIL (S→C)
+    alt 认证成功
+        S-->>C: AUTH_OK (TypeAuthOK=4)
+        Note right of S: 颁发会话密钥 (HMAC + AEAD)<br/>开放 data 通道 (v1: SetAuthed)
+    else 可重试失败
+        S-->>C: AUTH_FAIL (TypeAuthFail=5, retryable)
+        Note over C: 客户端可原地重试 AUTH<br/>(状态机 AuthSent 自环)
+    else 终态失败
+        S-->>C: AUTH_FAIL (TypeAuthFail=5, fatal)
+        Note over C: 回退到 Disconnected
+    end
+
+    Note over C,S: 握手后: BATCH 可发 (data channel),<br/>SecureEnvelope 包裹 (FlagEnvelope)

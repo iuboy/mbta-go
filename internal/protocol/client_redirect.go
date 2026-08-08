@@ -30,9 +30,9 @@ func (c *CoreClient) loadRedirectHandler() func(payload []byte) {
 
 // dispatchRedirect 在独立 goroutine 中调用注册的 redirect handler。
 //
-// 旧实现同步调用，会在 readControlLoop goroutine 中阻塞所有后续 ACK/NACK/
+// 同步调用会有缺陷：会在 readControlLoop goroutine 中阻塞所有后续 ACK/NACK/
 // WINDOW/THROTTLE/PING/CLOSE 处理（handler 由应用层注册，库无法控制其耗时）。
-// 改为异步执行避免控制帧处理被卡住。
+// 异步执行避免控制帧处理被卡住。
 //
 // 并发保护：
 //   - payload 做防御性拷贝：当前所有内置 transport 均通过 core.Read 分配新切片，

@@ -79,11 +79,11 @@ type Transport interface {
 // 都走 control channel（ChannelControl=0）。
 //
 // 安全校验：在构造帧前检查 payload 长度不超过 MaxPayloadSize 且可被 uint32 表示，
-// 避免 uint32 截断导致对端收到与实际 payload 不一致的 Length 字段（旧实现直接 uint32(len)
+// 避免 uint32 截断导致对端收到与实际 payload 不一致的 Length 字段（直接 uint32(len)
 // 会静默截断超长 payload）。
 func SendControlFrame(ctx context.Context, tr Transport, typ uint8, flags byte, payload []byte) error {
 	if int64(len(payload)) > int64(core.MaxPayloadSize) {
-		return core.NewError(core.NumProtocol, core.CodeFrameTooLarge,
+		return core.NewError(core.ErrCodeProtocol,
 			fmt.Sprintf("control frame payload %d exceeds MaxPayloadSize %d", len(payload), core.MaxPayloadSize))
 	}
 	f := core.Frame{

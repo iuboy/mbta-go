@@ -30,8 +30,7 @@ type AgentIdentity struct {
 	ExpiresAt   time.Time // token expiration time
 }
 
-// ErrInvalidToken is returned when token validation fails.
-var ErrInvalidToken = NewError(NumAuth, CodeAuth, "invalid token")
+// ErrInvalidToken 是 token 校验失败的错误码（替代预构造 sentinel，返回时用 NewError 现造）。
 
 // RedirectInfo carries the leader's reachable address, returned by a
 // RedirectChecker when this replica is NOT the HA leader and the just-authed
@@ -50,11 +49,6 @@ type RedirectInfo struct {
 // (single-replica deployment or strict mode where only the leader listens).
 type RedirectChecker func(ctx context.Context) (RedirectInfo, bool)
 
-// ErrRedirected is returned internally after sending a TypeRedirect frame to
-// signal that the handler should stop and close the connection (not a real
-// error — the client will reconnect to the leader).
-var ErrRedirected = NewError(NumSession, CodeSession, "client redirected to leader")
-
 // TokenResolver resolves a long-term token by agent identifier. Servers whose
 // Auth implementation also satisfies this interface can suppress plaintext
 // token transmission in the AUTH frame: the client omits Token and the server
@@ -64,10 +58,8 @@ type TokenResolver interface {
 	ResolveToken(agentID string) (token string, err error)
 }
 
-// ErrAgentNotFound is returned by TokenResolver when no token is registered for
-// the agent. It shares the auth error family with ErrInvalidToken so failures
-// do not reveal whether a given agentID exists (avoids agent enumeration).
-var ErrAgentNotFound = NewError(NumAuth, CodeAuth, "agent not found")
+// ErrAgentNotFound 是 TokenResolver 找不到 agent 时的错误码（替代预构造 sentinel）。
+// 与 ErrInvalidToken 同属 auth 大类，避免暴露 agentID 是否存在（防枚举）。
 
 // StaticTokenValidator validates tokens against a static map (dev/test use).
 // It additionally implements TokenResolver via a reverse agentID->token index,
@@ -108,7 +100,7 @@ func NewStaticTokenValidator(tokens map[string]string) *StaticTokenValidator {
 func (v *StaticTokenValidator) Validate(token string) (*AgentIdentity, error) {
 	agentID, ok := v.tokens[token]
 	if !ok {
-		return nil, ErrInvalidToken
+		return nil, NewError(ErrCodeInvalidToken, "invalid token")
 	}
 	return &AgentIdentity{
 		AgentID:   agentID,
@@ -123,7 +115,7 @@ func (v *StaticTokenValidator) ResolveToken(agentID string) (string, error) {
 	if tok, ok := v.agents[agentID]; ok {
 		return tok, nil
 	}
-	return "", ErrAgentNotFound
+	return "", NewError(ErrCodeAgentNotFound, "agent not found")
 }
 
 // 编译期断言：StaticTokenValidator 同时满足 TokenValidator 与 TokenResolver。
@@ -144,7 +136,7 @@ type SessionKeys struct {
 // HMACKey 返回 HMAC 密钥的拷贝。
 //
 // 返回拷贝（而非内部切片引用）以防止调用方意外修改密钥材料破坏会话密钥，
-// 并保证 Zero() 能彻底清除所有副本（旧实现返回引用，外部副本无法被 Zero 清除）。
+// 并保证 Zero() 能彻底清除所有副本（返回引用则外部副本无法被 Zero 清除）。
 func (k *SessionKeys) HMACKey() []byte {
 	cp := make([]byte, len(k.hmacKey))
 	copy(cp, k.hmacKey)
@@ -194,15 +186,15 @@ func (k *SessionKeys) Zero() {
 func GenerateSessionKeys(cs corepb.CipherSuite) (*SessionKeys, error) {
 	// fail-fast：未知套件返回 0 长度，会生成空密钥。在此显式拒绝。
 	if cs != corepb.CipherSuite_CIPHER_SUITE_INTL && cs != corepb.CipherSuite_CIPHER_SUITE_GM {
-		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported cipher suite: %v", cs))
+		return nil, NewError(ErrCodeEnvelope, fmt.Sprintf("unsupported cipher suite: %v", cs))
 	}
 	hmacKey := make([]byte, HMACKeyLen(cs))
 	if _, err := rand.Read(hmacKey); err != nil {
-		return nil, WrapError(NumHMAC, CodeHMAC, "generate HMAC key", err)
+		return nil, WrapError(ErrCodeHMAC, "generate HMAC key", err)
 	}
 	aeadKey := make([]byte, AEADKeyLen(cs))
 	if _, err := rand.Read(aeadKey); err != nil {
-		return nil, WrapError(NumEnvelope, CodeEnvelope, "generate AEAD key", err)
+		return nil, WrapError(ErrCodeEnvelope, "generate AEAD key", err)
 	}
 	return &SessionKeys{
 		KeyID:       NewChunkID().String(),

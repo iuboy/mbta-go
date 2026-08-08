@@ -1,41 +1,46 @@
 package core
 
 import (
-	"strings"
 	"testing"
 	"time"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
+// testAgentID 为 core 测试包共享的固定 agent_id，flow_test.go 引用。
+// 其余任意 fixture 由 testutil 随机生成。
 const testAgentID = "agent-123"
 
 // TestStaticTokenValidator tests the StaticTokenValidator implementation.
 func TestStaticTokenValidator(t *testing.T) {
 	t.Run("valid token", func(t *testing.T) {
+		tok1, agent1 := testutil.RandToken(), testutil.RandAgentID()
+		tok2, agent2 := testutil.RandToken(), testutil.RandAgentID()
 		tokens := map[string]string{
-			"token-123": "agent-1",
-			"token-456": "agent-2",
+			tok1: agent1,
+			tok2: agent2,
 		}
 		validator := NewStaticTokenValidator(tokens)
 
-		identity, err := validator.Validate("token-123")
+		identity, err := validator.Validate(tok1)
 		if err != nil {
 			t.Errorf("Validate() unexpected error: %v", err)
 		}
-		if identity.AgentID != "agent-1" {
-			t.Errorf("AgentID = %q, want 'agent-1'", identity.AgentID)
+		if identity.AgentID != agent1 {
+			t.Errorf("AgentID = %q, want %q", identity.AgentID, agent1)
 		}
 	})
 
 	t.Run("invalid token", func(t *testing.T) {
+		tok, agent := testutil.RandToken(), testutil.RandAgentID()
 		tokens := map[string]string{
-			"token-123": "agent-1",
+			tok: agent,
 		}
 		validator := NewStaticTokenValidator(tokens)
 
-		identity, err := validator.Validate("invalid-token")
-		if err != ErrInvalidToken {
+		identity, err := validator.Validate("invalid-token-" + testutil.RandString(4))
+		if CodeOf(err) != ErrCodeInvalidToken.Code {
 			t.Errorf("Error = %v, want ErrInvalidToken", err)
 		}
 		if identity != nil {
@@ -44,13 +49,14 @@ func TestStaticTokenValidator(t *testing.T) {
 	})
 
 	t.Run("empty token", func(t *testing.T) {
+		tok, agent := testutil.RandToken(), testutil.RandAgentID()
 		tokens := map[string]string{
-			"token-123": "agent-1",
+			tok: agent,
 		}
 		validator := NewStaticTokenValidator(tokens)
 
 		identity, err := validator.Validate("")
-		if err != ErrInvalidToken {
+		if CodeOf(err) != ErrCodeInvalidToken.Code {
 			t.Errorf("Error = %v, want ErrInvalidToken", err)
 		}
 		if identity != nil {
@@ -61,8 +67,8 @@ func TestStaticTokenValidator(t *testing.T) {
 	t.Run("empty token map", func(t *testing.T) {
 		validator := NewStaticTokenValidator(map[string]string{})
 
-		identity, err := validator.Validate("any-token")
-		if err != ErrInvalidToken {
+		identity, err := validator.Validate(testutil.RandToken())
+		if CodeOf(err) != ErrCodeInvalidToken.Code {
 			t.Errorf("Error = %v, want ErrInvalidToken", err)
 		}
 		if identity != nil {
@@ -152,13 +158,14 @@ func TestGenerateSessionKeys(t *testing.T) {
 
 // TestSessionKeys tests SessionKeys structure (r2)。
 func TestSessionKeys(t *testing.T) {
+	keyID := "key-" + testutil.RandString(6)
 	keys := &SessionKeys{
-		KeyID:       "key-123",
+		KeyID:       keyID,
 		CipherSuite: corepb.CipherSuite_CIPHER_SUITE_INTL,
 		hmacKey:     make([]byte, HMACKeyLenIntl),
 		aeadKey:     make([]byte, AEADKeyLenIntl),
 	}
-	if keys.KeyID != "key-123" {
+	if keys.KeyID != keyID {
 		t.Errorf("KeyID = %q", keys.KeyID)
 	}
 	if len(keys.HMACKey()) != HMACKeyLenIntl || len(keys.AEADKey()) != AEADKeyLenIntl {
@@ -168,8 +175,9 @@ func TestSessionKeys(t *testing.T) {
 
 // TestComputeChallengeResponse r2：按 CipherSuite 的挑战响应。
 func TestComputeChallengeResponse(t *testing.T) {
-	intl := ComputeChallengeResponse("token", "nonce", corepb.CipherSuite_CIPHER_SUITE_INTL)
-	gm := ComputeChallengeResponse("token", "nonce", corepb.CipherSuite_CIPHER_SUITE_GM)
+	token, nonce := testutil.RandToken(), testutil.RandString(16)
+	intl := ComputeChallengeResponse(token, nonce, corepb.CipherSuite_CIPHER_SUITE_INTL)
+	gm := ComputeChallengeResponse(token, nonce, corepb.CipherSuite_CIPHER_SUITE_GM)
 	if len(intl) != 32 {
 		t.Errorf("intl challenge response len = %d, want 32 (SHA-256)", len(intl))
 	}
@@ -177,7 +185,7 @@ func TestComputeChallengeResponse(t *testing.T) {
 		t.Errorf("gm challenge response len = %d, want 32 (SM3)", len(gm))
 	}
 	// 不同 token 不同响应
-	other := ComputeChallengeResponse("other", "nonce", corepb.CipherSuite_CIPHER_SUITE_INTL)
+	other := ComputeChallengeResponse(testutil.RandToken(), nonce, corepb.CipherSuite_CIPHER_SUITE_INTL)
 	if string(intl) == string(other) {
 		t.Error("different tokens should yield different responses")
 	}
@@ -188,12 +196,13 @@ func TestStaticTokenValidatorWithPermissions(t *testing.T) {
 	// StaticTokenValidator doesn't support permissions in the basic implementation,
 	// but we can verify the interface works correctly
 	t.Run("validator returns identity with default permissions", func(t *testing.T) {
+		tok, agent := testutil.RandToken(), testutil.RandAgentID()
 		tokens := map[string]string{
-			"token-123": "agent-1",
+			tok: agent,
 		}
 		validator := NewStaticTokenValidator(tokens)
 
-		identity, err := validator.Validate("token-123")
+		identity, err := validator.Validate(tok)
 		if err != nil {
 			t.Errorf("Validate() unexpected error: %v", err)
 		}
@@ -205,28 +214,16 @@ func TestStaticTokenValidatorWithPermissions(t *testing.T) {
 	})
 }
 
-// TestErrInvalidToken tests the ErrInvalidToken variable.
-func TestErrInvalidToken(t *testing.T) {
-	if ErrInvalidToken == nil {
-		t.Error("ErrInvalidToken should not be nil")
-	}
-
-	// Test error message
-	msg := ErrInvalidToken.Error()
-	if !strings.Contains(msg, "invalid") || !strings.Contains(msg, "token") {
-		t.Errorf("ErrInvalidToken message = %q, should contain 'invalid' and 'token'", msg)
-	}
-}
-
 // TestTokenValidatorInterface tests that StaticTokenValidator implements TokenValidator.
 func TestTokenValidatorInterface(t *testing.T) {
 	var _ TokenValidator = NewStaticTokenValidator(map[string]string{})
 
-	tokens := map[string]string{"token": "agent"}
+	tok, agent := testutil.RandToken(), testutil.RandAgentID()
+	tokens := map[string]string{tok: agent}
 	validator := NewStaticTokenValidator(tokens)
 
 	// Verify it implements the interface
-	identity, err := validator.Validate("token")
+	identity, err := validator.Validate(tok)
 	if err != nil {
 		t.Errorf("TokenValidator.Validate() error: %v", err)
 	}

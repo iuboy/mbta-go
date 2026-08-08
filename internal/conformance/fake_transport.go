@@ -65,7 +65,7 @@ func (t *FakeTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 
 // sendOnChannel 在 closed-check 后向 ch 发送帧。
 //
-// 旧实现「检查 closed → 解锁 → 发送到 channel」存在 TOCTOU：Close 可在解锁后
+// 「检查 closed → 解锁 → 发送到 channel」存在 TOCTOU：Close 可在解锁后
 // close(t.Sent)，导致 send on closed channel panic。由于无法在持锁时阻塞发送
 // （会与 Close 死锁），改用 recover + 命名返回兜底 panic，将其转为 ErrClosedPipe。
 func (t *FakeTransport) sendOnChannel(ctx context.Context, ch chan<- core.Frame, f core.Frame) (err error) {

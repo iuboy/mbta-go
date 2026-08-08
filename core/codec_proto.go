@@ -27,14 +27,13 @@ func (protoCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 func (protoCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	var pb corepb.SignalBatch
 	if err := proto.Unmarshal(data, &pb); err != nil {
-		return nil, WrapError(NumValidation, CodeValidation, "unmarshal signal batch", err)
+		return nil, WrapError(ErrCodeValidation, "unmarshal signal batch", err)
 	}
 	sb := fromProtoSignalBatch(&pb)
 	// 反序列化后校验：proto 文件注释标注 signal_type 必填，空字符串视为无效消息。
 	for i, s := range sb.Signals {
 		if s.SignalType == "" {
-			return nil, WrapError(NumValidation, CodeValidation,
-				fmt.Sprintf("signal[%d]: signal_type is required but empty", i),
+			return nil, WrapError(ErrCodeValidation, fmt.Sprintf("signal[%d]: signal_type is required but empty", i),
 				fmt.Errorf("missing signal_type"))
 		}
 	}

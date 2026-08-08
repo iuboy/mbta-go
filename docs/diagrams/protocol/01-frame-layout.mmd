@@ -1,0 +1,53 @@
+%%{init: {'theme':'default', 'themeVariables': {'background':'#ffffff'}}}%%
+classDiagram
+    direction LR
+    class Frame {
+        帧整体 = 8B 定长头 + varint Length + Payload
+        无帧层 CRC — 完整性由传输层 AEAD (TLS1.3/TLCP) + 应用层 HMAC (SecureEnvelope) 保证
+    }
+    class FixedHeader {
+        8 字节定长前缀 (FixedHeaderSz = 8)
+        ┌────────┬────────┬────────┬────────┐
+        │ Magic  │ Version│ Flags  │ Type   │
+        │ 4B     │ 1B     │ 1B     │ 1B     │
+        └────────┴────────┴────────┴────────┘
+        ┌──────────────────────────────────┐
+        │  ChannelID  (1B)                 │
+        └──────────────────────────────────┘
+    }
+    class Magic {
+        Magic = "MBTA" (4 字节 ASCII: 0x4D 42 54 41)
+        连接首帧用于识别协议；后续帧也带 Magic 便于流中重新同步
+    }
+    class Version {
+        Version = 0x01
+        值发布后不可改 (spec §1.4)；versionAllowed 白名单校验
+    }
+    class Length {
+        Payload 字节数, varint 编码 (maxVarintLen=5)
+        uint32, 上限 MaxPayloadSize = 16 MiB (16 << 20)
+        超长拒绝；非最短编码拒绝 (防编码歧义)
+    }
+    class Payload {
+        0..MaxPayloadSize 字节
+        控制帧: protobuf 消息 (HelloMessage/AuthMessage/...)
+        数据帧: SecureEnvelope (FlagEnvelope 置位时)
+    }
+    class FlagsOff {
+        Flags (offset 5, 1B) — 位布局见 02-flags-layout
+    }
+    class TypeOff {
+        Type (offset 6, 1B) — 消息目录见 03-message-types
+    }
+    class ChannelOff {
+        ChannelID (offset 7, 1B) — 0=control / 1=data
+    }
+
+    Frame --> FixedHeader : 起始
+    Frame --> Length : 跟随定长头
+    Frame --> Payload : 跟随 Length
+    FixedHeader --> Magic : offset 0
+    FixedHeader --> Version : offset 4
+    FixedHeader --> FlagsOff : offset 5
+    FixedHeader --> TypeOff : offset 6
+    FixedHeader --> ChannelOff : offset 7

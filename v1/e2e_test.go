@@ -11,6 +11,7 @@ import (
 	corepb "github.com/iuboy/mbta-go/corepb"
 
 	"github.com/iuboy/mbta-go/core"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // e2eSink 收集投递的 batch（EventSink 最小实现）。
@@ -42,17 +43,18 @@ func waitAddr(t *testing.T, srv *Server) string {
 // 验证 QUIC binding 的完整 r2 链路（QUIC 握手 + HELLO/AUTH + envelope + BATCH + route + ACK）。
 func TestE2E_Quic_SendBatch(t *testing.T) {
 	sink := &e2eSink{}
+	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	server, err := NewServer(ServerConfig{
 		Transport: QUICServerConfig{
 			Address: "127.0.0.1:0",
 			Credentials: &ServerCredentials{
-				CertFile: "../testdata/certificates/server.crt",
-				KeyFile:  "../testdata/certificates/server.key",
+				CertFile: "../test/data/certificates/server.crt",
+				KeyFile:  "../test/data/certificates/server.key",
 			},
 		},
-		Auth: core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
+		Auth: core.NewStaticTokenValidator(map[string]string{tok: agentID}),
 		Policy: core.Policy{
-			SupportedCapabilities: []string{"codec_proto", "cs_intl"},
+			SupportedCapabilities: []string{core.CapCodecProto, core.CapCSIntl},
 			DefaultCodec:          corepb.Codec_CODEC_PROTO,
 			DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 			CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
@@ -75,10 +77,10 @@ func TestE2E_Quic_SendBatch(t *testing.T) {
 				InsecureSkipVerify: true, // 测试环境跳过 server 证书验证
 			},
 		},
-		AgentID:      "agent-1",
-		Hostname:     "test-host",
-		Token:        "test-token",
-		Capabilities: []string{"codec_proto", "cs_intl"},
+		AgentID:      agentID,
+		Hostname:     testutil.RandHost(),
+		Token:        tok,
+		Capabilities: []string{core.CapCodecProto, core.CapCSIntl},
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -88,7 +90,7 @@ func TestE2E_Quic_SendBatch(t *testing.T) {
 	}
 	defer client.Close()
 
-	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "hello e2e"}}}
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: testutil.RandPayloadString(16)}}}
 
 	chunkID, err := client.SendBatch(ctx, sb, "tag", "source")
 	if err != nil {
@@ -124,17 +126,18 @@ func (s *e2eTraceSink) OnBatchTraceContext(_ context.Context, _ string, tc *core
 // client.SendBatch(..., WithTraceContext) 全链路 → server BatchTraceSink 收到 trace。
 func TestE2E_Quic_SendBatch_TraceContext(t *testing.T) {
 	sink := &e2eTraceSink{}
+	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	server, err := NewServer(ServerConfig{
 		Transport: QUICServerConfig{
 			Address: "127.0.0.1:0",
 			Credentials: &ServerCredentials{
-				CertFile: "../testdata/certificates/server.crt",
-				KeyFile:  "../testdata/certificates/server.key",
+				CertFile: "../test/data/certificates/server.crt",
+				KeyFile:  "../test/data/certificates/server.key",
 			},
 		},
-		Auth: core.NewStaticTokenValidator(map[string]string{"test-token": "agent-1"}),
+		Auth: core.NewStaticTokenValidator(map[string]string{tok: agentID}),
 		Policy: core.Policy{
-			SupportedCapabilities: []string{"codec_proto", "cs_intl", core.CapW3CTraceContext},
+			SupportedCapabilities: []string{core.CapCodecProto, core.CapCSIntl, core.CapW3CTraceContext},
 			DefaultCodec:          corepb.Codec_CODEC_PROTO,
 			DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 			CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
@@ -157,10 +160,10 @@ func TestE2E_Quic_SendBatch_TraceContext(t *testing.T) {
 				InsecureSkipVerify: true,
 			},
 		},
-		AgentID:      "agent-1",
-		Hostname:     "test-host",
-		Token:        "test-token",
-		Capabilities: []string{"codec_proto", "cs_intl", core.CapW3CTraceContext},
+		AgentID:      agentID,
+		Hostname:     testutil.RandHost(),
+		Token:        tok,
+		Capabilities: []string{core.CapCodecProto, core.CapCSIntl, core.CapW3CTraceContext},
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -170,9 +173,9 @@ func TestE2E_Quic_SendBatch_TraceContext(t *testing.T) {
 	}
 	defer client.Close()
 
-	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: "trace e2e"}}}
+	sb := &core.SignalBatch{Signals: []*core.SignalRecord{{SignalType: "log", Body: testutil.RandPayloadString(16)}}}
 	wantTC := &core.TraceContext{
-		TraceId: "0123456789abcdef0123456789abcdef", SpanId: "0123456789abcdef",
+		TraceId: testutil.RandTraceID(), SpanId: testutil.RandSpanID(),
 		TraceFlags: 0x01,
 	}
 

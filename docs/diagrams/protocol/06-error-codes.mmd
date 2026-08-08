@@ -1,0 +1,35 @@
+%%{init: {'theme':'default', 'themeVariables': {'background':'#ffffff'}}}%%
+flowchart TD
+    subgraph Segments["错误码分段 (Num 数字码, spec §13) — 用于 switch/map 程序匹配"]
+        direction TB
+        S1["1000–1099  配置/初始化<br/>NumConfig(1000) NumCredential(1001)"]
+        S2["2000–2099  连接/传输<br/>NumTransport(2000) NumTLS(2001) NumStream(2002)"]
+        S3["3000–3099  协议/会话<br/>NumHandshake(3000) NumAuth(3001)<br/>NumSession(3002) NumProtocol(3003)"]
+        S4["4000–4099  数据/业务<br/>NumBatch(4000) NumEnvelope(4001)<br/>NumValidation(4002) NumHMAC(4003)"]
+        S5["5000–5099  流控<br/>NumWindowFull(5000) NumThrottle(5001)"]
+        S6["6000–6099  存储<br/>NumSpool(6000)"]
+        S7["7000–7099  版本<br/>NumVersion(7000)"]
+    end
+
+    subgraph Reg["register() 即定义即注册 (唯一事实来源)"]
+        R1["var registry = map[string]ErrorCode{}"]
+        R2["register(ErrorCode{Num, Code})<br/>定义即注册，重复 Code panic"]
+        R3["MatchWireCode 反查<br/>wire 字符串 → ErrorCode"]
+    end
+
+    subgraph ErrorStruct["Error 类型 (core/errors.go)"]
+        E1["ErrorCode (内嵌)<br/>Num int / Code string"]
+        E2["Message string 人类可读描述"]
+        E3["Detail any 结构化详情 (可选)"]
+        E4["Err error 被包装错误 (可选)"]
+    end
+
+    Reg --> Segments
+    ErrorStruct --> R1
+
+    classDef seg fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    classDef reg fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100
+    classDef struct fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    class S1,S2,S3,S4,S5,S6,S7 seg
+    class R1,R2,R3 reg
+    class E1,E2,E3,E4 struct

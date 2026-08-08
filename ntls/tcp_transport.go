@@ -47,12 +47,9 @@ func newTCPTransport(conn net.Conn) *tcpTransport {
 }
 
 // readLoop 单连接读帧 → 按 ChannelID 分发。
-// 发送经 select+done：若某一通道的消费者先退出（半死状态），readLoop 不会永久阻塞
-// 在该通道的发送上——Close 关闭 done（同时关 conn 让 core.Read 返回 err）即可唤醒退出，
-// 避免 goroutine 泄漏（tcp-binding §3.3 半开连接处理）。
+// 发送经 select+done：消费者退出时 Close 关闭 done（同时关 conn 让 core.Read 返回 err）唤醒发送，避免 goroutine 泄漏（tcp-binding §3.3）。
 func (t *tcpTransport) readLoop() {
-	// defer close 保证所有退出路径（读错误或 done 信号）都关闭 channels，
-	// 使阻塞在 RecvControlFrame/RecvDataFrame 的消费者收到 io.EOF 而非永久挂起。
+	// defer close 让消费者收到 io.EOF 而非永久挂起。
 	defer func() {
 		close(t.controlCh)
 		close(t.dataCh)
@@ -101,10 +98,7 @@ func (t *tcpTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 }
 
 // SendFrame 写帧（按 ChannelID 写单连接，writeSem 串行化）。
-//
-// writeSem 为容量 1 的 channel 信号量：获取 token 等价于加锁，归还 token 等价于解锁。
-// select 同时监听 ctx.Done()，使写锁等待过程可被上下文取消——旧实现用 sync.Mutex，
-// Lock 阻塞不可取消，慢速对端会导致发送方 goroutine 泄漏/永久挂起。
+// writeSem 为容量 1 信号量，select 监听 ctx.Done() 使写锁等待可取消（sync.Mutex 阻塞不可取消，慢速对端致泄漏）。
 func (t *tcpTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	// 获取写信号量（或响应 ctx 取消）。
 	select {
@@ -152,10 +146,7 @@ func (t *tcpTransport) Close() error {
 	t.closed = true
 	close(t.done) // 唤醒可能阻塞在 channel 发送的 readLoop
 
-	// 等待正在进行的写操作完成（带超时保护，防止写端卡死导致 Close 永久阻塞）。
-	// writeSem 为容量 1 的信号量：drain token 表示无 in-flight 写。
-	// 不归还 token：确保 conn.Close() 期间不会有新的 SendFrame 获取 token 进入 core.Write，
-	// 消除 write-after-close 竞争。
+	// drain writeSem（5s 超时防写端卡死），不归还 token 以阻止 write-after-close。
 	select {
 	case <-t.writeSem:
 		// token 已 drain，保持持有——不归还，阻止新写操作。

@@ -51,10 +51,8 @@ type CoreClientConfig struct {
 	OS           string
 	AgentVersion string
 
-	// DefaultCodec / DefaultCipherSuite / DefaultCompression：协商前（或 c.negotiated==nil
-	// 兜底路径）使用的算法。由各 binding 在 NewClient 时注入，跟随 binding 合规语境
-	// （v1 = intl/proto/zstd，ntls = gm/proto/zstd），避免协议核心硬编码 binding 相关默认
-	// 值——这是「实现中立」原则的落地（spec §8.3：默认套件跟随传输 binding）。
+	// DefaultCodec / DefaultCipherSuite / DefaultCompression：协商前（或 negotiated==nil）的兜底算法，
+	// 由各 binding 注入（spec §8.3：默认套件跟随传输 binding）。
 	DefaultCodec       corepb.Codec       // 通常 CODEC_CODEC_PROTO
 	DefaultCipherSuite corepb.CipherSuite // intl / gm，跟随 binding
 	DefaultCompression corepb.Compression // 通常 COMPRESSION_ZSTD
@@ -75,13 +73,13 @@ type ackTask struct {
 const ackQueueSize = 1024
 
 // CoreClient 收敛 v1/ntls 客户端共享的协议逻辑：状态机、ACK worker、
-// ackReaper、drain、heartbeat、inflight/window/throttle/pendingAcks、生命周期管理。
+// ackReaper、drain、heartbeat、tracker/throttle、生命周期管理。
 //
 // 与服务端 CoreHandler 对称——两者都仅依赖 Transport 接口，不感知具体传输。
 // v1.Client / ntls.Client 持有 *CoreClient 并提供 ClientTransport 实现，
 // 自身仅保留传输适配（Dial/openStreams/writeMu/controlStr 等）。
 //
-// 可靠投递语义：CoreClient 仅在内存追踪已发送未 ACK 的 batch（pendingAcks/inflight）。
+// 可靠投递语义：CoreClient 仅在内存追踪已发送未 ACK 的 batch（AckTracker）。
 // 进程崩溃/重连后未 ACK 的 batch 会丢失——持久化与重发由调用方负责。
 type CoreClient struct {
 	tr      ClientTransport
@@ -102,18 +100,13 @@ type CoreClient struct {
 	expiresAt atomic.Int64
 
 	// 发送追踪
-	seq      *core.SeqGenerator
-	inflight *core.Inflight
-	window   *core.Window
+	seq     *core.SeqGenerator
+	tracker *core.AckTracker // 替代 inflight+window+pendingAcks 三结构，seq-indexed ring buffer
 	throttle *core.ThrottleState
 
-	// sendMu 保护「window 检查 + 取 seq/chunkID + inflight/pending 登记」，
+	// sendMu 保护「CanSend 检查 + 取 seq/chunkID + Reserve 登记」，
 	// 保证并发 SendBatch 不会同时通过窗口后超限。重的 CPU 工作（marshal/Build/写）在锁外。
 	sendMu sync.Mutex
-
-	// pendingAcks 追踪 chunk_id -> batch info 用于 ACK 关联。
-	pendingAcks  sync.Map     // chunkID -> *pendingBatch
-	pendingCount atomic.Int64 // 与 pendingAcks 同步增减，notifyDrainIfEmpty 免 Range 扫描
 
 	// ackHandler 在收到 ACK 时回调，接收 (chunkID, ackMode)。
 	ackHandler atomic.Pointer[func(chunkID, ackMode string)]
@@ -141,7 +134,7 @@ type CoreClient struct {
 	ackQueue      chan ackTask
 	ackWorkerDone chan struct{}
 
-	drainCh   chan struct{} // drain 时 pendingAcks 归零通知
+	drainCh   chan struct{} // drain 时 tracker 归零通知
 	closeOnce sync.Once     // 使 Close 幂等
 	connErr   error         // closeOnce.Do 内捕获，作为 Close() 返回值
 
@@ -149,15 +142,6 @@ type CoreClient struct {
 	onAuthed        func(context.Context) // AUTH_OK 后调用（v1: SetAuthed）；nil=no-op
 	heartbeatLoopFn func(context.Context) // 心跳循环（PING 写依赖 transport）；nil=不启心跳
 	readControlFn   func(context.Context) // readControlLoop（control 帧分发依赖 binding handle*）
-}
-
-// pendingBatch 记录一个待 ACK 的 batch 元信息。
-type pendingBatch struct {
-	Seq      uint64
-	Events   int
-	Bytes    int64
-	SentAt   time.Time
-	Deadline time.Time // 此 batch 若无 ACK 的超时时刻
 }
 
 // NewCoreClient 创建共享协议核心。tr 由各 binding 提供。
@@ -173,20 +157,15 @@ func NewCoreClient(tr ClientTransport, cfg CoreClientConfig) *CoreClient {
 		metrics:    cfg.Metrics,
 		sm:         core.NewStateMachine(),
 		seq:        core.NewSeqGenerator(),
-		inflight:   &core.Inflight{},
-		window:     core.NewWindow(100, 10000, 16*1024*1024),
+		tracker:    core.NewAckTracker(100, 10000, 16*1024*1024),
 		throttle:   &core.ThrottleState{},
 		ackTimeout: 5 * time.Minute,
 		drainCh:    make(chan struct{}, 1),
 	}
 }
 
-// waitGoroutines 等待所有后台 goroutine 退出或超时（每个 goroutine 独立 5s 预算），
-// 防止 Close 无限挂起。
-//
-// 旧实现共享单个 5s timer：若第一个 goroutine 耗尽预算，剩余 goroutine 不会被等待，
-// 导致 close() 后续清理（pendingAcks 清零、keys 零化）与存活 goroutine 竞态。
-// 改为每个通道独立 timer，避免单 goroutine 拖垮整体。
+// waitGoroutines 等待所有后台 goroutine 退出或超时（每个 goroutine 独立 5s 预算），防止 Close 挂起。
+// 每个通道独立 timer，避免单 goroutine 耗尽预算后剩余 goroutine 不被等待。
 func (c *CoreClient) waitGoroutines() {
 	const waitTimeout = 5 * time.Second
 	for _, ch := range []<-chan struct{}{c.ackDone, c.reaperDone, c.heartbeatDone, c.ackWorkerDone} {
@@ -208,8 +187,7 @@ func (c *CoreClient) waitGoroutines() {
 // Close sends a CLOSE frame, drains pending ACKs, and shuts down.
 // Idempotent: subsequent calls return the error from the first close.
 //
-// sync.Once.Do 提供 happens-before 保证：Do 返回后，f() 中的所有写（含 connErr 赋值）
-// 对所有调用 Do 的 goroutine 可见，故此处 Do 外读 connErr 是安全的。
+// sync.Once.Do 提供 happens-before：Do 返回后 f() 的写对所有调用者可见，Do 外读 connErr 安全。
 func (c *CoreClient) Close() error {
 	c.closeOnce.Do(c.close)
 	return c.connErr
@@ -262,16 +240,11 @@ func (c *CoreClient) close() {
 	// 6. 等待 goroutine 实际退出。
 	c.waitGoroutines()
 
-	// 7. 清理 pending ACKs 释放引用。
-	c.pendingAcks.Range(func(key, _ any) bool {
-		c.pendingAcks.Delete(key)
-		return true
-	})
-	c.pendingCount.Store(0)
+	// 7. 清理流控 tracker（清空 inflight slot 释放引用）。
+	c.tracker.Reset()
 
 	// 8. 清零密钥（sendMu 保证无并发 SendBatch 读取）。
 	c.sendMu.Lock()
-	c.inflight.Reset()
 	if k := c.keys.Load(); k != nil {
 		k.Zero()
 		c.keys.Store(nil)
@@ -279,7 +252,6 @@ func (c *CoreClient) close() {
 	c.sendMu.Unlock()
 }
 
-// State 返回当前连接状态（供外部查询）。
 func (c *CoreClient) State() core.State {
 	return c.sm.State()
 }
@@ -364,7 +336,7 @@ func (c *CoreClient) SetSessionID(id []byte) {
 
 // UpdateWindow 更新流控窗口（从 HELLO_ACK 的 initial_window）。
 func (c *CoreClient) UpdateWindow(batches, events int, bytes int64) {
-	c.window.Update(batches, events, bytes)
+	c.tracker.UpdateLimits(batches, events, bytes)
 }
 
 // SetHeartbeatInterval 设置 PING 间隔（从 HELLO_ACK 或默认 30s）。

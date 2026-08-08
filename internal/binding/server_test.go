@@ -2,6 +2,8 @@ package binding
 
 import (
 	"context"
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,5 +58,22 @@ func TestSleepCtx(t *testing.T) {
 	cancel() // 已取消的 ctx
 	if sleepCtx(ctx, 5*time.Second) {
 		t.Error("sleepCtx should return false on already-cancelled ctx")
+	}
+}
+
+// TestRun_NilRunSpecFields 验证 Run 在 RunSpec 任一闭包为 nil 时 fail-fast 返回错误，
+// 而非后续调用 nil 闭包触发 panic。
+func TestRun_NilRunSpecFields(t *testing.T) {
+	srv := NewServer[net.Listener, net.Conn](1, HandlerConfig{})
+	ctx := context.Background()
+
+	// 所有字段都缺省（nil）的 spec。
+	spec := RunSpec[net.Listener, net.Conn]{}
+	err := srv.Run(ctx, spec)
+	if err == nil {
+		t.Fatal("Run with nil RunSpec fields expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-nil") {
+		t.Fatalf("error %q does not mention non-nil requirement", err.Error())
 	}
 }

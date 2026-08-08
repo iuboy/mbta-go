@@ -47,15 +47,15 @@ func ExampleValidateFlags() {
 }
 
 // ExampleNewError 展示结构化协议错误的构造。
-// NumCode 用于程序匹配（switch/map），Code 用于日志与线缆传输。
+// Num 用于程序匹配（switch/map），Code 是错误码字符串，经 ErrorCode 绑定。
 func ExampleNewError() {
-	err := core.NewError(core.NumValidation, core.CodeValidation, "agent_id is required")
+	err := core.NewError(core.ErrCodeValidation, "agent_id is required")
 
-	fmt.Println(err.NumCode, err.Code)
+	fmt.Println(err.Num, err.Code)
 	fmt.Println(err)
 	// Output:
-	// 4002 ERR_VALIDATION
-	// [4002 ERR_VALIDATION] agent_id is required
+	// 4002 validation_error
+	// [4002 validation_error] agent_id is required
 }
 
 // ExampleMarshalSignalBatchCodec 展示按协商 codec 编解码 SignalBatch 的 round-trip。

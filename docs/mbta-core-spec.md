@@ -427,7 +427,7 @@ Agent                          Server
 - `AUTH_OK`：下发会话密钥 `key_id` + `HMACKey` +（若协商）`SM4Key`/`AESKey`，`expires_at`；密钥随会话，连接关闭清零；
 - `AUTH_FAIL`：`code` / `reason` / `retryable`；retryable 时回传**新** `challenge_nonce`，客户端 MUST 用新挑战重算后重试（旧挑战一次性）。
 
-**前置条件（MUST）：** HELLO/HELLO_ACK 与 AUTH/AUTH_OK 均完成后，方可发送 BATCH/DATAGRAM；未认证连接发送数据帧 MUST 返回 `ERR_AUTH_REQUIRED`。
+**前置条件（MUST）：** HELLO/HELLO_ACK 与 AUTH/AUTH_OK 均完成后，方可发送 BATCH/DATAGRAM；未认证连接发送数据帧 MUST 返回 `auth_required`。
 
 ### 9.6 优雅关闭
 
@@ -637,7 +637,6 @@ QUIC 原生支持 0-RTT：客户端在握手完成前发送已 spooled 的 relia
 | mbta-tcp-binding.md             | `mbta-tls/1`（TCP+TLS1.3）、`mbta-ntls/1`（TCP+TLCP）binding 规范，须与 §10 对齐           |
 | mbta-quic-binding.md（待编写）  | `mbta/1`（QUIC+TLS1.3）、`mbta/2`（QUIC+RFC8998）、`mbta-wt/1`（WebTransport）binding 规范 |
 | performance-optimization.md     | Go 参考实现的性能与架构笔记                                                                |
-| 0-rtt-design.md                 | `early_data`（0-RTT）实现状态                                                              |
 
 binding 文档与本规范冲突时，以本规范为准。
 
