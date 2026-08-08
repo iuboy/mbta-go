@@ -130,18 +130,27 @@ func (p Policy) IsZeroPolicy() bool {
 }
 
 // DefaultPolicy 返回服务端的合理默认 Policy。cs 跟随传输 binding 合规语境
-// （v1=INTL，ntls=GM）。SupportedCapabilities 覆盖已实现的核心能力子集，使协商能
-// 与 offer 这些能力的客户端自动取交集；default 值在客户端 offer 空（无对应能力）
-// 时兜底。用户未配置 Policy 时由 NewServer 调用，避免强制要求显式配置。
+// （v1=INTL，ntls=GM，spec §8.3）。SupportedCapabilities 覆盖已实现的核心能力子集，
+// cipher capability 只含本 binding 用的那一个（声明对端 binding 的 cipher 会让协商
+// 选中后无法兑现——传输 TLS 栈用不了对应算法）。default 值在客户端 offer 空
+// （无对应能力）时兜底。用户未配置 Policy 时由 NewServer 调用。
 func DefaultPolicy(cs corepb.CipherSuite) Policy {
+	// cipher capability 跟随 binding：intl binding 只声明 cs_intl，gm 只声明 cs_gm。
+	var capCipher string
+	switch cs {
+	case corepb.CipherSuite_CIPHER_SUITE_GM:
+		capCipher = CapCSGM
+	default:
+		capCipher = CapCSIntl
+	}
 	return Policy{
-		// 已实现的核心能力：三种 codec + zstd/lz4 压缩 + intl/gm 双 cipher +
+		// 已实现的核心能力：三种 codec + zstd/lz4 压缩 + 本 binding 的 cipher +
 		// dedup（ReplayCache 已实现）。未列入的（如 multi_channel/pmtu_probe 等）
 		// 尚未实现，不声明以免协商选中后无法兑现。
 		SupportedCapabilities: []string{
 			CapCodecProto, CapCodecCbor, CapCodecJson,
 			CapCompZstd, CapCompLz4,
-			CapCSIntl, CapCSGM,
+			capCipher,
 			CapDedup,
 		},
 		DefaultCodec:       corepb.Codec_CODEC_PROTO,

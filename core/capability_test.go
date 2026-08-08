@@ -132,15 +132,17 @@ func TestPolicyValidate(t *testing.T) {
 }
 
 // TestDefaultPolicy 验证默认 Policy 的构造与自洽性：生成的 Policy 必须能通过
-// Validate（default 算法的 capability 在 SupportedCapabilities 中），且包含
-// 核心能力子集。INTL/GM 两个 cipher 变体都验证。
+// Validate（default 算法的 capability 在 SupportedCapabilities 中），且 cipher
+// capability 跟随 binding（intl 变体只含 cs_intl，gm 变体只含 cs_gm）。
 func TestDefaultPolicy(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		cs   corepb.CipherSuite
+		name    string
+		cs      corepb.CipherSuite
+		wantCap string // 期望出现在 SupportedCapabilities 的 cipher capability
+		wantNot string // 期望不出现的 cipher capability
 	}{
-		{"intl", corepb.CipherSuite_CIPHER_SUITE_INTL},
-		{"gm", corepb.CipherSuite_CIPHER_SUITE_GM},
+		{"intl", corepb.CipherSuite_CIPHER_SUITE_INTL, CapCSIntl, CapCSGM},
+		{"gm", corepb.CipherSuite_CIPHER_SUITE_GM, CapCSGM, CapCSIntl},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := DefaultPolicy(tc.cs)
@@ -153,11 +155,15 @@ func TestDefaultPolicy(t *testing.T) {
 			if p.DefaultCodec != corepb.Codec_CODEC_PROTO {
 				t.Errorf("DefaultCodec = %v, want PROTO", p.DefaultCodec)
 			}
-			// 核心能力必须含：三 codec + zstd + 双 cipher（让 v1/ntls 客户端都能协商）。
-			for _, want := range []string{CapCodecProto, CapCompZstd, CapCSIntl, CapCSGM} {
+			// 核心能力必须含：三 codec + zstd + 本 binding 的 cipher。
+			for _, want := range []string{CapCodecProto, CapCodecCbor, CapCodecJson, CapCompZstd, tc.wantCap} {
 				if !slices.Contains(p.SupportedCapabilities, want) {
 					t.Errorf("SupportedCapabilities missing %q: %v", want, p.SupportedCapabilities)
 				}
+			}
+			// 对端 binding 的 cipher 不应出现（声明后协商选中无法兑现）。
+			if slices.Contains(p.SupportedCapabilities, tc.wantNot) {
+				t.Errorf("SupportedCapabilities should not contain %q for %s binding: %v", tc.wantNot, tc.name, p.SupportedCapabilities)
 			}
 		})
 	}
