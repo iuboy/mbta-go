@@ -69,7 +69,7 @@ func TestNewClient_Validation(t *testing.T) {
 		{
 			name: "unknown stable capability",
 			mutate: func(c ClientConfig) ClientConfig {
-				c.Capabilities = []string{"codec_proto", "bogus_cap"}
+				c.Capabilities = []string{core.CapCodecProto, "bogus_cap"}
 				return c
 			},
 			wantErr: "unknown stable capabilities",

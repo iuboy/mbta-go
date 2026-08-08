@@ -22,14 +22,24 @@ const (
 const CapW3CTraceContext = "w3c_trace_context"
 
 // 导出的 stable capability 常量（core spec 附录 C）。值与 stableCapabilities 注册表
-// 保持一致——配置 Policy.SupportedCapabilities / 客户端 HELLO 时优先用这些常量，
-// 避免裸字符串拼错被静默吞掉（拼错的串既非 stable 也无前缀，Negotiate 会报协议错误）。
+// 保持一致——注册表的 key、配置 Policy.SupportedCapabilities、客户端 HELLO、pick 函数
+// 全部引用这些常量，避免裸字符串拼错被静默吞掉（拼错的串既非 stable 也无前缀，
+// Negotiate 会报协议错误）。
 const (
 	// 投递与可靠性（C.1）
-	CapPartialAck = "partial_ack"
-	CapDurableAck = "durable_ack"
-	CapDedup      = "dedup"
-	CapEarlyData  = "early_data"
+	CapPartialAck         = "partial_ack"
+	CapDurableAck         = "durable_ack"
+	CapDedup              = "dedup"
+	CapUnreliableDatagram = "unreliable_datagram"
+	CapEarlyData          = "early_data"
+	// 传输与通道（C.2）
+	CapMultiChannel  = "multi_channel"
+	CapPmtuProbe     = "pmtu_probe"
+	CapFlowClass     = "flow_class"
+	CapSymmetricRole = "symmetric_role"
+	// 帧与编码（C.3）
+	CapMoreFollows     = "more_follows"
+	CapCoalesceControl = "coalesce_control"
 	// 压缩算法（C.4）
 	CapCompZstd = "comp_zstd"
 	CapCompLz4  = "comp_lz4"
@@ -42,27 +52,30 @@ const (
 	// 密码套件语境（C.4）
 	CapCSIntl = "cs_intl"
 	CapCSGM   = "cs_gm"
+	// 数据与算法杂项（C.4）
+	CapHistogramExponential = "histogram_exponential"
 )
 
 // stableCapabilities 是已注册的 stable capability 全集（core spec 附录 C）。
-// 值标 stable 后语义冻结（§1.4）。
+// 值标 stable 后语义冻结（§1.4）。key 引用上面的 Cap* 常量，确保注册表与常量定义
+// 不会漂移（改常量值即同时改注册表 key，无需两处同步）。
 var stableCapabilities = map[string]bool{
 	// C.1 投递与可靠性
-	"partial_ack": true, "durable_ack": true, "dedup": true,
-	"unreliable_datagram": true, "early_data": true,
+	CapPartialAck: true, CapDurableAck: true, CapDedup: true,
+	CapUnreliableDatagram: true, CapEarlyData: true,
 	// C.2 传输与通道
-	"multi_channel": true, "pmtu_probe": true, "flow_class": true, "symmetric_role": true,
+	CapMultiChannel: true, CapPmtuProbe: true, CapFlowClass: true, CapSymmetricRole: true,
 	// C.3 帧与编码
-	"more_follows": true, "coalesce_control": true,
+	CapMoreFollows: true, CapCoalesceControl: true,
 	// C.4 数据与算法
-	"comp_zstd": true, "comp_lz4": true, "comp_gzip": true, "comp_none": true,
+	CapCompZstd: true, CapCompLz4: true, CapCompGzip: true, CapCompNone: true,
 	// 三种 codec 均已实现（codec_proto/cbor/json 见 core/codec_*.go + SignalCodec 注册表），
 	// 三者均作为可协商 stable capability（spec 附录 C.4）。
 	// pickCodec 按优先级 proto > cbor > json 选定，proto 是默认值。
-	"codec_proto": true, "codec_cbor": true, "codec_json": true,
-	"cs_intl": true, "cs_gm": true, "histogram_exponential": true,
+	CapCodecProto: true, CapCodecCbor: true, CapCodecJson: true,
+	CapCSIntl: true, CapCSGM: true, CapHistogramExponential: true,
 	// Trace 传播（spec §6.2.2）
-	"w3c_trace_context": true, // batch/stream 级 W3C traceparent/tracestate 协议级承载
+	CapW3CTraceContext: true, // batch/stream 级 W3C traceparent/tracestate 协议级承载
 }
 
 // IsStableCapability 报告是否为已注册的 stable capability。
@@ -233,11 +246,11 @@ func Negotiate(clientCaps []string, policy Policy) (NegotiateResult, error) {
 // cbor（constrained 场景）或 json（调试）时才降级。三者均未选定时返回 def。
 func pickCodec(set map[string]bool, def corepb.Codec) corepb.Codec {
 	switch {
-	case set["codec_proto"]:
+	case set[CapCodecProto]:
 		return corepb.Codec_CODEC_PROTO
-	case set["codec_cbor"]:
+	case set[CapCodecCbor]:
 		return corepb.Codec_CODEC_CBOR
-	case set["codec_json"]:
+	case set[CapCodecJson]:
 		return corepb.Codec_CODEC_JSON
 	}
 	return def
@@ -245,23 +258,23 @@ func pickCodec(set map[string]bool, def corepb.Codec) corepb.Codec {
 
 func pickCompression(set map[string]bool, def corepb.Compression) corepb.Compression {
 	switch {
-	case set["comp_zstd"]:
+	case set[CapCompZstd]:
 		return corepb.Compression_COMPRESSION_ZSTD
-	case set["comp_lz4"]:
+	case set[CapCompLz4]:
 		return corepb.Compression_COMPRESSION_LZ4
-	case set["comp_gzip"]:
+	case set[CapCompGzip]:
 		return corepb.Compression_COMPRESSION_GZIP
-	case set["comp_none"]:
+	case set[CapCompNone]:
 		return corepb.Compression_COMPRESSION_NONE
 	}
 	return def
 }
 
 func pickCipherSuite(set map[string]bool, def corepb.CipherSuite) corepb.CipherSuite {
-	if set["cs_gm"] {
+	if set[CapCSGM] {
 		return corepb.CipherSuite_CIPHER_SUITE_GM
 	}
-	if set["cs_intl"] {
+	if set[CapCSIntl] {
 		return corepb.CipherSuite_CIPHER_SUITE_INTL
 	}
 	return def
