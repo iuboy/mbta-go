@@ -138,56 +138,122 @@ SinkQueueSize int
 
 ---
 
-### 阶段 2：ACK 升级机制（客户端 tracker 改造）
+### 阶段 2：ACK 升级机制（分层方案：AckLevel + durable_ack 协商驱动）
 
-**范围**：客户端 AckTracker 支持"durable 升级"——先 accepted（释放流控 slot），后 durable（纯通知，触发 durable 回调）。
+**范围**：客户端 AckTracker 支持"durable 升级"。采用**分层方案**——纯 EventSink 连接保持旧行为（accepted 立即释放 slot），Durable sink 连接用 AckLevel（accepted 不释放 slot，durable 才释放）。由 `durable_ack` capability 协商驱动，无需额外配置。
 
-#### 2.1 技术障碍
+#### 2.1 设计动机：为什么不用纯非破坏性方案
 
-当前 `handleAck` 收到 ACK 立即 `tracker.Release(seq)` 释放 slot（`client_control.go:94`）。第一个 accepted 释放后，第二个 durable ACK 找不到 slot，无法"升级"。
+最初的纯非破坏性方案是"accepted 释放 slot + durable 用 chunkID 映射表"（详见 §附录 B 备选方案）。它为 wire 兼容维护一张 `durableMap`（chunkID→entry），带来额外 map 分配、注册/查询/删除逻辑、独立 reaper——是**为兼容付的工程税**。
 
-#### 2.2 解法：accepted 释放 slot + durable 用 chunkID 映射
+破坏性方案（AckSlot 记录确认级别）更干净，但对**纯 EventSink 场景致命**：EventSink 永远只发 accepted、永不到 durable，若 accepted 不释放 slot，则窗口（默认 100）快速耗尽后卡 `ackTimeout`（5 分钟）。因此不能一刀切。
 
-**不改变 accepted 的流控语义**（accepted 仍释放 slot 恢复流控），durable 作为"额外通知"：
+**分层方案**结合两者优点：纯 EventSink 连接受保护的旧行为，Durable sink 连接享干净的 AckLevel——由 capability 协商自动选择，无需用户配置。
+
+#### 2.2 协商驱动：durable_ack capability
+
+`CapDurableAck`（`core/capability.go:65`，值 `"durable_ack"`）已存在于 stable capability 注册表。复用它作为分层开关：
+
+- 服务端 sink 是 `DurableEventSink`/`RawEventSink` → HELLO_ACK 的 SelectedCapabilities 含 `durable_ack`
+- 客户端协商到 `durable_ack` → 用 **AckLevel 流控**（accepted 不释放 slot，durable 才释放）
+- 客户端未协商到 `durable_ack`（服务端用纯 EventSink）→ 用**旧行为**（accepted 立即释放 slot）
+
+客户端在 `RecvHelloAck` 后据 `negotiated.IsCapabilitySelected(CapDurableAck)` 设定 `CoreClient.useAckLevel` 标志，`handleAck` 据此分支。
+
+#### 2.3 AckLevel 流控（Durable sink 连接）
 
 ```go
-// CoreClient 新增 durable 回调映射（短期，durable 到达前有效）
-type durableEntry struct {
-    chunkID  string
-    callback func()  // 可选：durable 到达时业务回调
+// AckSlot 新增字段（AckSlot 是 core 包结构体，零外部引用，破坏面极小）
+type AckLevel int8
+const (
+    AckLevelNone     AckLevel = 0  // 未确认
+    AckLevelAccepted AckLevel = 1  // 已接受，slot 保留（仅 useAckLevel=true 时）
+    AckLevelDurable  AckLevel = 2  // 已持久化，释放 slot
+)
+
+type AckSlot struct {
+    Seq      uint64
+    ChunkID  ChunkID
+    // ... 现有字段
+    AckLevel AckLevel  // 新增
 }
-durableMap map[string]durableEntry  // chunkID → entry，SendBatch 时注册
 ```
 
-**SendBatch 注册**（仅当客户端关心 durable 时，如配了 durable ACK handler）：
+**handleAck 改造**（`client_control.go:77`）：
 ```go
-if c.durableHandler != nil {
-    c.durableMap[chunkIDText] = durableEntry{chunkID: chunkIDText}
+func (c *CoreClient) handleAck(payload []byte) {
+    // ... 解码 ack
+    switch ack.GetAckMode() {
+    case corepb.AckMode_ACK_MODE_DURABLE:
+        // durable 总是释放 slot（两种模式都是）
+        if slot, ok := c.tracker.Release(ack.GetSeq(), chunkID); ok {
+            c.metrics.BatchLatency().Observe(time.Since(slot.SentAt).Seconds())
+        }
+        c.dispatchACK(chunkIDText, "durable")
+    case corepb.AckMode_ACK_MODE_ACCEPTED:
+        if c.useAckLevel {
+            // Durable sink 连接：accepted 仅标记，不释放 slot
+            c.tracker.MarkAccepted(ack.GetSeq(), chunkID)
+            c.dispatchACK(chunkIDText, "accepted")
+        } else {
+            // 纯 EventSink 连接：accepted 立即释放（旧行为）
+            if slot, ok := c.tracker.Release(ack.GetSeq(), chunkID); ok {
+                c.metrics.BatchLatency().Observe(time.Since(slot.SentAt).Seconds())
+            }
+            c.dispatchACK(chunkIDText, "accepted")
+        }
+    }
+    c.notifyDrainIfEmpty()
 }
 ```
 
-**handleAck 改造**：
+**AckTracker 新增方法**：
 ```go
-// 收到 accepted：正常释放 slot（流控恢复），dispatchACK("accepted")
-// 收到 durable：
-//   - 若 slot 仍在（accepted 还没来，durable 先到）：释放 slot + dispatchACK("durable")
-//   - 若 slot 已释放（accepted 已处理）：查 durableMap，dispatchACK("durable")，删除 entry
+// MarkAccepted 标记 slot 为 accepted（不释放）。仅 useAckLevel=true 时调用。
+// slot 保留至 durable ACK（Release）或 ReapExpired（超时）。
+func (t *AckTracker) MarkAccepted(seq uint64, chunkID ChunkID) {
+    t.mu.Lock()
+    defer t.mu.Unlock()
+    idx := seq % AckRingSize
+    if t.slots[idx].Seq == seq && t.slots[idx].ChunkID == chunkID {
+        t.slots[idx].AckLevel = AckLevelAccepted
+    }
+}
 ```
 
-**durableMap 清理**：durable ACK 到达后删除 entry；超时未收到 durable（如服务端崩溃）由 ackReaper 兜底清理（与现有 reaper 对齐）。
+**为何对 Durable sink 安全**：Durable sink 的 batch 一定会收到 durable（持久化完成即发），slot 会被 Release。即使服务端崩溃，ackReaper 兜底回收超时 slot（`ackTimeout=5min`）。Durable sink 用户本就是为可靠投递而来，accepted 期间受窗口约束是预期内的更安全语义（未持久化 = 仍 inflight）。
 
-#### 2.2 wire 兼容性
+#### 2.4 wire 兼容性
 
-**零帧格式变更**。复用现有 AckMessage（`ack_mode` 字段已支持 ACCEPTED=1 / DURABLE=2）。客户端通过"slot 是否已释放"+"chunkID 映射"判断是首次 ACK 还是 durable 升级。
+**零帧格式变更**。复用现有 AckMessage（`ack_mode` 字段已支持 ACCEPTED=1 / DURABLE=2）。客户端通过 `useAckLevel` 标志（由协商决定）选择流控策略，wire 上无任何新字段。
 
 **向后兼容**：
-- 旧客户端（无 durableMap）：收到 durable ACK 时 slot 可能已释放，`Release` 返回 false，忽略——行为同当前（durable 当普通 ACK 处理）。
-- 旧服务端（不发 durable 升级）：只发一次 accepted/durable，客户端无升级场景——行为不变。
+- 旧客户端（无 AckLevel/useAckLevel）：行为完全同当前——accepted 立即释放 slot。即使服务端是 Durable sink，旧客户端不受影响（它不认 durable_ack 协商的特殊语义，durable ACK 当普通 Release 处理）。
+- 旧服务端（不支持异步 durable 升级）：只发一次 ACK（accepted 或 durable）。新客户端的 `useAckLevel` 仅在协商到 durable_ack 时置位，旧服务端若声明了 durable_ack 但只发一次 ACK，slot 等 durable 会超时由 reaper 回收——降级为窗口受限于 ackTimeout，不会卡死。
 
-#### 2.3 阶段 2 影响面
-- 仅客户端改造（AckTracker + durableMap）。
-- 服务端不变（阶段 3 才改服务端发 durable 升级）。
-- 阶段 2 独立可测：客户端能正确处理"先 accepted 后 durable"序列（即使服务端还不发，可用测试桩模拟）。
+#### 2.5 阶段 2 影响面
+- 客户端：AckSlot 加 AckLevel 字段、AckTracker 加 MarkAccepted 方法、handleAck 分支、RecvHelloAck 设 useAckLevel 标志。
+- 服务端：阶段 2 不变（阶段 3 才改服务端发 durable 升级）。
+- AckSlot 零外部引用（已确认），加字段不破坏外部代码。
+- 行为变更仅影响"协商到 durable_ack 的连接"——这些连接的 accepted 流控变保守（更安全），纯 EventSink 连接行为不变。
+- 独立可测：客户端能正确处理"先 accepted 后 durable"序列（测试桩模拟），及 useAckLevel 两种模式。
+
+---
+
+### 阶段 2 备选方案（已弃用：纯非破坏性 durableMap）
+
+> 本节保留供设计对比参考，不推荐实施。推荐方案见 §阶段 2（AckLevel + 协商驱动）。
+
+纯非破坏性方案不改变 accepted 流控语义（accepted 仍释放 slot），durable 用额外映射表作"纯通知"：
+
+```go
+durableMap map[string]durableEntry  // chunkID → entry，SendBatch 注册，durable 到达删除
+```
+
+**为何弃用**：
+- 维护 durableMap 的注册/查询/删除 + 独立超时 reaper，工程税高。
+- accepted 释放 slot 后，durable 是"无状态通知"——丢失 durable 不影响流控，但业务可能误以为未持久化。
+- 分层方案（AckLevel）对 Durable sink 更干净（slot 直接记 AckLevel，durable 用 seq 定位），对 EventSink 无伤害（协商不到 durable_ack 保持旧行为）。
 
 ---
 
@@ -231,9 +297,9 @@ type AsyncDurableSink interface {
 ```
 
 #### 3.3 阶段 3 影响面
-- 协议层：routeAndACK 的 Durable/Raw 分支改为投 queue（同阶段 1 模式），worker 调 `OnSignalBatchAsync`。
+- 协议层：routeAndACK 的 Durable/Raw 分支改为投 queue（同阶段 1 模式），worker 调 `OnSignalBatchAsync`。NotifyDurable 触发发 ACK durable 帧。
 - sink 实现：需实现 AsyncDurableSink 才享异步（否则回退同步）。
-- 客户端：阶段 2 已就绪（能处理 durable 升级）。
+- 客户端：阶段 2 已就绪（AckLevel 流控——accepted 标记 slot，durable 释放 slot，见 §2.3）。
 
 ---
 
@@ -242,10 +308,12 @@ type AsyncDurableSink interface {
 | 阶段 | 帧格式变更 | enum 变更 | 兼容性 |
 | --- | --- | --- | --- |
 | 1 | 无 | 无 | 完全兼容（内部异步，wire 不变） |
-| 2 | 无 | 无 | 完全兼容（复用 AckMessage.ack_mode，客户端侧映射） |
+| 2 | 无 | 无 | 行为分层：纯 EventSink 连接完全兼容（旧行为）；Durable sink 连接 accepted 流控变保守（AckLevel，协商驱动） |
 | 3 | 无 | 无 | 完全兼容（服务端发 durable 升级 = 复用 AckMessage DURABLE） |
 
-**整个设计零帧格式变更**。ACK 升级靠"同一 batch 发两次 ACK"（先 accepted 后 durable），客户端通过 slot 状态 + chunkID 映射识别。这是纯客户端/服务端实现层逻辑，不触及 wire。
+**整个设计零帧格式变更**。ACK 升级靠"同一 batch 发两次 ACK"（先 accepted 后 durable），客户端通过 `useAckLevel`（durable_ack 协商决定）+ AckSlot.AckLevel 识别。纯客户端/服务端实现层逻辑，不触及 wire。
+
+**阶段 2 的行为破坏边界**：仅"协商到 `durable_ack` 的连接"的 accepted 流控语义变更（accepted 不释放 slot，等 durable）。纯 EventSink 连接（协商不到 durable_ack）行为完全不变。这是有意的语义收紧——Durable sink 的"未持久化=仍 inflight"由流控强制表达。
 
 ---
 
@@ -255,25 +323,28 @@ type AsyncDurableSink interface {
 | --- | --- | --- | --- |
 | 普通 EventSink 背压 | SinkTimeout 粗粒度 | queue 满精确背压 | queue 满精确背压 |
 | Durable/Raw sink 背压 | SinkTimeout + RouteResult.Throttle | 同步（SinkTimeout） | queue 满精确背压 |
+| Durable sink 的 ACK 流控 | accepted 立即释放 slot | 阶段 2 后：accepted 标记 slot 不释放，durable 才释放（AckLevel，更安全） | 同阶段 2 |
 | OnPressure 前置 | sink critical 时 THROTTLE | 保留 | 保留 |
 | 慢 sink 下内存 | goroutine × batch 累积 | queue 封顶（256） | queue 封顶（256） |
 | 协议层吞吐 | 被 sink 拖累 | 解耦（普通 sink） | 完全解耦 |
+
+> 阶段 2 引入的 AckLevel 流控让 Durable sink 连接的 accepted 行为更保守（窗口在 durable 前不恢复）。这降低了纯 Durable 模式的峰值吞吐（窗口更快耗尽），但换来更正确的背压语义（未持久化 batch 仍占 inflight 配额）。
 
 ---
 
 ## 6. 迁移路径
 
 1. **阶段 1 先行**（推荐立即实施）：EventSink 异步化，解决最常见 sink 的 DoS 面。接口不变，现有 EventSink 实现零改动即可受益。
-2. **阶段 2 跟进**：客户端 AckTracker 改造，为阶段 3 铺路。独立可测（测试桩模拟 durable 升级序列）。
+2. **阶段 2 跟进**：客户端 AckTracker 加 AckLevel + durable_ack 协商驱动的 useAckLevel 标志。为阶段 3 铺路。独立可测（测试桩模拟 accepted→durable 序列 + 两种 useAckLevel 模式）。
 3. **阶段 3 完成**：Durable/Raw sink 通过 AsyncDurableSink 可选接口异步化。老 sink 实现回退同步，新实现享异步。
 
-**回退保证**：每个阶段独立，任何阶段失败可回退到上一阶段的行为（阶段 3 回退到同步 Durable，阶段 2 回退到无 durableMap，阶段 1 回退到同步 EventSink）。
+**回退保证**：每个阶段独立，任何阶段失败可回退到上一阶段的行为（阶段 3 回退到同步 Durable，阶段 2 回退到 useAckLevel=false 即旧行为，阶段 1 回退到同步 EventSink）。
 
 ---
 
 ## 7. 待决问题（Open Questions）
 
-1. **durableMap 生命周期**：durable ACK 超时未到时，entry 何时清理？建议 ackReaper 统一兜底（与现有 batch 超时 reaper 对齐），超时阈值需定义（如 2× heartbeat）。
+1. **阶段 2 的 AckLevel 超时**：Durable sink 连接下，accepted 后等 durable 期间 slot 占用。若服务端崩溃不发 durable，slot 靠 ackReaper（ackTimeout=5min）回收。是否需要更短的"durable 专用超时"（如 2× heartbeat）避免长时间占窗口？建议初期复用 ackTimeout，监控后再调。
 2. **阶段 3 的 sink 错误语义**：异步路径下 sink 返回 error 怎么处理？普通 EventSink 忽略（现状）；AsyncDurableSink 的持久化失败是否发 NACK？建议不发 NACK（durable 是"升级"，缺失 durable 不代表失败，客户端靠超时重试）。
 3. **worker 数量调优**：默认 runtime.NumCPU() 是否合适？高吞吐场景可能需要绑定。建议 HandlerConfig 可配 SinkWorkers。
 4. **与 0-RTT 的交互**：0-RTT early data 的 batch 也走异步 queue 吗？建议是（0-RTT batch 同样经 routeAndACK）。
@@ -285,7 +356,7 @@ type AsyncDurableSink interface {
 | 阶段 | 测试 |
 | --- | --- |
 | 1 | queue 满发 THROTTLE；慢 sink 不阻塞协议层（throughput 对比）；worker pool 回收（连接关闭无泄漏） |
-| 2 | 先 accepted 后 durable 序列正确升级回调；durable 超时清理；旧客户端收到 durable 不崩溃 |
+| 2 | 协商到 durable_ack 时 useAckLevel=true（accepted 标记 slot 不释放，durable 释放）；纯 EventSink 连接 useAckLevel=false（accepted 立即释放，旧行为）；旧客户端收到 durable 不崩溃；AckLevel 超时由 ackReaper 回收 |
 | 3 | AsyncDurableSink 异步 durable 升级端到端；老 DurableEventSink 回退同步；raw batch 异步 durable |
 
 ---
