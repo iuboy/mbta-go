@@ -23,6 +23,7 @@
 | 文档 | 说明 |
 |------|------|
 | [performance-optimization.md](./performance-optimization.md) | Go 参考实现的性能与架构笔记。对象池/ring buffer/分片等属 Go 优化，不构成协议一致性要求。 |
+| [sink-async-design.md](./sink-async-design.md) | Sink 异步化与 ACK 升级设计草案（未实施）。三阶段：EventSink fire-and-forget → 客户端 ACK 升级机制 → DurableEventSink/RawEventSink 异步化。解决协议层与 sink 同步耦合的 DoS 面。 |
 
 ### 客户端函数调用图（client-side）
 
