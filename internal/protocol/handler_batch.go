@@ -98,6 +98,13 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 		h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeWindowExceeded, "server flow-control window exceeded")
 		return
 	}
+	// 前置背压检查：sink 已 critical 时直接 THROTTLE，不进入 route，避免慢/恶意 sink
+	// 阻塞 handler goroutine（DoS 防护）。ReplayProcessing 重试路径不经过此处（它在
+	// replay 检查后 fallthrough），故被限流 batch 的重投不受影响。
+	if h.isPressureCritical() {
+		h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeQueuePressure, "sink critical pressure, retry later")
+		return
+	}
 	h.inflight.Add(batchEvents, batchBytes)
 
 	// Replay 去重。
@@ -180,6 +187,16 @@ func (h *CoreHandler) codecForUnmarshal() corepb.Codec {
 	return h.config.Policy.DefaultCodec
 }
 
+// isPressureCritical 查询 sink 当前背压，返回是否处于 critical（应拒绝新 batch）。
+// 用于 route 前置拦截：sink 已 critical 时直接 THROTTLE，避免慢 sink 下 handler
+// goroutine 阻塞放大。nil sink 或非 EventSink 实现返回 false（不拦截）。
+func (h *CoreHandler) isPressureCritical() bool {
+	if h.config.Sink == nil {
+		return false
+	}
+	return h.config.Sink.OnPressure(h.getAgentID()) == core.PressureCritical
+}
+
 // resolveBatchEvents 解析事件数（RawEventSink 快速路径 vs 完整解码）。batchEvents<0 表示已发 NACK。
 func (h *CoreHandler) resolveBatchEvents(ctx context.Context, batchMsg *corepb.BatchMessage) (int, *core.SignalBatch) {
 	rawSink, _ := h.config.Sink.(core.RawEventSink)
@@ -253,11 +270,16 @@ func (h *CoreHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
 func (h *CoreHandler) routeAndACK(ctx context.Context, agentID, chunkID string, batchMsg *corepb.BatchMessage, signalBatch *core.SignalBatch, batchEvents int, batchBytes int64) {
 	defer h.inflight.Remove(batchEvents, batchBytes)
 
+	// sink 调用用带超时的 ctx，防慢/恶意 sink 阻塞 handler goroutine（DoS 防护）。
+	// 超时后 sink 返回 ctx.Err，route 视为失败继续发 ACK（不阻塞 inflight 释放）。
+	sinkCtx := h.sinkContext(ctx)
+	defer sinkCtx.Cancel()
+
 	// 旁路通知 batch 级 trace 上下文（不改变路由/ACK 逻辑）。仅当 sink 实现
 	// BatchTraceSink 且该 batch 携带 TraceContext 时触发；现有 sink 实现零影响。
 	if tc := batchMsg.GetTraceContext(); tc != nil {
 		if ts, ok := h.config.Sink.(core.BatchTraceSink); ok {
-			ts.OnBatchTraceContext(ctx, agentID, tc) // *corepb.TraceContext 即 *core.TraceContext（类型别名）
+			ts.OnBatchTraceContext(sinkCtx.ctx, agentID, tc) // *corepb.TraceContext 即 *core.TraceContext（类型别名）
 		}
 	}
 
@@ -265,30 +287,73 @@ func (h *CoreHandler) routeAndACK(ctx context.Context, agentID, chunkID string, 
 
 	if h.config.Sink != nil {
 		if rawSink, ok := h.config.Sink.(core.RawEventSink); ok && signalBatch == nil {
-			result, err := rawSink.OnRawBatch(ctx, h.getAgentID(), batchEvents, batchMsg.GetBatch())
+			result, err := rawSink.OnRawBatch(sinkCtx.ctx, h.getAgentID(), batchEvents, batchMsg.GetBatch())
 			if err != nil {
 				slog.Warn("raw routing failed", "error", err)
-			} else if h.applyRouteResult(ctx, result, agentID, chunkID, &ackMode) {
+			} else if h.applyRouteResult(sinkCtx.ctx, result, agentID, chunkID, &ackMode) {
 				return
 			}
 		} else if durable, ok := h.config.Sink.(core.DurableEventSink); ok {
-			result, err := durable.OnSignalBatchWithResult(ctx, h.getAgentID(), signalBatch)
+			result, err := durable.OnSignalBatchWithResult(sinkCtx.ctx, h.getAgentID(), signalBatch)
 			if err != nil {
 				slog.Warn("durable routing failed", "error", err)
-			} else if h.applyRouteResult(ctx, result, agentID, chunkID, &ackMode) {
+			} else if h.applyRouteResult(sinkCtx.ctx, result, agentID, chunkID, &ackMode) {
 				return
 			}
 		} else {
-			if err := h.config.Sink.OnSignalBatch(ctx, h.getAgentID(), signalBatch); err != nil {
-				slog.Warn("event routing failed", "error", err)
+			// 普通 EventSink：goroutine 隔离 + 超时放弃，防不响应 ctx 的慢/阻塞 sink
+			// 卡死 handler goroutine（DoS 防护）。超时则发 THROTTLE + 重置 replay 为 Processing
+			// （与 applyRouteResult 的 Throttle 分支对称），让客户端重试时重新投递。
+			done := make(chan error, 1)
+			go func() { done <- h.config.Sink.OnSignalBatch(sinkCtx.ctx, h.getAgentID(), signalBatch) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					slog.Warn("event routing failed", "error", err)
+				}
+				pressure := h.config.Sink.OnPressure(h.getAgentID())
+				h.applyPressure(sinkCtx.ctx, pressure)
+			case <-sinkCtx.ctx.Done():
+				slog.Warn("sink route timeout, throttling for retry", "timeout", h.sinkTimeoutValue())
+				// 重置 replay 为 Processing，使客户端重试时重新投递（否则 replay 命中 Accepted
+				// 会 fast-path ACK，batch 永不真正投递，造成静默数据丢失）。
+				h.replay.Update(agentID, chunkID, core.ReplayProcessing)
+				h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeQueuePressure, "sink route timeout, retry later")
+				return
 			}
-			pressure := h.config.Sink.OnPressure(h.getAgentID())
-			h.applyPressure(ctx, pressure)
 		}
 	}
 
 	// BatchesAcked 由 sendAck 内部统一计数，避免正常路径与 replay 路径(第 107 行)重复或遗漏。
 	h.sendAck(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), batchEvents, ackMode)
+}
+
+// sinkContext 返回一个带 SinkTimeout 限制的 ctx 及其 cancel。SinkTimeout<=0 用
+// defaultSinkTimeout；负值表示不限（仅测试场景）。用于 routeAndACK 防 DoS。
+type sinkCtx struct {
+	ctx    context.Context
+	Cancel context.CancelFunc
+}
+
+func (h *CoreHandler) sinkContext(parent context.Context) sinkCtx {
+	to := h.config.SinkTimeout
+	if to == 0 {
+		to = defaultSinkTimeout
+	}
+	if to < 0 {
+		// 不限超时：返回父 ctx + 空操作 cancel。
+		return sinkCtx{ctx: parent, Cancel: func() {}}
+	}
+	ctx, cancel := context.WithTimeout(parent, to)
+	return sinkCtx{ctx: ctx, Cancel: cancel}
+}
+
+// sinkTimeoutValue 返回生效的 sink 超时值（用于日志）。负值=不限。
+func (h *CoreHandler) sinkTimeoutValue() time.Duration {
+	if h.config.SinkTimeout == 0 {
+		return defaultSinkTimeout
+	}
+	return h.config.SinkTimeout
 }
 
 func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteResult, agentID, chunkID string, ackMode *corepb.AckMode) bool {

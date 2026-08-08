@@ -60,6 +60,11 @@ type CoreClientConfig struct {
 	// Metrics 可选的可观测性接口（nil 回退 NoOpMetrics）。客户端侧指标
 	// （BatchesSent/BatchLatency）由此上报。
 	Metrics core.Metrics
+
+	// DrainTimeout 限制 Close 时等待未 ACK batch 的最长时间。0 = 用 core.DefaultDrainTimeout。
+	// 这是 best-effort 兜底：未在超时内确认的 batch 会丢失（契约：未 ACK batch 的持久化
+	// 与重发由调用方负责）。缩短此值可减少"发完即 Close"场景下客户端 goroutine 的等待窗口。
+	DrainTimeout time.Duration
 }
 
 // ackTask 是排队等待执行的用户 ACK/NACK 回调。
@@ -100,8 +105,8 @@ type CoreClient struct {
 	expiresAt atomic.Int64
 
 	// 发送追踪
-	seq     *core.SeqGenerator
-	tracker *core.AckTracker // 替代 inflight+window+pendingAcks 三结构，seq-indexed ring buffer
+	seq      *core.SeqGenerator
+	tracker  *core.AckTracker // 替代 inflight+window+pendingAcks 三结构，seq-indexed ring buffer
 	throttle *core.ThrottleState
 
 	// sendMu 保护「CanSend 检查 + 取 seq/chunkID + Reserve 登记」，
@@ -215,7 +220,11 @@ func (c *CoreClient) close() {
 
 	// 3. 等待 drain。readControlLoop 仍运行，handleAck 持续触发 notifyDrainIfEmpty。
 	if c.sm.State() == core.StateDraining {
-		drainDeadline := time.NewTimer(core.DefaultDrainTimeout)
+		drainTimeout := c.cfg.DrainTimeout
+		if drainTimeout <= 0 {
+			drainTimeout = core.DefaultDrainTimeout
+		}
+		drainDeadline := time.NewTimer(drainTimeout)
 		for c.sm.State() == core.StateDraining {
 			select {
 			case <-drainDeadline.C:

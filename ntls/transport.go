@@ -11,6 +11,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/iuboy/mbta-go/core"
 	corepb "github.com/iuboy/mbta-go/corepb"
@@ -82,6 +83,9 @@ type ClientConfig struct {
 	OS           string
 	AgentVersion string
 	Metrics      core.Metrics // 可选：客户端可观测性指标（nil=NoOp）
+	// DrainTimeout 限制 Close 时等待未 ACK batch 的最长时间。0=用默认(30s)。
+	// 缩短可减小"发完即 Close"的等待窗口；未确认的 batch 会丢（调用方负责重发）。
+	DrainTimeout time.Duration
 }
 
 // --- TLCP 配置构建 ---

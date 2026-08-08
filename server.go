@@ -142,6 +142,20 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+// Addr 返回已启用版本的监听地址（Start 完成监听后有效；启动前返回空串）。
+// 同时启用 v1+ntls 时返回 v1 地址。用于黑盒测试在 :0 随机端口启动后拿到实际地址。
+func (s *Server) Addr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.v1Server != nil {
+		return s.v1Server.Addr()
+	}
+	if s.ntlsServer != nil {
+		return s.ntlsServer.Addr()
+	}
+	return ""
+}
+
 // Close gracefully shuts down all version servers.
 func (s *Server) Close() error {
 	s.mu.Lock()

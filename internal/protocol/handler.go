@@ -29,6 +29,10 @@ const (
 	// maxDrainTimeout 限制客户端 close_timeout_ms 的上限，防恶意客户端发 MaxUint32
 	// 致 handler goroutine 阻塞 ~49 天（内存/goroutine DoS）。
 	maxDrainTimeout = 30 * time.Second
+	// defaultSinkTimeout 是 routeAndACK 调用 sink 的默认超时（HandlerConfig.SinkTimeout
+	// 为 0 时用此值）。防慢/恶意 sink 阻塞 handler goroutine 导致 DoS：超时后发 NACK
+	// 释放 inflight，让客户端重试，handler goroutine 不永久挂起。
+	defaultSinkTimeout = 10 * time.Second
 )
 
 // envelope 算法一致性复核失败的 wire NACK code 定义在 core.ErrCodeEnvelopeAlgoMismatch
@@ -39,11 +43,15 @@ type HandlerConfig struct {
 	Auth            core.TokenValidator
 	Policy          core.Policy
 	Sink            core.EventSink
-	Metrics         core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreHandler）
+	Metrics         core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreClient）
 	ServerID        string
 	SessionStore    *core.SessionStore   // 0-RTT resumption（可选，nil = 不支持 early_data）
 	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
 	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）：AUTH_OK 后 CONNECTED、连接断开 DISCONNECTED
+	// SinkTimeout 限制 routeAndACK 调用 sink 的最长耗时。0 = 用 defaultSinkTimeout(10s)；
+	// 负值 = 不限（仅测试/受控场景用，生产不推荐——慢 sink 会阻塞 handler goroutine）。
+	// 防 DoS：慢/恶意 sink 超时后发 NACK 释放 inflight，客户端可重试。
+	SinkTimeout time.Duration
 }
 
 // CoreHandler 是 server 端协议状态机核心，仅依赖 Transport 接口，

@@ -28,6 +28,9 @@ type ClientConfig struct {
 	OS           string       // agent 操作系统（如 runtime.GOOS：linux/darwin/windows）
 	AgentVersion string       // agent 构建版本（空则回退 "0.1.0"）
 	Metrics      core.Metrics // 可选：客户端可观测性指标（nil=NoOp）
+	// DrainTimeout 限制 Close 时等待未 ACK batch 的最长时间。0=用默认(30s)。
+	// 缩短可减小"发完即 Close"的等待窗口；未确认的 batch 会丢（调用方负责重发）。
+	DrainTimeout time.Duration
 }
 
 // Client is an MBTA agent that connects to a server and sends event batches.
@@ -178,6 +181,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		DefaultCipherSuite: corepb.CipherSuite_CIPHER_SUITE_INTL,
 		DefaultCompression: corepb.Compression_COMPRESSION_ZSTD,
 		Metrics:            cfg.Metrics,
+		DrainTimeout:       cfg.DrainTimeout,
 	})
 	cc.SetReadControlLoop(cc.ReadControlLoop)
 	cc.SetHeartbeatLoop(cc.HeartbeatLoop)
