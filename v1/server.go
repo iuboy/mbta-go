@@ -33,7 +33,10 @@ type Server struct {
 
 // NewServer creates a new MBTA server.
 func NewServer(cfg ServerConfig) (*Server, error) {
-	// fail-fast：Auth/Sink/Policy 为空属严重误配，构造时暴露。
+	// fail-fast：Address/Auth/Sink/Policy 为空或非法属严重误配，构造时暴露。
+	if err := core.ValidateListenAddr(cfg.Transport.Address); err != nil {
+		return nil, core.WrapError(core.ErrCodeConfig, "Transport.Address", err)
+	}
 	if cfg.Auth == nil {
 		return nil, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
 	}

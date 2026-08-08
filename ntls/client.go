@@ -100,6 +100,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if unknown := core.FilterUnknownStable(cfg.Capabilities); len(unknown) > 0 {
 		return nil, core.NewError(core.ErrCodeProtocol, fmt.Sprintf("unknown stable capabilities: %v", unknown))
 	}
+	// TLCP 双 SM2 客户端证书一致性：sign 对（SignCert+SignKey）与 enc 对（EncCert+EncKey）
+	// 各自要么都填要么都空。部分填充（如只填 SignCert 漏 SignKey）此前要拖到 Dial 的
+	// LoadDualCertificateFiles 才报错，这里 fail-fast 暴露。
+	if cfg.Credentials != nil && !cfg.Credentials.TLSMode {
+		if err := validateDualSM2Creds(cfg.Credentials); err != nil {
+			return nil, err
+		}
+	}
 	cc := protocol.NewCoreClient(nil, protocol.CoreClientConfig{
 		AgentID:      cfg.AgentID,
 		Hostname:     cfg.Hostname,

@@ -233,3 +233,38 @@ func TestValidateHostPort(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateListenAddr 覆盖服务端监听地址校验。与 TestValidateHostPort 的区别：
+// 允许 host 为空（":7400" 全网卡）和 port=0（系统分配，e2e 常用）。
+func TestValidateListenAddr(t *testing.T) {
+	tests := []struct {
+		name    string
+		addr    string
+		wantErr bool
+	}{
+		{"valid host:port", "0.0.0.0:7400", false},
+		{"valid 127.0.0.1", "127.0.0.1:7400", false},
+		{"valid ipv6", "[::1]:7400", false},
+		{"valid omit host", ":7400", false},       // 全网卡监听
+		{"valid port zero", "127.0.0.1:0", false}, // 系统分配端口
+		{"valid omit host port zero", ":0", false},
+		{"valid port boundary 1", "host:1", false},
+		{"valid port boundary 65535", "host:65535", false},
+		{"empty", "", true},
+		{"missing port", "localhost", true},
+		{"port out of range", "host:65536", true},
+		{"port zero only valid with host", "host:0", false},
+		{"port non-numeric", "host:abc", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateListenAddr(tt.addr)
+			if tt.wantErr && err == nil {
+				t.Errorf("ValidateListenAddr(%q) expected error, got nil", tt.addr)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ValidateListenAddr(%q) unexpected error: %v", tt.addr, err)
+			}
+		})
+	}
+}

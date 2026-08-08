@@ -193,6 +193,22 @@ func (l *Listener) Accept() (net.Conn, error) { return l.inner.Accept() }
 func (l *Listener) Close() error              { return l.inner.Close() }
 func (l *Listener) Addr() net.Addr            { return l.inner.Addr() }
 
+// validateDualSM2Creds 校验 TLCP 客户端双 SM2 凭证的一致性：sign 对与 enc 对
+// 各自的 cert 和 key 必须同填或同空。部分填充（如 SignCert 非空但 SignKey 空）
+// 此前要拖到 Dial 的 LoadDualCertificateFiles 才报错，NewClient 构造期 fail-fast。
+// 全空合法（=不带客户端证书，用于非 mTLS 场景）。
+func validateDualSM2Creds(c *ClientCredentials) error {
+	if (c.SignCertFile != "") != (c.SignKeyFile != "") {
+		return core.NewError(core.ErrCodeCredential,
+			"SignCertFile and SignKeyFile must both be set or both empty")
+	}
+	if (c.EncCertFile != "") != (c.EncKeyFile != "") {
+		return core.NewError(core.ErrCodeCredential,
+			"EncCertFile and EncKeyFile must both be set or both empty")
+	}
+	return nil
+}
+
 func Listen(cfg *ServerConfig) (*Listener, error) {
 	if cfg.TLSMode {
 		tc, err := buildServerTLS13(cfg)
@@ -277,8 +293,8 @@ type Server struct {
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
-	if cfg.Address == "" {
-		return nil, core.NewError(core.ErrCodeConfig, "address required")
+	if err := core.ValidateListenAddr(cfg.Address); err != nil {
+		return nil, core.WrapError(core.ErrCodeConfig, "Address", err)
 	}
 	// fail-fast：Auth/Sink/Policy 缺失属严重误配。
 	if cfg.Auth == nil {

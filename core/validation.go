@@ -208,6 +208,34 @@ func ValidateHostPort(addr string) error {
 	return nil
 }
 
+// ValidateListenAddr 校验服务端监听地址（v1 QUIC/UDP 与 ntls TCP 共用）。
+//
+// 与 ValidateHostPort 的关键区别：监听地址允许 host 为空（":7400" = 全网卡，
+// Go net.Listen/quic.Listen 合法）和 port=0（系统分配端口，e2e 测试常用）。
+// 客户端 dial 地址则要求 host 非空 + port 1-65535，故二者用不同 helper。
+//
+// 仅校验结构性错误（缺端口、端口越界）；IP/host 合法性判断留给操作系统 listen
+// （listen 是权威校验源，能区分格式错/地址不可 bind/权限不足/端口占用，库内重复
+// 实现这套判断既不完整又可能与 OS 行为不一致）。在 NewServer 构造期 fail-fast 调用，
+// 避免错误地址拖到 Start→Listen 才报低层错误。
+func ValidateListenAddr(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return NewError(ErrCodeConfig, fmt.Sprintf("invalid listen address %q: %v", addr, err))
+	}
+	if port == "" {
+		return NewError(ErrCodeConfig, fmt.Sprintf("invalid listen address %q: missing port", addr))
+	}
+	// port=0 合法（系统分配端口）；非 0 时校验范围。
+	if port != "0" {
+		p, err := strconv.Atoi(port)
+		if err != nil || p < 1 || p > 65535 {
+			return NewError(ErrCodeConfig, fmt.Sprintf("invalid listen address %q: port out of range", addr))
+		}
+	}
+	return nil
+}
+
 // SanitizeForLog 清洗用于日志输出的网络来源字符串：截断超长值，把所有 C0 控制字符
 // （0x00-0x1F）和 DEL（0x7F）替换为空格。用于 slog 打印 reason 等不可信字段，
 // 防御日志注入（换行伪造日志行、ANSI 转义终端注入、null 截断等）。

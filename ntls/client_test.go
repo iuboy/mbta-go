@@ -73,6 +73,34 @@ func TestNewClient_Validation(t *testing.T) {
 				return c
 			},
 		},
+		{
+			name: "tlcp sign cert/key inconsistent",
+			mutate: func(c ClientConfig) ClientConfig {
+				c.Credentials = &ClientCredentials{
+					SignCertFile: "sign.pem", // SignKeyFile 漏填
+				}
+				return c
+			},
+			wantErr: "SignCertFile and SignKeyFile",
+		},
+		{
+			name: "tlcp enc cert/key inconsistent",
+			mutate: func(c ClientConfig) ClientConfig {
+				c.Credentials = &ClientCredentials{
+					EncKeyFile: "enc.key", // EncCertFile 漏填
+				}
+				return c
+			},
+			wantErr: "EncCertFile and EncKeyFile",
+		},
+		{
+			name: "tlcp dual sm2 all empty allowed",
+			mutate: func(c ClientConfig) ClientConfig {
+				// 全空 = 不带客户端证书，合法（非 mTLS）。
+				c.Credentials = &ClientCredentials{}
+				return c
+			},
+		},
 	}
 
 	for _, tt := range tests {
