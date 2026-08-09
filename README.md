@@ -18,7 +18,7 @@ go get github.com/iuboy/mbta-go
 
 > **本地开发 / 源码构建说明**
 >
-> v2（QUIC + RFC 8998 国密 TLS）与 ntls（TCP + TLCP）绑定依赖私有库
+> ntls（TCP + TLCP）绑定依赖私有库
 > `github.com/iuboy/pollux-go`（提供 SM2/SM3/SM4/TLCP 实现），该依赖通过
 > [Go workspace](https://go.dev/ref/mod#workspaces)（`go.work`）引入，**不在
 > `go.mod` 中声明**。
@@ -136,7 +136,6 @@ client.SetACKHandler(func(chunkID, ackMode string) {
 | 3000-3099 | 协议 | `NumProtocol`   |
 | 4000-4099 | 数据 | `NumBatch`      |
 | 5000-5099 | 流控 | `NumWindowFull` |
-| 6000-6099 | 存储 | `NumSpool`      |
 | 7000-7099 | 版本 | `NumVersion`    |
 
 ### 程序化错误匹配
@@ -149,8 +148,6 @@ case core.NumWindowFull:
     // 窗口满，等待后重试
 case core.NumThrottle:
     // 被限流
-case core.NumSpool:
-    // 本地存储错误
 default:
     // 其他错误
 }
@@ -193,6 +190,15 @@ if errors.Is(err, core.NewError(core.NumAuth, core.ErrAuth, "")) {
 | `WithMetrics(metrics)`     | 注入 Prometheus 指标收集器    |
 | `WithRedirectChecker(fn)`  | HA leader 重定向检查          |
 | `WithOnSession(fn)`        | 会话生命周期回调              |
+
+## 示例
+
+完整可运行的客户端 / 服务端示例位于 [`examples/`](./examples/)：
+
+- [`examples/basic_client/`](./examples/basic_client/) —— 最小客户端：Dial + SendBatch
+- [`examples/basic_server/`](./examples/basic_server/) —— 最小服务端：监听 + EventSink + 认证
+
+示例使用 `test/data/certificates/` 下的测试证书（由 `gen_certs.sh` 生成，见 [CONTRIBUTING.md](./CONTRIBUTING.md)）。
 
 ## 架构
 

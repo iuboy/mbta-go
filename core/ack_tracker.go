@@ -26,9 +26,8 @@ type AckSlot struct {
 	SentAt   time.Time // 发送时刻，BatchLatency 观测 + reaper 超时判定
 	Deadline time.Time // 此 batch 无 ACK 的超时时刻，供 ReapExpired 判定
 	// AckLevel 记录本 batch 的确认级别（仅 useAckLevel=true 的连接使用）。
-	// AckLevelAccepted：已接受但未持久化，slot 保留（等 durable 或超时）。
-	// AckLevelDurable/零：Durable ACK 经 Release 释放 slot 时级别无关紧要。
-	// 零值（AckLevelNone）= 未确认，兼容 useAckLevel=false 的旧路径（不读取此字段）。
+	// AckLevelAccepted：已接受但未持久化，slot 保留（等 durable ACK 经 Release 释放）。
+	// 零值 = 未确认，兼容 useAckLevel=false 的路径（不读取此字段）。
 	AckLevel AckLevel
 }
 
@@ -36,12 +35,9 @@ type AckSlot struct {
 type AckLevel int8
 
 const (
-	// AckLevelNone 未收到任何 ACK（零值）。
-	AckLevelNone AckLevel = 0
-	// AckLevelAccepted 已收到 accepted ACK（仅 useAckLevel=true 时标记，slot 保留）。
+	// AckLevelAccepted 已收到 accepted ACK（仅 useAckLevel=true 时标记，slot 保留至 durable）。
+	// durable ACK 经 Release 释放 slot，无需单独级别标记。
 	AckLevelAccepted AckLevel = 1
-	// AckLevelDurable 已收到 durable ACK（释放 slot）。
-	AckLevelDurable AckLevel = 2
 )
 
 // AckTracker 是 client 端流控的单一数据结构，定长，编译期确定内存。
@@ -276,12 +272,12 @@ func (t *AckTracker) recomputeOldestSeqLocked() {
 		t.oldestSeq = 0
 		return
 	}
-	var min uint64
+	var minSeq uint64
 	for i := range t.slots {
 		s := &t.slots[i]
-		if s.Seq != 0 && (min == 0 || s.Seq < min) {
-			min = s.Seq
+		if s.Seq != 0 && (minSeq == 0 || s.Seq < minSeq) {
+			minSeq = s.Seq
 		}
 	}
-	t.oldestSeq = min // count>0 时 min 必非零
+	t.oldestSeq = minSeq // count>0 时 minSeq 必非零
 }

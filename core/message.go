@@ -34,9 +34,9 @@ type (
 	AckMode = corepb.AckMode
 )
 
-// knownFrameVersions 是当前已知的帧版本集合（用于 HELLO.frame_version 校验）。
-// 新增版本时在此登记，防止服务端接受未声明的版本（降级攻击面）。
-var knownFrameVersions = map[uint32]bool{1: true}
+// currentFrameVersion 是当前支持的唯一 wire 版本。
+// 新增版本时改为集合校验（目前仅 v1，无需 map）。
+const currentFrameVersion uint32 = 1
 
 // ValidateHello 校验 HELLO。agent_id 必填且须通过长度/控制字符校验；
 // frame_version 必须是已支持的版本。
@@ -48,7 +48,7 @@ func ValidateHello(m *HelloMessage) error {
 		return err
 	}
 	// 校验 frame_version：0 或未知版本一律拒绝，避免降级攻击或后续编解码异常。
-	if !knownFrameVersions[m.GetFrameVersion()] {
+	if m.GetFrameVersion() != currentFrameVersion {
 		return NewError(ErrCodeValidation, fmt.Sprintf("unsupported frame_version: %d", m.GetFrameVersion()))
 	}
 	return nil

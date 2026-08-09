@@ -22,11 +22,6 @@ func (g *SeqGenerator) Next() uint64 {
 	return g.seq.Add(1)
 }
 
-// Current returns the last issued sequence number.
-func (g *SeqGenerator) Current() uint64 {
-	return g.seq.Load()
-}
-
 // ReplayStatus represents the processing state of a chunk.
 type ReplayStatus int
 
@@ -37,8 +32,6 @@ const (
 	ReplayAccepted
 	// ReplayDurable 表示数据块已持久化。
 	ReplayDurable
-	// ReplayRejected 表示数据块被拒绝。
-	ReplayRejected
 )
 
 // ReplayEntry tracks the status of a processed chunk_id.

@@ -12,20 +12,15 @@ import (
 const redirectHandlerTimeout = 30 * time.Second
 
 // SetRedirectHandler registers a callback invoked when the server sends a
-// TypeRedirect frame (S→C cluster redirect). The callback receives the raw
-// frame payload; the application decodes it (e.g. JSON {leaderAddr, leaderId}).
-// At most one handler is active; a later call replaces the prior one.
+// TypeRedirect frame (S→C cluster redirect). The callback receives a ctx with
+// redirectHandlerTimeout deadline + the raw frame payload; the application
+// decodes it (e.g. JSON {leaderAddr, leaderId}). handler 必须在内部 IO/锁操作中
+// 检查 ctx.Done() 并及时退出，否则超时后 goroutine 泄漏。At most one handler is active;
+// a later call replaces the prior one.
 //
 // Used by HA follower replicas to redirect agents to the elected leader.
-func (c *CoreClient) SetRedirectHandler(h func(payload []byte)) {
+func (c *CoreClient) SetRedirectHandler(h func(context.Context, []byte)) {
 	c.redirectHandler.Store(&h)
-}
-
-func (c *CoreClient) loadRedirectHandler() func(payload []byte) {
-	if p := c.redirectHandler.Load(); p != nil {
-		return *p
-	}
-	return nil
 }
 
 // dispatchRedirect 在独立 goroutine 中调用注册的 redirect handler。
@@ -41,7 +36,11 @@ func (c *CoreClient) loadRedirectHandler() func(payload []byte) {
 //   - redirectInflight 原子标志：保证同一时间最多一个 redirect handler goroutine
 //     在执行，防止恶意/有缺陷的服务端高频重定向耗尽 goroutine 资源。
 func (c *CoreClient) dispatchRedirect(payload []byte) {
-	h := c.loadRedirectHandler()
+	// 内联 loadRedirectHandler：atomic pointer load + 解引用。
+	var h func(context.Context, []byte)
+	if p := c.redirectHandler.Load(); p != nil {
+		h = *p
+	}
 	if h == nil {
 		return
 	}
@@ -62,26 +61,9 @@ func (c *CoreClient) dispatchRedirect(payload []byte) {
 				slog.Warn("redirect handler panicked", "error", r)
 			}
 		}()
-		// 带超时执行：防止应用层 handler 永久阻塞导致 goroutine 泄漏 + redirectInflight
-		// 永久置位（后续所有 redirect 静默丢弃）。
-		// 超时后 inner goroutine 无法被杀死，但传入 cancelable ctx 使 handler
-		// 有机会监听取消并主动退出。
+		// 带超时的 ctx：handler 必须在内部 IO/锁操作中检查 ctx.Done() 并及时退出。
 		ctx, cancel := context.WithTimeout(context.Background(), redirectHandlerTimeout)
 		defer cancel()
-		done := make(chan struct{})
-		go func() {
-			// handler 应在内部操作中检查 ctx.Done()，而非忽略 ctx。
-			// 为兼容现有 func([]byte) 签名，handler 无法直接接收 ctx——
-			// 但 ctx 的 cancel 会在超时后触发，handler 若通过其他方式感知连接关闭
-			// （如共享 ctx 传播）可提前退出。
-			h(cp)
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			slog.Warn("redirect handler timed out, inner goroutine may leak if handler blocks",
-				"timeout", redirectHandlerTimeout)
-		}
+		h(ctx, cp)
 	}()
 }

@@ -219,11 +219,11 @@ func TestChunkID_ConcurrentUnique(t *testing.T) {
 	var mu sync.Mutex
 	seen := make(map[ChunkID]struct{}, goroutines*perG)
 
-	for g := 0; g < goroutines; g++ {
+	for range goroutines {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < perG; i++ {
+			for range perG {
 				id := NewChunkID()
 				mu.Lock()
 				seen[id] = struct{}{}

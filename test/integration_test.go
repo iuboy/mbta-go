@@ -199,7 +199,7 @@ func TestIntegration_NTLS_TLCP_SendBatch(t *testing.T) {
 		mbtago.WithServer(srv.Addr()),
 		mbtago.WithAgent(agentID, "test-host", tok),
 		mbtago.WithVersion(mbtago.VersionNTLS),
-		mbtago.WithClientNTLS(ntls.ClientCredentials{
+		mbtago.WithNTLSCredentials(ntls.ClientCredentials{
 			SignCertFile: "data/ntls/sm2_sign_cert.pem",
 			SignKeyFile:  "data/ntls/sm2_sign_key.pem",
 			EncCertFile:  "data/ntls/sm2_enc_cert.pem",

@@ -107,7 +107,7 @@ func (t *quicTransport) RecvControlFrame(ctx context.Context) (core.Frame, error
 	// ctx 无 deadline 时设默认上限，避免对端静默断开时读永久阻塞（goroutine 泄漏）。
 	dl, ok := ctx.Deadline()
 	if !ok {
-		dl = time.Now().Add(controlReadDefaultTimeout)
+		dl = time.Now().Add(core.DefaultReadTimeout)
 	}
 	if err := t.controlStr.SetReadDeadline(dl); err != nil {
 		return core.Frame{}, core.WrapError(core.ErrCodeStream, "set control read deadline", err)
@@ -128,9 +128,7 @@ func (t *quicTransport) RecvControlFrame(ctx context.Context) (core.Frame, error
 	return f, nil
 }
 
-// controlReadDefaultTimeout 是 control stream 读在 ctx 无 deadline 时的默认上限，
-// 防止对端静默断开（中间防火墙丢包）导致 goroutine 永久阻塞。
-const controlReadDefaultTimeout = 5 * time.Minute
+// control stream 读超时统一用 core.DefaultReadTimeout。
 
 // RecvDataFrame 从聚合 data channel 读下一帧。
 // dataCh 关闭时阻塞读 dataErr 拿真实错误（cap=1 非阻塞发送可能丢错误，空则返回 io.EOF）。
@@ -165,7 +163,7 @@ func (t *quicTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	}
 	dl, ok := ctx.Deadline()
 	if !ok {
-		dl = time.Now().Add(30 * time.Second)
+		dl = time.Now().Add(core.DefaultWriteTimeout)
 	}
 	t.controlMu.Lock()
 	defer t.controlMu.Unlock()

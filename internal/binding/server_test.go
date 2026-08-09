@@ -39,7 +39,7 @@ func TestNextBackoff(t *testing.T) {
 func TestNextBackoffMonotonic(t *testing.T) {
 	var d time.Duration
 	maxBackoff := time.Second
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		next := nextBackoff(d)
 		if next < d {
 			t.Fatalf("iteration %d: nextBackoff decreased: %v < %v", i, next, d)

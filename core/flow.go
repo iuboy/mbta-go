@@ -23,16 +23,13 @@ const (
 	ACKStatusDurable  ACKStatus = "durable"  // Successfully enqueued to reliable queue
 	ACKStatusAccepted ACKStatus = "accepted" // Accepted to memory queue only
 	ACKStatusThrottle ACKStatus = "throttle" // Server throttling, back off
-	ACKStatusNack     ACKStatus = "nack"     // Server rejected the batch
 )
 
 // RouteResult 路由器返回给 handler 的路由结果，供 handler 选择 ACK/THROTTLE 模式。
+// 仅 Status 和 Pressure 被 handler 读取（applyRouteResult）；其他曾是 speculative 字段。
 type RouteResult struct {
-	Status      ACKStatus // "durable" | "accepted" | "throttle"
-	EventsCount int
-	QueueType   string
-	Pressure    PressureState
-	Error       error
+	Status   ACKStatus     // "durable" | "accepted" | "throttle"
+	Pressure PressureState // sink 反馈的背压状态（空则不调整窗口）
 }
 
 // EventSink 是 MBTA 协议层与上层的唯一桥接点。
@@ -61,8 +58,9 @@ type DurableEventSink interface {
 // 不实现此接口的 sink 走原路径（完整解码 SignalBatch 后调用 OnSignalBatchWithResult）。
 type RawEventSink interface {
 	DurableEventSink
-	// OnRawBatch 投递原始 batch JSON 与事件数，返回路由结果。
-	// eventsCount 来自 BatchMessage.EventsCount（客户端填充），batchData 为未解码的 SignalBatch proto。
+	// OnRawBatch 投递未解码的原始 batch 字节（协商 codec 编码的 SignalBatch）与事件数，返回路由结果。
+	// eventsCount 来自 BatchMessage.EventsCount（客户端填充），batchData 为未解码的 SignalBatch 字节
+	// （默认 proto，也可能是 cbor/json——按协商 codec）。
 	OnRawBatch(ctx context.Context, agentID string, eventsCount int, batchData []byte) (*RouteResult, error)
 }
 

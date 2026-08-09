@@ -24,18 +24,16 @@ type FakeTransport struct {
 	DataIn    chan core.Frame
 	Sent      chan core.Frame
 
-	datagram bool
-	mu       sync.Mutex
-	closed   bool
+	mu     sync.Mutex
+	closed bool
 }
 
-// NewFakeTransport 创建 FakeTransport。datagram 控制是否模拟不可靠通道（QUIC）。
-func NewFakeTransport(datagram bool) *FakeTransport {
+// NewFakeTransport 创建 FakeTransport（模拟可靠单连接，TCP 语义）。
+func NewFakeTransport() *FakeTransport {
 	return &FakeTransport{
 		ControlIn: make(chan core.Frame, 16),
 		DataIn:    make(chan core.Frame, 64),
 		Sent:      make(chan core.Frame, 64),
-		datagram:  datagram,
 	}
 }
 
@@ -94,25 +92,19 @@ func (t *FakeTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	return t.sendOnChannel(ctx, t.Sent, f)
 }
 
-func (t *FakeTransport) SupportsDatagram() bool { return t.datagram }
+func (t *FakeTransport) SupportsDatagram() bool { return false }
 
 func (t *FakeTransport) SendDatagram(ctx context.Context, payload []byte) error {
-	if !t.datagram {
-		return protocol.ErrDatagramUnsupported
-	}
-	// datagram=true 模拟 QUIC：作为 data 帧路由到 Sent 供测试验证。
-	return t.sendOnChannel(ctx, t.Sent, core.Frame{Payload: payload})
+	_ = ctx
+	_ = payload
+	return protocol.ErrDatagramUnsupported
 }
 
 func (t *FakeTransport) Multiplexing() protocol.MultiplexModel {
-	if t.datagram {
-		return protocol.MultiplexQuicMultiStream
-	}
 	return protocol.MultiplexTCPSingleConn
 }
 
 // RemoteAddr 满足 protocol.Transport 接口；FakeTransport 无真实对端，始终返回 nil。
-// 需要测试对端地址的用例可直接设置 t.remoteAddr 字段（若有）——目前无此需求。
 func (t *FakeTransport) RemoteAddr() net.Addr { return nil }
 
 func (t *FakeTransport) Close() error {

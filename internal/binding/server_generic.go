@@ -116,10 +116,17 @@ func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
 
 	// ctx 取消时关闭 listener：被 Accept 阻塞的循环因此解除并退出。
 	// 监听器 Close 幂等，与 Server.Close 并发调用安全。
+	// done channel 让此 goroutine 在 Run 返回后也退出，即便调用方忘记取消 ctx。
+	done := make(chan struct{})
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-done:
+			return
+		}
 		_ = spec.CloseListener(l)
 	}()
+	defer close(done)
 
 	return AcceptLoop(ctx, s.connSem,
 		func(ctx context.Context) (C, error) { return spec.Accept(ctx, l) },

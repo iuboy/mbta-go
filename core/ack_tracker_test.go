@@ -9,7 +9,7 @@ import (
 // mkChunkID 构造一个可区分的 ChunkID：把 seq 的低 16 字节填入（测试专用）。
 func mkChunkID(seq uint64) ChunkID {
 	var c ChunkID
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		c[i] = byte(seq >> (i * 8))
 	}
 	// 高 8 字节填固定标记，避免与全零混淆。
@@ -144,7 +144,7 @@ func TestAckTracker_Release_IdempotentUnderConcurrentClaims(t *testing.T) {
 	successCount := 0
 	var mu sync.Mutex
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -319,10 +319,10 @@ func TestAckTracker_ConcurrentReserveRelease(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		go func(gid int) {
 			defer wg.Done()
-			for i := 0; i < opsPerG; i++ {
+			for i := range opsPerG {
 				// 每次操作用一个唯一 seq（gid*opsPerG + i + 1，全局唯一且 < AckRingSize 跨度）。
 				// 注意：8*50=400 > AckRingSize=100，跨度检查会拒绝部分，这是预期行为。
 				// 这里只验证无 race + 计数非负，不强制全部成功。

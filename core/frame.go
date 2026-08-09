@@ -1,12 +1,43 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protowire"
 )
+
+// DeadlineReader 是支持读超时的 io.Reader（*quic.Stream 和 net.Conn 均满足）。
+// ReadFrameCtx 据此让 ctx 取消/超时能中断阻塞读。
+type DeadlineReader interface {
+	io.Reader
+	SetReadDeadline(t time.Time) error
+}
+
+// ReadFrameCtx 是 ctx 感知的帧读取：通过 SetReadDeadline 让 ctx 取消/超时中断阻塞读，
+// 避免对端静默断开时 control loop 永久阻塞（goroutine 泄漏）。
+// ctx 无 deadline 时用 DefaultReadTimeout 兜底。v1/ntls client transport 共享。
+func ReadFrameCtx(ctx context.Context, r DeadlineReader) (Frame, error) {
+	if err := ctx.Err(); err != nil {
+		return Frame{}, err
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(DefaultReadTimeout)
+	}
+	if err := r.SetReadDeadline(dl); err != nil {
+		return Frame{}, WrapError(ErrCodeStream, "set read deadline", err)
+	}
+	defer func() { _ = r.SetReadDeadline(time.Time{}) }()
+	f, err := Read(r, DefaultLimits())
+	if err != nil && ctx.Err() != nil {
+		return Frame{}, ctx.Err()
+	}
+	return f, err
+}
 
 const (
 	Magic                 = "MBTA"
@@ -88,12 +119,11 @@ func DefaultLimits() Limits {
 // Write 编码并写入单个 MBTA 帧。
 // 帧格式：8B 定长前缀 + varint Length + Payload。
 //
-// version 写入帧头 Version 字段（offset 4）。各 binding 传入其 FrameVersion 常量：
-// v1/ntls 传 core.Version(0x01)，v2 传 0x02。这样 wire 层真正反映协议版本，
-// 为 v2 落地扫清障碍（此前 Version 被硬编码为常量，v2 帧无法生成）。
+// version 写入帧头 Version 字段（offset 4）。各 binding 传 core.Version(0x01)。
+// version 白名单含 0x02 仅为让 TestReadMultiVersion 验证 Read 端的 supportedVersions
+// 扩展机制（Write 能生成非默认版本帧，Read 按白名单决定是否接受）。
 func Write(w io.Writer, version byte, typ uint8, flags byte, channelID uint8, payload []byte) error {
 	// 写入端 version 白名单：与 Read 端对称校验，避免生成对端无法解析的帧。
-	// 当前支持 v1(0x01) 与计划中的 v2(0x02)。
 	if version != Version && version != 0x02 {
 		return NewError(ErrCodeProtocol, fmt.Sprintf("unsupported frame version 0x%02x", version))
 	}
@@ -134,11 +164,11 @@ func Write(w io.Writer, version byte, typ uint8, flags byte, channelID uint8, pa
 // Read 读取并校验单个 MBTA 帧。
 //
 // supportedVersions 是本端接受的帧版本白名单：
-//   - 为空（默认）：仅接受 core.Version(0x01)，保持向后兼容；
+//   - 为空（默认）：仅接受 core.Version(0x01)；
 //   - 非空：校验帧头 Version ∈ supportedVersions，否则报错。
 //
-// 各 binding 按自身支持的版本传入：v1/ntls 不传或传 core.Version；
-// v2 传 core.Version 与 0x02（同时兼容 v1）。这样读取端能拒绝不支持的版本而非误解析。
+// 各 binding 按自身支持的版本传入：v1/ntls 不传或传 core.Version。
+// 未来新增版本时在此扩展白名单，使读取端能拒绝不支持的版本而非误解析。
 func Read(r io.Reader, lim Limits, supportedVersions ...byte) (Frame, error) {
 	var hdr [FixedHeaderSz]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -161,7 +191,7 @@ func Read(r io.Reader, lim Limits, supportedVersions ...byte) (Frame, error) {
 		return Frame{}, NewError(ErrCodeProtocol, fmt.Sprintf("unknown frame type 0x%02x", typ))
 	}
 
-	length, _, err := readVarint(r)
+	length, err := readVarint(r)
 	if err != nil {
 		return Frame{}, WrapError(ErrCodeProtocol, "read length", err)
 	}
@@ -203,42 +233,42 @@ func putVarint(buf []byte, v uint64) int {
 // readVarint 从 io.Reader 流式读取 varint，拒绝非最短编码。
 // 不能直接用 protowire.ConsumeVarint（它消费 []byte 切片，不读 io.Reader，
 // 且不检测非最短编码）。此实现专为 io.Reader + 安全校验设计。
-func readVarint(r io.Reader) (uint64, int, error) {
+func readVarint(r io.Reader) (uint64, error) {
 	var buf [1]byte
 	var encoded []byte
-	for i := 0; i < maxVarintLen; i++ {
+	for i := range maxVarintLen {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {
-			return 0, 0, errors.New("varint: short read")
+			return 0, errors.New("varint: short read")
 		}
 		encoded = append(encoded, buf[0])
 		if buf[0]&0x80 == 0 {
 			v, n := protowire.ConsumeVarint(encoded)
 			if n <= 0 {
-				return 0, 0, errors.New("varint: decode failed")
+				return 0, errors.New("varint: decode failed")
 			}
 			// 非最短编码检测（protobuf 规则）。
 			if i > 0 && v < (uint64(1)<<uint(7*i)) {
-				return 0, 0, errors.New("varint: non-canonical encoding")
+				return 0, errors.New("varint: non-canonical encoding")
 			}
-			return v, n, nil
+			return v, nil
 		}
 	}
 	// 读了 maxVarintLen 字节仍有 continuation bit → 过长。
 	if _, err := io.ReadFull(r, buf[:]); err != nil {
-		return 0, 0, errors.New("varint: short read")
+		return 0, errors.New("varint: short read")
 	}
 	if buf[0]&0x80 != 0 || buf[0]&0x0f != 0 {
-		return 0, 0, errors.New("varint: too long")
+		return 0, errors.New("varint: too long")
 	}
 	encoded = append(encoded, buf[0])
 	v, n := protowire.ConsumeVarint(encoded)
 	if n <= 0 {
-		return 0, 0, errors.New("varint: decode failed")
+		return 0, errors.New("varint: decode failed")
 	}
 	// 非最短编码检测：与 1-5 字节路径一致（旧 6 字节分支遗漏此校验，
 	// 允许恶意对端用非规范 6 字节编码绕过非最短检测）。
 	if v < (uint64(1) << uint(7*maxVarintLen)) {
-		return 0, 0, errors.New("varint: non-canonical encoding")
+		return 0, errors.New("varint: non-canonical encoding")
 	}
-	return v, n, nil
+	return v, nil
 }

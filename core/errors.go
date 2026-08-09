@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 )
 
@@ -34,9 +35,6 @@ const (
 	// 流控 (5000-5099)
 	NumWindowFull = 5000 // 流控窗口已满
 	NumThrottle   = 5001 // 被限流
-
-	// 存储 (6000-6099)
-	NumSpool = 6000 // Spool 存储错误
 
 	// 版本 (7000-7099)
 	NumVersion = 7000 // 版本不支持
@@ -91,7 +89,6 @@ const (
 	CodeHMAC       = "hmac_error"
 	CodeWindowFull = "window_full"
 	CodeThrottle   = "throttled"
-	CodeSpool      = "spool_error"
 	CodeVersion    = "unsupported_version"
 
 	// Auth（握手期 AUTH_FAIL）
@@ -104,9 +101,6 @@ const (
 	// Session（连接级）
 	CodeSessionExpired = "session_expired"
 	CodeRedirected     = "redirected"
-
-	// Stream
-	CodeNoStreams = "no_streams"
 
 	// Envelope / HMAC（BATCH 处理期 NACK）
 	CodeHMACMismatch         = "hmac_mismatch"
@@ -153,7 +147,6 @@ var (
 	ErrCodeHMAC       = register(ErrorCode{NumHMAC, CodeHMAC})
 	ErrCodeWindowFull = register(ErrorCode{NumWindowFull, CodeWindowFull})
 	ErrCodeThrottle   = register(ErrorCode{NumThrottle, CodeThrottle})
-	ErrCodeSpool      = register(ErrorCode{NumSpool, CodeSpool})
 	ErrCodeVersion    = register(ErrorCode{NumVersion, CodeVersion})
 
 	// Auth（握手期 AUTH_FAIL）
@@ -166,9 +159,6 @@ var (
 	// Session（连接级）
 	ErrCodeSessionExpired = register(ErrorCode{NumSession, CodeSessionExpired})
 	ErrCodeRedirected     = register(ErrorCode{NumSession, CodeRedirected})
-
-	// Stream
-	ErrCodeNoStreams = register(ErrorCode{NumStream, CodeNoStreams})
 
 	// Envelope / HMAC（BATCH 处理期 NACK）
 	ErrCodeHMACMismatch         = register(ErrorCode{NumHMAC, CodeHMACMismatch})
@@ -257,7 +247,8 @@ func WrapError(c ErrorCode, msg string, err error) *Error {
 // CodeOf 从 error 链中提取 *Error 的 Code 字符串；非 *Error 返回空串。
 // 用于按 ErrorCode 匹配错误：if core.CodeOf(err) == core.ErrCodeHMACMismatch.Code { ... }
 func CodeOf(err error) string {
-	if e, ok := err.(*Error); ok {
+	var e *Error
+	if errors.As(err, &e) {
 		return e.Code
 	}
 	return ""

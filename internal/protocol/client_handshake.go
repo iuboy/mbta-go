@@ -67,7 +67,7 @@ func (c *CoreClient) RecvHelloAck(ctx context.Context) (*core.HelloAckMessage, e
 		if ec == core.ErrCodeUnknown {
 			ec = core.ErrCodeHandshake
 		}
-		return nil, core.NewError(ec, fmt.Sprintf("server error: %s", errMsg.GetReason()))
+		return nil, core.NewError(ec, "server error: "+errMsg.GetReason())
 	}
 	if f.Header.Type != core.TypeHelloAck {
 		return nil, core.NewError(core.ErrCodeProtocol, fmt.Sprintf("expected HELLO_ACK, got 0x%02x", f.Header.Type))
@@ -147,7 +147,7 @@ func (c *CoreClient) buildAuthMessage() *corepb.AuthMessage {
 		Token:     c.cfg.Token,
 		AgentId:   c.cfg.AgentID,
 		SessionId: c.getSessionID(),
-		AuthNonce: core.ComputeChallengeResponse(c.cfg.Token, string(c.getChallengeNonce()), cs),
+		AuthNonce: core.ComputeChallengeResponse(c.cfg.Token, c.cfg.AgentID, string(c.getSessionID()), c.getChallengeNonce(), cs),
 	}
 }
 

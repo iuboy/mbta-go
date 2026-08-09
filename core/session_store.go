@@ -2,6 +2,7 @@ package core
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -79,10 +80,10 @@ func NewTicket() ([]byte, error) {
 }
 
 // ErrSessionStoreClosed 在 Close 后调用 Put/Get 时返回。
-var ErrSessionStoreClosed = fmt.Errorf("session store closed")
+var ErrSessionStoreClosed = errors.New("session store closed")
 
 // ErrSessionStoreFull 在达到 maxSize 上限且新 ticket 不属于已有条目时返回。
-var ErrSessionStoreFull = fmt.Errorf("session store full")
+var ErrSessionStoreFull = errors.New("session store full")
 
 // Put 存储 ticket → state。
 //
@@ -94,15 +95,15 @@ var ErrSessionStoreFull = fmt.Errorf("session store full")
 //   - 条目数已达 maxSize 上限且 ticket 不存在（DoS 防护）
 func (s *SessionStore) Put(ticket []byte, state *SessionState) error {
 	if state == nil {
-		return fmt.Errorf("nil session state")
+		return errors.New("nil session state")
 	}
 	if len(ticket) == 0 {
-		return fmt.Errorf("empty session ticket")
+		return errors.New("empty session ticket")
 	}
 	if state.Expiry.IsZero() {
 		// 零值 time.Time{} 是公元 1 年，time.Now().After(Expiry) 永远为 true，
 		// 导致 ticket 颁发后立即无法恢复。显式拒绝避免隐性陷阱。
-		return fmt.Errorf("session state Expiry must be set to a future time")
+		return errors.New("session state Expiry must be set to a future time")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

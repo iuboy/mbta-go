@@ -5,12 +5,15 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"hash"
+	"io"
 	"sort"
 	"time"
 
 	"github.com/iuboy/pollux-go/sm3"
+	"golang.org/x/crypto/hkdf"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
 )
@@ -29,8 +32,6 @@ type AgentIdentity struct {
 	Permissions []string  // granted permissions
 	ExpiresAt   time.Time // token expiration time
 }
-
-// ErrInvalidToken 是 token 校验失败的错误码（替代预构造 sentinel，返回时用 NewError 现造）。
 
 // RedirectInfo carries the leader's reachable address, returned by a
 // RedirectChecker when this replica is NOT the HA leader and the just-authed
@@ -57,9 +58,6 @@ type RedirectChecker func(ctx context.Context) (RedirectInfo, bool)
 type TokenResolver interface {
 	ResolveToken(agentID string) (token string, err error)
 }
-
-// ErrAgentNotFound 是 TokenResolver 找不到 agent 时的错误码（替代预构造 sentinel）。
-// 与 ErrInvalidToken 同属 auth 大类，避免暴露 agentID 是否存在（防枚举）。
 
 // StaticTokenValidator validates tokens against a static map (dev/test use).
 // It additionally implements TokenResolver via a reverse agentID->token index,
@@ -182,7 +180,7 @@ func (k *SessionKeys) Zero() {
 	}
 }
 
-// GenerateSessionKeys 为已认证 agent 生成会话密钥（r2 按 CipherSuite）。
+// GenerateSessionKeys 为已认证 agent 生成会话密钥（按 CipherSuite）。
 func GenerateSessionKeys(cs corepb.CipherSuite) (*SessionKeys, error) {
 	// fail-fast：未知套件返回 0 长度，会生成空密钥。在此显式拒绝。
 	if cs != corepb.CipherSuite_CIPHER_SUITE_INTL && cs != corepb.CipherSuite_CIPHER_SUITE_GM {
@@ -204,19 +202,86 @@ func GenerateSessionKeys(cs corepb.CipherSuite) (*SessionKeys, error) {
 	}, nil
 }
 
-// ComputeChallengeResponse 计算挑战-响应 HMAC(token, nonce)，返回 raw 字节（r2）。
-// 客户端用它证明持有 token，而非仅回显 nonce。算法按协商 CipherSuite（intl=SHA-256, gm=SM3）。
+// DeriveResumptionKeys 从 master 会话密钥 + 一次性 server random 派生新的 0-RTT 会话密钥。
+//
+// 用于 0-RTT resumption 的前向保密：票据恢复时复用 master 密钥会让捕获的票据在 master
+// 生命期内可解密所有恢复会话。通过 HKDF 从 master + 每次恢复独有的 server random 派生
+// 新子钥，即便票据被窃取，每次恢复产生独立子钥，限制单次泄露的影响面。
+//
+// info 绑定 CipherSuite + KeyID + "resumption" 用途标签，提供域分隔。
+// 返回的新 SessionKeys 拥有独立 KeyID（便于审计与密钥轮换追踪）。
+func DeriveResumptionKeys(master *SessionKeys, serverRandom []byte) (*SessionKeys, error) {
+	if master == nil {
+		return nil, NewError(ErrCodeEnvelope, "nil master keys for resumption derivation")
+	}
+	if len(serverRandom) == 0 {
+		return nil, NewError(ErrCodeEnvelope, "empty server random for resumption derivation")
+	}
+	cs := master.CipherSuite
+	var newHash func() hash.Hash
+	if cs == corepb.CipherSuite_CIPHER_SUITE_GM {
+		newHash = sm3.New
+	} else {
+		newHash = sha256.New
+	}
+	// info = "MBTA-RESUMPTION-V1\u00" ‖ cipher_suite(u8) ‖ master_key_id
+	info := append([]byte("MBTA-RESUMPTION-V1\x00"), byte(cs))
+	info = append(info, []byte(master.KeyID)...)
+	// master 的 hmac+aead key 拼接作为 HKDF 输入密钥材料（IKM）。
+	ikm := make([]byte, 0, len(master.hmacKey)+len(master.aeadKey))
+	ikm = append(ikm, master.hmacKey...)
+	ikm = append(ikm, master.aeadKey...)
+	reader := hkdf.New(newHash, ikm, serverRandom, info)
+	hmacKey := make([]byte, HMACKeyLen(cs))
+	aeadKey := make([]byte, AEADKeyLen(cs))
+	// io.ReadFull 从 hkdf.Reader 读取；HKDF 输出耗尽时返回错误（IKM/info 组合极端情况）。
+	if _, err := io.ReadFull(reader, hmacKey); err != nil {
+		return nil, WrapError(ErrCodeEnvelope, "derive resumption hmac key", err)
+	}
+	if _, err := io.ReadFull(reader, aeadKey); err != nil {
+		return nil, WrapError(ErrCodeEnvelope, "derive resumption aead key", err)
+	}
+	return &SessionKeys{
+		KeyID:       NewChunkID().String(),
+		CipherSuite: cs,
+		hmacKey:     hmacKey,
+		aeadKey:     aeadKey,
+	}, nil
+}
+
+// ComputeChallengeResponse 计算挑战-响应 HMAC(token, transcript)，返回 raw 字节（r2）。
+// transcript = 域分隔前缀 ‖ len-prefixed(agentID ‖ sessionID ‖ nonce)，绑定本连接上下文：
+// 即便 nonce 在罕见情况下跨连接重复，响应也无法被重放到不同 agent/session。
+// 算法按协商 CipherSuite（intl=SHA-256, gm=SM3）。
 //
 // 注：此函数在 AUTH 阶段使用，session key 尚未建立，只能用 token 作 HMAC 密钥
 // （token 长度任意，故不走 NewHMAC 的长度校验，直接 hmac.New）。挑战响应仅在
 // TLS/TLCP 加密通道内传输，且 nonce 一次性，侧信道风险低。
-func ComputeChallengeResponse(token, nonce string, cs corepb.CipherSuite) []byte {
+func ComputeChallengeResponse(token, agentID, sessionID string, nonce []byte, cs corepb.CipherSuite) []byte {
 	var h hash.Hash
 	if cs == corepb.CipherSuite_CIPHER_SUITE_GM {
 		h = hmac.New(sm3.New, []byte(token))
 	} else {
 		h = hmac.New(sha256.New, []byte(token))
 	}
-	_, _ = h.Write([]byte(nonce)) // hash.Hash.Write 永不返回错误 // #nosec G104 -- hash.Hash.Write 永不返回错误
+	// 域分隔：固定前缀，防止与 envelope MAC 等其他 HMAC 用途输出混淆。
+	_, _ = h.Write(challengeResponseDomainPrefix)
+	// 长度前缀的 transcript：agentID ‖ sessionID ‖ nonce。
+	// 长度前缀防字段拼接歧义（例如 agentID="ab" + sessionID="c" vs "a" + "bc"）。
+	writeLenPrefixed(h, []byte(agentID))
+	writeLenPrefixed(h, []byte(sessionID))
+	writeLenPrefixed(h, nonce)
 	return h.Sum(nil)
+}
+
+// challengeResponseDomainPrefix 是 ComputeChallengeResponse 的固定域分隔前缀，
+// 与 envelopeMACDomainPrefix 互不重叠，避免同密钥跨上下文的标签互换。
+var challengeResponseDomainPrefix = []byte("MBTA-CHALLENGE-V1\x00")
+
+// writeLenPrefixed 向 h 写入 4 字节 big-endian 长度前缀 + data。
+func writeLenPrefixed(h hash.Hash, data []byte) {
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(data)))
+	_, _ = h.Write(l[:])
+	_, _ = h.Write(data)
 }

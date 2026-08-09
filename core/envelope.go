@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"crypto/hmac"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
@@ -26,7 +27,7 @@ const MaxDecompressedSize = 8 * 1024 * 1024
 // AEADNonceSize 是 AEAD（AES-256-GCM / SM4-GCM）nonce 长度（core spec §8.4）。
 const AEADNonceSize = 12
 
-// SecureEnvelope 是 r2 wire 层安全信封（payload/mac/nonce 原生 bytes，去 base64）。
+// SecureEnvelope 是 wire 层安全信封（payload/mac/nonce 原生 bytes）。
 // 等价 corepb.SecureEnvelope。
 type SecureEnvelope = corepb.SecureEnvelope
 
@@ -98,7 +99,9 @@ func Build(p BuildParams) (*SecureEnvelope, error) {
 			return nil, WrapError(ErrCodeEnvelope, "generate AEAD nonce", err)
 		}
 		env.Nonce = nonce
-		env.Payload = aead.Seal(nil, nonce, processed, nil)
+		// AD 绑定 envelope 上下文（session/seq/chunk/msg_type/cipher）：封堵密文剪贴攻击。
+		// AEAD 自身的完整性因此覆盖全部元数据，不再仅依赖外层 HMAC。
+		env.Payload = aead.Seal(nil, nonce, processed, envelopeAAD(env))
 	} else {
 		env.Payload = processed
 	}
@@ -176,7 +179,8 @@ func Open(env *SecureEnvelope, hmacKey, aeadKey []byte) ([]byte, error) {
 		if len(raw) < aead.Overhead() {
 			return nil, NewError(ErrCodeEnvelope, "ciphertext too short for AEAD tag")
 		}
-		pt, err := aead.Open(nil, env.Nonce, raw, nil)
+		// AD 必须与 Build 端一致：封堵密文剪贴到不同 session/seq/chunk 的攻击。
+		pt, err := aead.Open(nil, env.Nonce, raw, envelopeAAD(env))
 		if err != nil {
 			return nil, WrapError(ErrCodeEnvelope, "AEAD decrypt", err)
 		}
@@ -202,13 +206,20 @@ func VerifyMAC(hmacKey []byte, env *SecureEnvelope) (bool, error) {
 }
 
 // canonicalMAC 计算 HMAC over env 的 canonical（deterministic）wire bytes。
-// HMAC 输入 = proto.MarshalOptions{Deterministic:true} 对 mac 清空后的 envelope（§5.3）。
+// HMAC 输入 = 域分隔前缀 ‖ EnvelopeVersion ‖ proto.MarshalOptions{Deterministic:true}
+// 对 mac 清空后的 envelope（§5.3）。
+// 域分隔前缀固定 future-proof：新增字段或修订 wire 格式时 bump 版本字节，
+// 保证跨实现/跨版本 HMAC 不可混淆（避免剪贴到不同字段集的 envelope）。
 // SecureEnvelope 内无 map 字段，确定性序列化保证跨实现 HMAC 可验证。
 func canonicalMAC(cs corepb.CipherSuite, hmacKey []byte, env *SecureEnvelope) ([]byte, error) {
 	h, err := NewHMAC(cs, hmacKey)
 	if err != nil {
 		return nil, err
 	}
+	// 域分隔：固定 ASCII 前缀 + 版本字节，防止与其他用途的 HMAC 输出混淆，
+	// 并在 wire 格式演进时强制重算（版本不匹配即 MAC 失败）。
+	_, _ = h.Write(envelopeMACDomainPrefix)
+	_, _ = h.Write([]byte{byte(env.EnvelopeVersion)})
 	clone := proto.Clone(env).(*SecureEnvelope)
 	clone.Mac = nil
 	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(clone)
@@ -217,6 +228,47 @@ func canonicalMAC(cs corepb.CipherSuite, hmacKey []byte, env *SecureEnvelope) ([
 	}
 	_, _ = h.Write(wire) // hash.Hash.Write 永不返回错误
 	return h.Sum(nil), nil
+}
+
+// envelopeMACDomainPrefix 是 canonicalMAC 的固定域分隔前缀。
+// 与挑战响应（challengeResponseDomainPrefix）、AEAD AD 等其他 HMAC 用途互不重叠，
+// 避免同一密钥在不同上下文产生可互换的标签。
+var envelopeMACDomainPrefix = []byte("MBTA-ENVELOPE-MAC-V1\x00")
+
+// envelopeAAD 构造 AEAD 的 Associated Data：长度前缀的规范字节序列，
+// 绑定 session_id / seq / chunk_id / msg_type / cipher_suite。
+// 长度前缀（big-endian uint32）防止字段拼接歧义；固定顺序保证 Build/Open 双端一致。
+// 此 AD 与 canonicalMAC 的 HMAC 输入正交：MAC 覆盖全 envelope wire，AD 只覆盖关键元数据，
+// 二者共同提供"密文不可剪贴 + 完整性"双重保证。
+func envelopeAAD(env *SecureEnvelope) []byte {
+	// 预估容量：5 字段 + 4 个长度前缀，session_id/chunk_id 通常 16B。
+	buf := make([]byte, 0, 4+4+len(env.SessionId)+8+4+len(env.ChunkId)+4+1+4+1)
+	// session_id
+	buf = appendLenBE32(buf, uint32(len(env.SessionId)))
+	buf = append(buf, env.SessionId...)
+	// seq（固定 8 字节，无需长度前缀）
+	var seqBuf [8]byte
+	binary.BigEndian.PutUint64(seqBuf[:], env.Seq)
+	buf = append(buf, seqBuf[:]...)
+	// chunk_id
+	buf = appendLenBE32(buf, uint32(len(env.ChunkId)))
+	buf = append(buf, env.ChunkId...)
+	// message_type（固定 1 字节，proto enum 为 int32 但 wire 上变长；这里用固定 4 字节 BE）
+	var mtBuf [4]byte
+	binary.BigEndian.PutUint32(mtBuf[:], uint32(env.MessageType))
+	buf = append(buf, mtBuf[:]...)
+	// cipher_suite（固定 4 字节 BE）
+	var csBuf [4]byte
+	binary.BigEndian.PutUint32(csBuf[:], uint32(env.CipherSuite))
+	buf = append(buf, csBuf[:]...)
+	return buf
+}
+
+// appendLenBE32 追加 big-endian uint32 长度前缀。
+func appendLenBE32(buf []byte, n uint32) []byte {
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], n)
+	return append(buf, l[:]...)
 }
 
 func nowUnixMs() int64 { return time.Now().UnixMilli() }

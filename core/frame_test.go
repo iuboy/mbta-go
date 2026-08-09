@@ -393,21 +393,18 @@ func TestVarintRoundTrip(t *testing.T) {
 	for _, v := range values {
 		var buf [maxVarintLen]byte
 		n := putVarint(buf[:], v)
-		got, gotN, err := readVarint(bytes.NewReader(buf[:n]))
+		got, err := readVarint(bytes.NewReader(buf[:n]))
 		if err != nil {
 			t.Errorf("readVarint(%d) error: %v", v, err)
 		}
 		if got != v {
 			t.Errorf("readVarint = %d, want %d", got, v)
 		}
-		if gotN != n {
-			t.Errorf("readVarint bytes = %d, want %d", gotN, n)
-		}
 	}
 }
 
 func TestVarintRejectsNonCanonical(t *testing.T) {
-	_, _, err := readVarint(bytes.NewReader([]byte{0x81, 0x00}))
+	_, err := readVarint(bytes.NewReader([]byte{0x81, 0x00}))
 	if err == nil {
 		t.Error("readVarint should reject non-canonical encoding")
 	}

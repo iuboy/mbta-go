@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -53,44 +52,27 @@ func TestACKStatusString(t *testing.T) {
 // TestRouteResult tests RouteResult structure.
 func TestRouteResult(t *testing.T) {
 	t.Run("successful routing result", func(t *testing.T) {
-		eventsCount := testutil.RandInt(1, 1000)
 		result := &RouteResult{
-			Status:      ACKStatusDurable,
-			EventsCount: eventsCount,
-			QueueType:   "memory",
-			Pressure:    PressureNormal,
-			Error:       nil,
+			Status:   ACKStatusDurable,
+			Pressure: PressureNormal,
 		}
 
 		if result.Status != ACKStatusDurable {
 			t.Errorf("Status = %q, want 'durable'", result.Status)
 		}
-		if result.EventsCount != eventsCount {
-			t.Errorf("EventsCount = %d, want %d", result.EventsCount, eventsCount)
-		}
 		if result.Pressure != PressureNormal {
 			t.Errorf("Pressure = %q, want 'normal'", result.Pressure)
-		}
-		if result.Error != nil {
-			t.Errorf("Error should be nil, got %v", result.Error)
 		}
 	})
 
 	t.Run("throttled routing result", func(t *testing.T) {
-		err := errors.New("queue pressure critical")
 		result := &RouteResult{
-			Status:      ACKStatusThrottle,
-			EventsCount: testutil.RandInt(1, 500),
-			QueueType:   "memory",
-			Pressure:    PressureCritical,
-			Error:       err,
+			Status:   ACKStatusThrottle,
+			Pressure: PressureCritical,
 		}
 
 		if result.Status != ACKStatusThrottle {
 			t.Errorf("Status = %q, want 'throttle'", result.Status)
-		}
-		if result.Error == nil {
-			t.Error("Error should not be nil")
 		}
 	})
 }
@@ -196,7 +178,7 @@ func TestInflight(t *testing.T) {
 		concurrency := 10
 		events, nbytes := testutil.RandInt(1, 100), int64(testutil.RandInt(1, 10000))
 
-		for i := 0; i < concurrency; i++ {
+		for range concurrency {
 			go func() {
 				inf.Add(events, nbytes)
 				done <- true
@@ -204,7 +186,7 @@ func TestInflight(t *testing.T) {
 		}
 
 		// Wait for all goroutines
-		for i := 0; i < concurrency; i++ {
+		for range concurrency {
 			<-done
 		}
 
@@ -290,9 +272,8 @@ type mockDurableEventSink struct {
 func (m *mockDurableEventSink) OnSignalBatchWithResult(ctx context.Context, agentID string, batch *SignalBatch) (*RouteResult, error) {
 	err := m.OnSignalBatch(ctx, agentID, batch)
 	return &RouteResult{
-		Status:      ACKStatusDurable,
-		EventsCount: len(batch.Signals),
-		Pressure:    PressureNormal,
+		Status:   ACKStatusDurable,
+		Pressure: PressureNormal,
 	}, err
 }
 

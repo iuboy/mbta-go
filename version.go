@@ -2,8 +2,9 @@
 //
 // 支持的版本：
 //   - v1：QUIC + TLS 1.3（mbta/1）
-//   - v2：QUIC + RFC 8998 国密 TLS 1.3（mbta/2）
 //   - ntls：TCP + TLCP / TLS 1.3（mbta-ntls/1、mbta-tls/1）
+//
+// v2（QUIC + RFC 8998 国密 TLS 1.3）尚未实现，相关常量与分派在落地时再加。
 package mbta
 
 import "fmt"
@@ -15,7 +16,6 @@ type ProtocolVersion string
 // 版本标识，用于 [NewClient] 的版本分派。
 const (
 	Version1    ProtocolVersion = "v1"
-	Version2    ProtocolVersion = "v2"
 	VersionNTLS ProtocolVersion = "ntls"
 )
 
@@ -26,8 +26,6 @@ func ParseVersion(s string) (ProtocolVersion, error) {
 	switch s {
 	case "v1":
 		return Version1, nil
-	case "v2":
-		return Version2, nil
 	case "ntls":
 		return VersionNTLS, nil
 	}

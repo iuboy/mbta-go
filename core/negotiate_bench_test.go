@@ -49,7 +49,7 @@ func generateLargeCaps() []string {
 	// 已注册的 stable capability。
 	caps = append(caps, CapCodecProto, CapCodecCbor, CapCodecJson, CapCSIntl, CapCSGM)
 	// 填充 experimental（x- 前缀，Negotiate 静默忽略，不报错）。
-	for i := 0; i < 251; i++ {
+	for i := range 251 {
 		caps = append(caps, "x-bench-cap-"+itoaSimple(i))
 	}
 	return caps

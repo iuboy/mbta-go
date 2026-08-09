@@ -18,11 +18,11 @@ import (
 // 供握手与 delivery 测试复用。
 func doHandshake(t *testing.T, sink core.EventSink) (*FakeTransport, *core.SessionKeys, corepb.CipherSuite) {
 	t.Helper()
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	// token/agent 对在握手两端必须一致，故在此函数内生成并贯穿 HELLO/AUTH。
 	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	policy := core.Policy{
-		SupportedCapabilities: []string{core.CapCodecProto, core.CapCodecProto, core.CapCompZstd, core.CapCSIntl, core.CapDurableAck, core.CapPartialAck},
+		SupportedCapabilities: []string{core.CapCodecProto, core.CapCompZstd, core.CapCSIntl, core.CapDurableAck, core.CapPartialAck},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
 		DefaultCompression:    corepb.Compression_COMPRESSION_NONE,
 		CipherSuite:           corepb.CipherSuite_CIPHER_SUITE_INTL,
@@ -69,7 +69,7 @@ func doHandshake(t *testing.T, sink core.EventSink) (*FakeTransport, *core.Sessi
 	}
 
 	// --- AUTH（challenge-response）---
-	authNonce := core.ComputeChallengeResponse(tok, string(ack.GetChallengeNonce()), cs)
+	authNonce := core.ComputeChallengeResponse(tok, agentID, string(ack.GetSessionId()), ack.GetChallengeNonce(), cs)
 	authMsg := &corepb.AuthMessage{
 		Token:     tok,
 		AgentId:   agentID,
@@ -269,23 +269,27 @@ func TestCoreHandler_Datagram(t *testing.T) {
 	}
 }
 
-// TestCoreHandler_EarlyData 验证 0-RTT resumption（core spec §11.6）：
+// TestCoreHandler_ResumptionDerivesSubkeys 验证 S4 后的 0-RTT resumption 安全模型：
 // store.Put 模拟首次 AUTH_OK 颁发 ticket → 第二连接 HELLO 携带 ticket →
-// CoreHandler 恢复 keys + earlyData → 0-RTT BATCH（AUTH 前）用 resumption keys → ACK。
-func TestCoreHandler_EarlyData(t *testing.T) {
+// CoreHandler 暂存 master（不直接 Store keys，不启动 earlyData）→
+// 客户端仍须发 AUTH 完成 challenge-response → handleAuth 用 HKDF 从 master 派生子钥 →
+// AUTH_OK 下发派生密钥 → 用派生密钥构建的 BATCH 才 ACK。
+//
+// 关键不变量：master 密钥永不直接用于数据加密；AUTH 前发的 BATCH 必须被拒绝。
+func TestCoreHandler_ResumptionDerivesSubkeys(t *testing.T) {
 	store := core.NewSessionStore()
-	resumptionKeys, _ := core.GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
+	masterKeys, _ := core.GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
 	ticket, _ := core.NewTicket()
 	agentID := testutil.RandAgentID()
 	if err := store.Put(ticket, &core.SessionState{
-		Keys:    resumptionKeys,
+		Keys:    masterKeys,
 		AgentID: agentID,
 		Expiry:  time.Now().Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("store.Put: %v", err)
 	}
 
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	tok := testutil.RandToken()
 	policy := core.Policy{
 		SupportedCapabilities: []string{core.CapCodecProto, core.CapCSIntl},
@@ -303,7 +307,7 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 	t.Cleanup(cancel)
 	go func() { _ = h.Handle(ctx) }()
 
-	// HELLO 携带 ticket → handleHello 恢复 keys + earlyData
+	// HELLO 携带 ticket → handleHello 暂存 master（不 Store keys，不 earlyData）
 	hello := &corepb.HelloMessage{
 		AgentId:       agentID,
 		FrameVersion:  1,
@@ -318,17 +322,40 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 		t.Fatalf("expected HELLO_ACK, got type %d", ackF.Header.Type)
 	}
 
-	// 0-RTT BATCH（AUTH 前）：用 resumption keys 构建 envelope
+	// 必须发 AUTH 完成 challenge-response：master 仅用于派生，不跳过认证。
+	var ack core.HelloAckMessage
+	_ = core.Decode(ackF.Payload, &ack)
+	cs := ack.GetCipherSuite()
+	authNonce := core.ComputeChallengeResponse(tok, agentID, string(ack.GetSessionId()), ack.GetChallengeNonce(), cs)
+	authMsg := &corepb.AuthMessage{
+		Token: tok, AgentId: agentID, SessionId: ack.GetSessionId(), AuthNonce: authNonce,
+	}
+	ap, _ := core.Encode(authMsg)
+	tr.ControlIn <- MakeFrame(core.TypeAuth, core.FlagControl, core.ChannelControl, ap)
+
+	// 期望 AUTH_OK：携带 HKDF 派生的新密钥（与 master 不同）
+	okFrame := ReadFrame(t, tr.Sent)
+	if okFrame.Header.Type != core.TypeAuthOK {
+		t.Fatalf("expected AUTH_OK after resumption re-auth, got type %d", okFrame.Header.Type)
+	}
+	var okMsg core.AuthOKMessage
+	if err := core.Decode(okFrame.Payload, &okMsg); err != nil {
+		t.Fatalf("decode AUTH_OK: %v", err)
+	}
+	if okMsg.GetKeyId() == masterKeys.KeyID {
+		t.Fatal("resumption must derive new KeyID, got master KeyID (subkey derivation broken)")
+	}
+	derivedKeys := core.NewSessionKeys(okMsg.GetKeyId(), cs, okMsg.GetHmacKey())
+	derivedKeys.SetAEADKey(okMsg.GetAesKey())
+
+	// 用派生密钥构建 BATCH → 期望 ACK（证明派生子钥生效）
 	chunkID := core.NewChunkID()
 	batchMsg := &corepb.BatchMessage{
-		Seq:         1,
-		ChunkId:     chunkID.Bytes(),
-		EventsCount: 1,
-		Batch:       makeSignalBatch(""),
+		Seq: 1, ChunkId: chunkID.Bytes(), EventsCount: 1, Batch: makeSignalBatch(""),
 	}
 	batchPayload, _ := core.Encode(batchMsg)
 	params := core.BuildParams{
-		SessionID:    []byte(testutil.RandString(8)),
+		SessionID:    ack.GetSessionId(),
 		Seq:          1,
 		ChunkID:      chunkID,
 		Codec:        corepb.Codec_CODEC_PROTO,
@@ -336,32 +363,29 @@ func TestCoreHandler_EarlyData(t *testing.T) {
 		CipherSuite:  corepb.CipherSuite_CIPHER_SUITE_INTL,
 		DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
 		MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
-		HMACKey:      resumptionKeys.HMACKey(),
-		AEADKey:      resumptionKeys.AEADKey(),
+		HMACKey:      derivedKeys.HMACKey(),
+		AEADKey:      derivedKeys.AEADKey(),
 		BatchPayload: batchPayload,
 	}
 	env, _ := core.Build(params)
 	envPayload, _ := core.Encode(env)
-
-	// dataLoop 应在 earlyData 后启动（AUTH 前），处理 0-RTT BATCH
 	tr.DataIn <- MakeFrame(core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, envPayload)
 
-	// 期望 ACK（processBatch 用 resumption keys VerifyMAC + Open）
 	ackFrame := ReadFrame(t, tr.Sent)
 	if ackFrame.Header.Type == core.TypeNack {
 		var n core.NackMessage
 		_ = core.Decode(ackFrame.Payload, &n)
-		t.Fatalf("0-RTT BATCH got NACK: code=%s reason=%s", n.GetCode(), n.GetReason())
+		t.Fatalf("BATCH with derived keys got NACK: code=%s reason=%s", n.GetCode(), n.GetReason())
 	}
 	if ackFrame.Header.Type != core.TypeAck {
-		t.Fatalf("expected ACK for 0-RTT BATCH, got type %d", ackFrame.Header.Type)
+		t.Fatalf("expected ACK for BATCH with derived keys, got type %d", ackFrame.Header.Type)
 	}
 }
 
 // TestCoreHandler_UnknownCapabilityRejected 验证 §1.3 协商失败语义：
 // 客户端宣告未注册的 stable capability → HELLO 返回 ERROR（不静默吞掉）。
 func TestCoreHandler_UnknownCapabilityRejected(t *testing.T) {
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	policy := core.Policy{
 		SupportedCapabilities: []string{core.CapCodecProto},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
@@ -460,7 +484,7 @@ func TestCoreHandler_BatchTooManyEvents(t *testing.T) {
 
 // TestCoreHandler_PartialAckCapability 验证 partial_ack capability 协商 + 结构正确性。
 func TestCoreHandler_PartialAckCapability(t *testing.T) {
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	policy := core.Policy{
 		SupportedCapabilities: []string{core.CapCodecProto, core.CapCSIntl, core.CapPartialAck},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,

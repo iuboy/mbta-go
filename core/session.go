@@ -125,6 +125,14 @@ func (s ServerState) String() string {
 // the caller should force-close the connection.
 const DefaultDrainTimeout = 30 * time.Second
 
+// DefaultReadTimeout 是无 ctx deadline 时 transport 读操作的默认上限。
+// 避免对端静默断开时 control loop 永久阻塞导致 goroutine 泄漏。
+const DefaultReadTimeout = 5 * time.Minute
+
+// DefaultWriteTimeout 是无 ctx deadline 时 transport 写操作的默认上限。
+// 防止半开对端让写永久阻塞（尤其 sink worker 的 ACK 发送）。
+const DefaultWriteTimeout = 30 * time.Second
+
 // StateMachine is a thread-safe client-side state machine for MBTA sessions.
 type StateMachine struct {
 	mu           sync.Mutex

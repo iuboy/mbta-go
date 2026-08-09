@@ -2,7 +2,6 @@ package ntls
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -36,28 +35,10 @@ type ntlsClientTransport struct {
 }
 
 func (t *ntlsClientTransport) ReadFrame(ctx context.Context) (core.Frame, error) {
-	// ctx 感知读：通过 SetReadDeadline 让 ctx 取消/超时能中断阻塞读，
-	// 避免对端静默断开（TCP 无 RST，仅静默丢包）时 control loop 永久阻塞。
-	if err := ctx.Err(); err != nil {
-		return core.Frame{}, err
-	}
-	dl, ok := ctx.Deadline()
-	if !ok {
-		dl = time.Now().Add(ntlsReadDefaultTimeout)
-	}
-	if err := t.conn.SetReadDeadline(dl); err != nil {
-		return core.Frame{}, core.WrapError(core.ErrCodeStream, "set read deadline", err)
-	}
-	defer func() { _ = t.conn.SetReadDeadline(time.Time{}) }()
-	f, err := core.Read(t.conn, core.DefaultLimits())
-	if err != nil && ctx.Err() != nil {
-		return core.Frame{}, ctx.Err()
-	}
-	return f, err
+	return core.ReadFrameCtx(ctx, t.conn)
 }
 
-// ntlsReadDefaultTimeout 是 NTLS control 读在 ctx 无 deadline 时的默认上限。
-const ntlsReadDefaultTimeout = 5 * time.Minute
+// 读超时统一用 core.DefaultReadTimeout。
 
 // WriteFrame 写一帧。data 和 control 通道均受 ctx 约束（设 SetWriteDeadline），
 // 防止慢速/无响应对端导致写永久阻塞（goroutine 泄漏）。
@@ -70,7 +51,7 @@ func (t *ntlsClientTransport) WriteFrame(ctx context.Context, typ uint8, flags, 
 	// 设写 deadline：ctx 有 Deadline 用之，否则设默认上限（30s）防背压永久阻塞。
 	dl, ok := ctx.Deadline()
 	if !ok {
-		dl = time.Now().Add(ntlsWriteDefaultTimeout)
+		dl = time.Now().Add(core.DefaultWriteTimeout)
 	}
 	if err := t.conn.SetWriteDeadline(dl); err != nil {
 		return core.WrapError(core.ErrCodeStream, "set write deadline", err)
@@ -79,53 +60,36 @@ func (t *ntlsClientTransport) WriteFrame(ctx context.Context, typ uint8, flags, 
 	return core.Write(t.conn, core.Version, typ, flags, channel, payload)
 }
 
-// ntlsWriteDefaultTimeout 是 ctx 无 deadline 时客户端写的默认上限。
-const ntlsWriteDefaultTimeout = 30 * time.Second
+// 写超时统一用 core.DefaultWriteTimeout。
 
 func (t *ntlsClientTransport) CloseConn() error {
 	return t.conn.Close()
 }
 
 func NewClient(cfg ClientConfig) (*Client, error) {
-	// fail-fast：构造期校验必填字段与格式，避免拖到 Connect 的 dial 层才报错。
-	if cfg.AgentID == "" {
-		return nil, core.NewError(core.ErrCodeConfig, "AgentID required")
-	}
-	if cfg.Token == "" {
-		return nil, core.NewError(core.ErrCodeConfig, "Token required")
-	}
 	if err := core.ValidateHostPort(cfg.Server); err != nil {
 		return nil, core.WrapError(core.ErrCodeConfig, "Server", err)
 	}
-	if unknown := core.FilterUnknownStable(cfg.Capabilities); len(unknown) > 0 {
-		return nil, core.NewError(core.ErrCodeProtocol, fmt.Sprintf("unknown stable capabilities: %v", unknown))
-	}
-	// TLCP 双 SM2 客户端证书一致性：sign 对（SignCert+SignKey）与 enc 对（EncCert+EncKey）
-	// 各自要么都填要么都空。部分填充（如只填 SignCert 漏 SignKey）此前要拖到 Dial 的
-	// LoadDualCertificateFiles 才报错，这里 fail-fast 暴露。
+	// ntls 特有校验：TLCP 双 SM2 客户端证书一致性。
 	if cfg.Credentials != nil && !cfg.Credentials.TLSMode {
 		if err := validateDualSM2Creds(cfg.Credentials); err != nil {
 			return nil, err
 		}
 	}
-	cc := protocol.NewCoreClient(nil, protocol.CoreClientConfig{
+	// 公共校验 + CoreClient 构造委托 binding.NewClientCore（v1/ntls 共享）。
+	cc, err := binding.NewClientCore(binding.ClientCoreConfig{
 		AgentID:      cfg.AgentID,
 		Hostname:     cfg.Hostname,
 		Token:        cfg.Token,
 		Capabilities: cfg.Capabilities,
 		OS:           cfg.OS,
 		AgentVersion: cfg.AgentVersion,
-		// binding 默认算法（spec §8.3：跟随传输 binding 合规语境）。
-		// ntls 走 TCP + TLCP/RFC8998 → 国密密码套件；codec/compression 用协议 baseline 默认。
-		DefaultCodec:       corepb.Codec_CODEC_PROTO,
-		DefaultCipherSuite: corepb.CipherSuite_CIPHER_SUITE_GM,
-		DefaultCompression: corepb.Compression_COMPRESSION_ZSTD,
-		Metrics:            cfg.Metrics,
-		DrainTimeout:       cfg.DrainTimeout,
-	})
-	// ntls 单连接无 SetAuthed 门禁，onAuthed 留空。
-	cc.SetReadControlLoop(cc.ReadControlLoop)
-	cc.SetHeartbeatLoop(cc.HeartbeatLoop)
+		Metrics:      cfg.Metrics,
+		DrainTimeout: cfg.DrainTimeout,
+	}, corepb.CipherSuite_CIPHER_SUITE_GM)
+	if err != nil {
+		return nil, err
+	}
 	return &Client{core: cc, cfg: cfg}, nil
 }
 
@@ -150,7 +114,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		func(ctx context.Context) error {
 			conn, err := Dial(ctx, &c.cfg)
 			if err != nil {
-				return core.WrapError(core.ErrCodeTransport, "dial", err)
+				return err // Dial 已 wrap ErrCodeTransport + 具体原因
 			}
 			// dial 回调内二次检查：消除入口 c.conn==nil 检查与赋值之间的 TOCTOU 窗口。
 			c.mu.Lock()
@@ -174,7 +138,9 @@ func (c *Client) Connect(ctx context.Context) error {
 		// postAuth: ntls 无 post-auth 工作
 		nil,
 	)
-	// 握手失败：cc.Close() 仅在 transport 已注册时关闭连接，dial 成功但 setupTransport 失败时需在此显式关闭（仅关本协程设置的连接）。
+	// 握手失败清理：binding.Handshake 内部已调 cc.Close()（关 transport + 取消 lifecycle
+	// + 等 goroutine），此处清理外层 ntls.Client 的 c.conn 引用（置 nil 防 use-after-close）
+	// 并兜底关 conn（幂等，可能已被 cc.Close 关闭）。ntls client transport 自身不开 goroutine。
 	if err != nil {
 		c.mu.Lock()
 		if connSet {
@@ -199,7 +165,7 @@ func (c *Client) SetACKHandler(h func(chunkID, ackMode string)) {
 }
 
 // SetRedirectHandler 注册服务端 TypeRedirect（S→C 集群重定向到 leader）回调。
-func (c *Client) SetRedirectHandler(h func(payload []byte)) {
+func (c *Client) SetRedirectHandler(h func(context.Context, []byte)) {
 	c.core.SetRedirectHandler(h)
 }
 

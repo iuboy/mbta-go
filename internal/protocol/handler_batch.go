@@ -95,14 +95,14 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 
 	// 服务端流控强制。
 	if !h.window.CanSend(h.inflight, batchEvents, batchBytes) {
-		h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeWindowExceeded, "server flow-control window exceeded")
+		h.sendThrottle(ctx, core.ErrCodeWindowExceeded, "server flow-control window exceeded")
 		return
 	}
 	// 前置背压检查：sink 已 critical 时直接 THROTTLE，不进入 route，避免慢/恶意 sink
 	// 阻塞 handler goroutine（DoS 防护）。ReplayProcessing 重试路径不经过此处（它在
 	// replay 检查后 fallthrough），故被限流 batch 的重投不受影响。
-	if h.isPressureCritical() {
-		h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeQueuePressure, "sink critical pressure, retry later")
+	if h.config.Sink != nil && h.config.Sink.OnPressure(h.getAgentID()) == core.PressureCritical {
+		h.sendThrottle(ctx, core.ErrCodeQueuePressure, "sink critical pressure, retry later")
 		return
 	}
 	h.inflight.Add(batchEvents, batchBytes)
@@ -178,32 +178,6 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 	}
 }
 
-// codecForUnmarshal 返回服务端解码 SignalBatch 应使用的 codec：优先协商结果，
-// 否则回退到 HandlerConfig.Policy.DefaultCodec。
-func (h *CoreHandler) codecForUnmarshal() corepb.Codec {
-	if n := h.negotiated.Load(); n != nil {
-		return n.Codec
-	}
-	return h.config.Policy.DefaultCodec
-}
-
-// isPressureCritical 查询 sink 当前背压，返回是否处于 critical（应拒绝新 batch）。
-// 用于 route 前置拦截：sink 已 critical 时直接 THROTTLE，避免慢 sink 下 handler
-// goroutine 阻塞放大。nil sink 或非 EventSink 实现返回 false（不拦截）。
-func (h *CoreHandler) isPressureCritical() bool {
-	if h.config.Sink == nil {
-		return false
-	}
-	return h.config.Sink.OnPressure(h.getAgentID()) == core.PressureCritical
-}
-
-// asyncDurableEnabled 报告 sink 是否实现 AsyncDurableSink（走异步 durable 升级路径）。
-// routeAndACK 据此在 DurableEventSink/RawEventSink 之前优先选异步路径。
-func (h *CoreHandler) asyncDurableEnabled() bool {
-	_, ok := h.config.Sink.(core.AsyncDurableSink)
-	return ok
-}
-
 // enqueueSinkTask 投递 task 到 sinkQueue。成功返回 true；队列满则发 THROTTLE +
 // 重置 replay 为 Processing（让客户端重试），返回 false（调用方应 return 不发 ACK）。
 func (h *CoreHandler) enqueueSinkTask(task sinkTask, ctx context.Context, agentID, chunkID string) bool {
@@ -213,7 +187,7 @@ func (h *CoreHandler) enqueueSinkTask(task sinkTask, ctx context.Context, agentI
 	default:
 		slog.Warn("sink queue full, throttling for retry", "queue_cap", cap(h.sinkQueue))
 		h.replay.Update(agentID, chunkID, core.ReplayProcessing)
-		h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeQueuePressure, "sink queue full, retry later")
+		h.sendThrottle(ctx, core.ErrCodeQueuePressure, "sink queue full, retry later")
 		return false
 	}
 }
@@ -270,7 +244,12 @@ func (h *CoreHandler) resolveBatchEvents(ctx context.Context, batchMsg *corepb.B
 }
 
 func (h *CoreHandler) decodeSignalBatch(ctx context.Context, batchMsg *corepb.BatchMessage) (*core.SignalBatch, bool) {
-	sb, err := core.UnmarshalSignalBatchCodec(h.codecForUnmarshal(), batchMsg.GetBatch())
+	// 内联 codecForUnmarshal：优先协商 codec，回退 Policy.DefaultCodec。
+	codec := h.config.Policy.DefaultCodec
+	if n := h.negotiated.Load(); n != nil {
+		codec = n.Codec
+	}
+	sb, err := core.UnmarshalSignalBatchCodec(codec, batchMsg.GetBatch())
 	if err != nil {
 		slog.Debug("signal batch decode failed", "error", err)
 		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeInvalidSignalBatch, "signal batch could not be decoded", false)
@@ -334,8 +313,9 @@ func (h *CoreHandler) routeAndACK(ctx context.Context, agentID, chunkID string, 
 	ackMode := corepb.AckMode_ACK_MODE_ACCEPTED
 
 	if h.config.Sink != nil {
+		_, asyncDurable := h.config.Sink.(core.AsyncDurableSink) // 内联原 asyncDurableEnabled()
 		switch {
-		case h.sinkQueue != nil && h.asyncDurableEnabled():
+		case h.sinkQueue != nil && asyncDurable:
 			// AsyncDurableSink（异步）：投递队列立即发 ACK accepted，worker 调
 			// OnSignalBatchAsync；sink 持久化后回调 notifier 发 durable 升级帧。
 			if !h.enqueueSinkTask(sinkTask{
@@ -379,7 +359,7 @@ func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteRe
 		// 重置 replay entry 为 Processing，允许客户端重试时重新投递（否则 replay 仍为 Accepted，
 		// 客户端重试会收到 ACK_ACCEPTED 但 batch 从未真正处理，造成静默数据丢失）。
 		h.replay.Update(agentID, chunkID, core.ReplayProcessing)
-		h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeQueuePressure, "queue pressure critical, retry later")
+		h.sendThrottle(ctx, core.ErrCodeQueuePressure, "queue pressure critical, retry later")
 		return true
 	default:
 		*ackMode = corepb.AckMode_ACK_MODE_ACCEPTED
@@ -391,26 +371,26 @@ func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteRe
 }
 
 // applyPressure 在 pressure 变化时更新窗口并下发 WINDOW（core spec §9.2：取值变化时才发送，
-// 避免同值重复）。加锁保证并发 BATCH 的"比较-更新-下发"原子——否则两个 goroutine 可能
-// 同时读到旧值并各发一份相同 WINDOW。
+// 避免同值重复）。锁内只做"比较-更新-window.Update"原子序列；锁外调 sendWindowUpdate，
+// 避免反压下 goroutine 在网络写上串行化。
 func (h *CoreHandler) applyPressure(ctx context.Context, pressure core.PressureState) {
 	if pressure == "" {
 		return
 	}
 	h.pressureMu.Lock()
-	defer h.pressureMu.Unlock()
-	if pressure == h.loadLastPressure() {
+	// 内联 loadLastPressure：atomic.Value load + 类型断言 + 默认值。
+	lastPressure := core.PressureNormal
+	if v := h.lastPressure.Load(); v != nil {
+		lastPressure = v.(core.PressureState)
+	}
+	if pressure == lastPressure {
+		h.pressureMu.Unlock()
 		return
 	}
 	h.lastPressure.Store(pressure)
 	b, e, by := pressureToWindow(pressure)
 	h.window.Update(b, e, by)
+	h.pressureMu.Unlock()
+	// 锁外发送：sendWindowUpdate 幂等（取值已 Store 到 lastPressure，重复发也只是对端多收一份 WINDOW）。
 	h.sendWindowUpdate(ctx, b, e, by, string(pressure))
-}
-
-func (h *CoreHandler) loadLastPressure() core.PressureState {
-	if v := h.lastPressure.Load(); v != nil {
-		return v.(core.PressureState)
-	}
-	return core.PressureNormal
 }

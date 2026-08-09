@@ -2,7 +2,6 @@ package core
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -82,7 +81,7 @@ func TestCodeOf(t *testing.T) {
 		t.Error("CodeOf(HMACMismatch) == Auth.Code, want different")
 	}
 	// 非 *Error 返回空串。
-	if got := CodeOf(fmt.Errorf("plain")); got != "" {
+	if got := CodeOf(errors.New("plain")); got != "" {
 		t.Errorf("CodeOf(plain) = %q, want empty", got)
 	}
 	// nil 安全。
@@ -104,7 +103,7 @@ func TestMBTAError_Error(t *testing.T) {
 }
 
 func TestMBTAError_ErrorWrapped(t *testing.T) {
-	inner := fmt.Errorf("listen failed")
+	inner := errors.New("listen failed")
 	e := WrapError(ErrCodeTransport, "dial QUIC", inner)
 	want := "[2000 transport_error] dial QUIC: listen failed"
 	if got := e.Error(); got != want {
@@ -165,7 +164,7 @@ func TestMBTAError_Detail(t *testing.T) {
 	}
 
 	// Detail + Err 同时存在：Detail 在前，Err 在后。
-	inner := fmt.Errorf("root cause")
+	inner := errors.New("root cause")
 	e3 := &Error{ErrorCode: ErrCodeTransport, Message: "dial", Detail: detail, Err: inner}
 	got3 := e3.Error()
 	if !strings.Contains(got3, ":{") {
@@ -177,7 +176,7 @@ func TestMBTAError_Detail(t *testing.T) {
 }
 
 func TestMBTAError_Unwrap(t *testing.T) {
-	inner := fmt.Errorf("base error")
+	inner := errors.New("base error")
 	e := WrapError(ErrCodeTLS, "tls failed", inner)
 	if !errors.Is(e, inner) {
 		t.Error("Unwrap should return inner error")
@@ -193,8 +192,8 @@ func TestCodeOfMatching(t *testing.T) {
 		matches bool
 	}{
 		{"session matches", NewError(ErrCodeSession, "bad state"), ErrCodeSession, true},
-		{"transport matches", WrapError(ErrCodeTransport, "dial", fmt.Errorf("refused")), ErrCodeTransport, true},
-		{"auth matches through wrap", WrapError(ErrCodeAuth, "token", fmt.Errorf("expired")), ErrCodeAuth, true},
+		{"transport matches", WrapError(ErrCodeTransport, "dial", errors.New("refused")), ErrCodeTransport, true},
+		{"auth matches through wrap", WrapError(ErrCodeAuth, "token", errors.New("expired")), ErrCodeAuth, true},
 		{"config matches", NewError(ErrCodeConfig, "missing"), ErrCodeConfig, true},
 		// Different code must NOT match.
 		{"transport not session", NewError(ErrCodeTransport, "dial"), ErrCodeSession, false},
@@ -232,7 +231,6 @@ func TestNumCodeRanges(t *testing.T) {
 		{NumHMAC, 4000, 4099, "data"},
 		{NumWindowFull, 5000, 5099, "flow"},
 		{NumThrottle, 5000, 5099, "flow"},
-		{NumSpool, 6000, 6099, "storage"},
 		{NumVersion, 7000, 7099, "version"},
 	}
 	for _, tt := range tests {

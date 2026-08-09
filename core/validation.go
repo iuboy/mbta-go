@@ -70,7 +70,7 @@ func validateTextField(name, val string) error {
 		return NewError(ErrCodeValidation, fmt.Sprintf("%s exceeds maximum length %d", name, MaxSignalFieldLen))
 	}
 	if hasControlChars(val) {
-		return NewError(ErrCodeValidation, fmt.Sprintf("%s contains control characters", name))
+		return NewError(ErrCodeValidation, name+" contains control characters")
 	}
 	return nil
 }
@@ -112,7 +112,7 @@ func validateHexID(name, val string, wantBytes int) error {
 		}
 	}
 	if allZero {
-		return NewError(ErrCodeValidation, fmt.Sprintf("%s must not be all zeros", name))
+		return NewError(ErrCodeValidation, name+" must not be all zeros")
 	}
 	return nil
 }
@@ -124,7 +124,7 @@ func validateTraceStateEntryField(name, val string) error {
 		return NewError(ErrCodeValidation, fmt.Sprintf("%s exceeds maximum length %d", name, MaxTraceStateFieldLen))
 	}
 	if hasControlChars(val) {
-		return NewError(ErrCodeValidation, fmt.Sprintf("%s contains control characters", name))
+		return NewError(ErrCodeValidation, name+" contains control characters")
 	}
 	return nil
 }

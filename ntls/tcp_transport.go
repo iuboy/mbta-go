@@ -99,6 +99,8 @@ func (t *tcpTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 
 // SendFrame 写帧（按 ChannelID 写单连接，writeSem 串行化）。
 // writeSem 为容量 1 信号量，select 监听 ctx.Done() 使写锁等待可取消（sync.Mutex 阻塞不可取消，慢速对端致泄漏）。
+// 写操作设 SetWriteDeadline：ctx 有 Deadline 用之，否则用 core.DefaultWriteTimeout（30s），
+// 防止半开对端让写永久阻塞（sink worker 的 durable ACK 尤其受影响）。
 func (t *tcpTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	// 获取写信号量（或响应 ctx 取消）。
 	select {
@@ -109,6 +111,15 @@ func (t *tcpTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	}
 	// 归还 token（等价于解锁）。
 	defer func() { t.writeSem <- struct{}{} }()
+	// 设写 deadline：与 ntlsClientTransport.WriteFrame 对称（ntls/client.go:64-80）。
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(core.DefaultWriteTimeout)
+	}
+	if err := t.conn.SetWriteDeadline(dl); err != nil {
+		return core.WrapError(core.ErrCodeStream, "set write deadline", err)
+	}
+	defer func() { _ = t.conn.SetWriteDeadline(time.Time{}) }()
 	return core.Write(t.conn, f.Header.Version, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
 }
 

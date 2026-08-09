@@ -65,6 +65,10 @@ type Metrics interface {
 	HMACFailures() Counter
 	DecryptFailures() Counter
 
+	// sink 投递失败（普通 EventSink.OnSignalBatch 返回错误时递增）。
+	// ACK_MODE_ACCEPTED 已发但 sink 持久化失败=潜在数据丢失。
+	SinkFailures() Counter
+
 	// 流控窗口
 	WindowCurrentBatches() Gauge
 	WindowCurrentEvents() Gauge
@@ -101,6 +105,7 @@ type MBTAMetrics struct {
 
 	hmacFailuresTotal    prometheus.Counter
 	decryptFailuresTotal prometheus.Counter
+	sinkFailuresTotal    prometheus.Counter
 
 	windowCurrentBatchesGauge prometheus.Gauge
 	windowCurrentEventsGauge  prometheus.Gauge
@@ -133,6 +138,7 @@ func (m *MBTAMetrics) ReplayCacheEvictions() Counter {
 }
 func (m *MBTAMetrics) HMACFailures() Counter         { return guardedCounter{m.hmacFailuresTotal} }
 func (m *MBTAMetrics) DecryptFailures() Counter      { return guardedCounter{m.decryptFailuresTotal} }
+func (m *MBTAMetrics) SinkFailures() Counter         { return guardedCounter{m.sinkFailuresTotal} }
 func (m *MBTAMetrics) WindowCurrentBatches() Gauge   { return m.windowCurrentBatchesGauge }
 func (m *MBTAMetrics) WindowCurrentEvents() Gauge    { return m.windowCurrentEventsGauge }
 func (m *MBTAMetrics) WindowCurrentBytes() Gauge     { return m.windowCurrentBytesGauge }
@@ -206,6 +212,11 @@ func New(reg prometheus.Registerer) *MBTAMetrics {
 			Name:      "decrypt_failures_total",
 			Help:      "Total number of decryption failures",
 		}),
+		sinkFailuresTotal: newCounter(reg, prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "sink_failures_total",
+			Help:      "Total number of EventSink.OnSignalBatch failures (ACK already sent, data may be lost)",
+		}),
 		windowCurrentBatchesGauge: newGauge(reg, prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "window_current_batches",
@@ -276,6 +287,7 @@ func (NoOpMetrics) ReplayCacheHits() Counter      { return noopCounter{} }
 func (NoOpMetrics) ReplayCacheEvictions() Counter { return noopCounter{} }
 func (NoOpMetrics) HMACFailures() Counter         { return noopCounter{} }
 func (NoOpMetrics) DecryptFailures() Counter      { return noopCounter{} }
+func (NoOpMetrics) SinkFailures() Counter         { return noopCounter{} }
 func (NoOpMetrics) WindowCurrentBatches() Gauge   { return noopGauge{} }
 func (NoOpMetrics) WindowCurrentEvents() Gauge    { return noopGauge{} }
 func (NoOpMetrics) WindowCurrentBytes() Gauge     { return noopGauge{} }

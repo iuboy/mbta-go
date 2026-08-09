@@ -116,8 +116,8 @@ type CoreClient struct {
 	// ackHandler 在收到 ACK 时回调，接收 (chunkID, ackMode)。
 	ackHandler atomic.Pointer[func(chunkID, ackMode string)]
 
-	// redirectHandler 在收到 TypeRedirect 时回调，接收原始 payload（应用层解码）。
-	redirectHandler atomic.Pointer[func(payload []byte)]
+	// redirectHandler 在收到 TypeRedirect 时回调，接收带超时的 ctx + 原始 payload（应用层解码）。
+	redirectHandler atomic.Pointer[func(context.Context, []byte)]
 	// redirectInflight 防止同时运行多个 redirect handler goroutine，
 	// 应对恶意/有缺陷的服务端高频重定向耗尽 goroutine 资源。
 	redirectInflight atomic.Bool
@@ -156,9 +156,8 @@ type CoreClient struct {
 
 // NewCoreClient 创建共享协议核心。tr 由各 binding 提供。
 func NewCoreClient(tr ClientTransport, cfg CoreClientConfig) *CoreClient {
-	// Metrics 为 nil（含 typed-nil，如 (*MBTAMetrics)(nil) 赋给接口）时回退到
-	// NoOpMetrics，客户端无需逐处 nil 检查。与 NewCoreHandler 对称。
-	if isNilMetrics(cfg.Metrics) {
+	// Metrics 为 nil 时回退到 NoOpMetrics，客户端无需逐处 nil 检查。
+	if cfg.Metrics == nil {
 		cfg.Metrics = core.NoOpMetrics{}
 	}
 	return &CoreClient{
@@ -224,23 +223,28 @@ func (c *CoreClient) close() {
 	}
 
 	// 3. 等待 drain。readControlLoop 仍运行，handleAck 持续触发 notifyDrainIfEmpty。
+	// 权威退出条件是 tracker.Empty()（所有 inflight ACK 已收），drainCh 仅作唤醒信号。
 	if c.sm.State() == core.StateDraining {
 		drainTimeout := c.cfg.DrainTimeout
 		if drainTimeout <= 0 {
 			drainTimeout = core.DefaultDrainTimeout
 		}
 		drainDeadline := time.NewTimer(drainTimeout)
-		for c.sm.State() == core.StateDraining {
+		timedOut := false
+		for !c.tracker.Empty() && !timedOut {
 			select {
 			case <-drainDeadline.C:
+				timedOut = true
 				slog.Warn("drain timeout exceeded, force-closing",
-					"pending", c.countPendingAcks())
-				_ = c.sm.Transition(core.StateClosed)
+					"pending", c.tracker.PendingCount())
 			case <-c.drainCh:
-				_ = c.sm.Transition(core.StateClosed)
+				// drainCh 是唤醒信号：tracker 可能已空（循环条件下一轮判断）或仍有 inflight（继续等）。
 			}
 		}
 		drainDeadline.Stop()
+		if err := c.sm.Transition(core.StateClosed); err != nil {
+			slog.Debug("drain transition to Closed failed", "error", err)
+		}
 	}
 
 	// 4. 取消所有后台 goroutine。
@@ -361,9 +365,4 @@ func (c *CoreClient) SetHeartbeatInterval(d time.Duration) {
 // SmTransition 暴露状态机转换给 binding（Connect 流程需要）。
 func (c *CoreClient) SmTransition(state core.State) error {
 	return c.sm.Transition(state)
-}
-
-// SmTransitionConnecting 是 Connecting 转换的便捷方法。
-func (c *CoreClient) SmTransitionConnecting() error {
-	return c.sm.Transition(core.StateConnecting)
 }

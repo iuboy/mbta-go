@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"log/slog"
-	"reflect"
 	"time"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
@@ -40,8 +39,8 @@ func (h *CoreHandler) sendNack(ctx context.Context, seq uint64, chunkID []byte, 
 	h.config.Metrics.BatchesNacked().Inc()
 }
 
-func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code core.ErrorCode, reason string) {
-	t := &corepb.ThrottleMessage{RetryDelayMs: int32(retryDelayMs), Code: code.Code, Reason: reason}
+func (h *CoreHandler) sendThrottle(ctx context.Context, code core.ErrorCode, reason string) {
+	t := &corepb.ThrottleMessage{RetryDelayMs: int32(throttleRetryMs), Code: code.Code, Reason: reason}
 	p, err := core.Encode(t)
 	if err != nil {
 		slog.Warn("encode throttle failed", "error", err)
@@ -51,7 +50,7 @@ func (h *CoreHandler) sendThrottle(ctx context.Context, retryDelayMs int, code c
 		slog.Warn("write throttle failed", "error", err)
 	}
 	h.config.Metrics.Throttled().Inc()
-	h.config.Metrics.ThrottleSeconds().Add(float64(retryDelayMs) / 1000)
+	h.config.Metrics.ThrottleSeconds().Add(float64(throttleRetryMs) / 1000)
 }
 
 // failAuth 发 AUTH_FAIL 并轮换 challengeNonce（每次在线验证用新挑战）。
@@ -142,18 +141,4 @@ func chunkIDText(chunkID []byte) string {
 		return c.String()
 	}
 	return string(chunkID) // fallback（非 16B 时）
-}
-
-// isNilMetrics 报告 Metrics 接口是否为 nil 或底层值为 typed-nil 指针。
-// 安全处理值类型实现（NoOpMetrics 是 struct，IsNil 不适用）。
-func isNilMetrics(m core.Metrics) bool {
-	if m == nil {
-		return true
-	}
-	v := reflect.ValueOf(m)
-	// 仅对指针/接口/chan/map/slice 类型检查 IsNil；值类型（如 NoOpMetrics）非 nil。
-	if v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
-		return v.IsNil()
-	}
-	return false
 }

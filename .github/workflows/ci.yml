@@ -105,6 +105,17 @@ jobs:
         env:
           REPO: ${{ github.repository }}
         run: buf breaking --against "https://github.com/$REPO.git#branch=main"
+      # P10：生成代码漂移校验——确保 corepb/*.pb.go 与 .proto 一致，防止手动改生成代码或忘记 regen。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install protoc-gen-go
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+      - name: buf generate
+        run: buf generate
+      - name: Check generated code is up to date
+        run: git diff --exit-code corepb/
 
   vuln:
     name: Vulnerability scan

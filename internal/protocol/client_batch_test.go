@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
@@ -69,8 +70,8 @@ func TestSendBatch_TraceContextCapabilityGate(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected capability-gate error, got nil")
 	}
-	mbe, ok := err.(*core.Error)
-	if !ok || mbe.Code != core.ErrCodeBatch.Code {
+	var mbe *core.Error
+	if !errors.As(err, &mbe) || mbe.Code != core.ErrCodeBatch.Code {
 		t.Errorf("expected CodeBatch error, got %v", err)
 	}
 }
@@ -89,8 +90,8 @@ func TestSendBatch_TraceContextValidation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error for all-zero trace_id, got nil")
 	}
-	mbe, ok := err.(*core.Error)
-	if !ok || mbe.Code != core.ErrCodeValidation.Code {
+	var mbe *core.Error
+	if !errors.As(err, &mbe) || mbe.Code != core.ErrCodeValidation.Code {
 		t.Errorf("expected CodeValidation error, got %v", err)
 	}
 }
@@ -106,7 +107,8 @@ func TestSendBatch_NoOpts_NoGate(t *testing.T) {
 		// 走到状态检查会因非 Ready 报错；无论哪种，都不应是 capability 门控错误。
 		return
 	}
-	if mbe, ok := err.(*core.Error); ok && mbe.Code == core.ErrCodeBatch.Code {
+	var mbe *core.Error
+	if errors.As(err, &mbe) && mbe.Code == core.ErrCodeBatch.Code {
 		t.Errorf("no-opts call must not hit capability gate, got CodeBatch: %v", err)
 	}
 }

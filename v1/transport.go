@@ -169,7 +169,7 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 		InitialConnectionReceiveWindow: initialConnectionWnd,
 		MaxStreamReceiveWindow:         maxStreamWnd,
 		MaxConnectionReceiveWindow:     maxConnectionWnd,
-		Allow0RTT:                      true, // 接受 0-RTT resumption（core spec §11.6）。重放防护由应用层票据单次使用 + ReplayCache 去重提供。
+		Allow0RTT:                      true, // 允许 QUIC 层 0-RTT 握手加速。应用层早数据路径已在 S4 移除（票据恢复仍需 challenge-response），此处的 0-RTT 仅影响 TLS 握手而非 MBTA batch 投递。
 		EnableDatagrams:                true, // SupportsDatagram()=true 的前置条件（RFC 9221，§11.4）
 	}
 
@@ -196,7 +196,6 @@ func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 type Conn struct {
 	QC             *quic.Conn
 	RemoteAddr     net.Addr
-	TLSState       tls.ConnectionState
 	controlClaimed bool
 	controlMu      sync.Mutex
 	authed         atomic.Bool
@@ -208,11 +207,9 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	cs := qc.ConnectionState().TLS
 	return &Conn{
 		QC:         qc,
 		RemoteAddr: qc.RemoteAddr(),
-		TLSState:   cs,
 	}, nil
 }
 
@@ -288,23 +285,6 @@ func (c *Conn) CloseWithError(code quic.ApplicationErrorCode, reason string) err
 
 // Dial establishes a QUIC connection to an MBTA server.
 func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
-	return dial(ctx, cfg, false)
-}
-
-// DialEarly establishes a 0-RTT QUIC connection for session resumption (core spec §11.6).
-// Requires ClientSessionCache populated from a previous Dial (TLS session ticket).
-//
-// 安全约束：0-RTT 数据在 TLS 握手完成前发送，若配合 InsecureSkipVerify 会使
-// 0-RTT 数据（可能含凭证）发送给未验证身份的服务端。此组合被拒绝。
-func DialEarly(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
-	if cfg.Credentials != nil && cfg.Credentials.InsecureSkipVerify {
-		return nil, core.NewError(core.ErrCodeConfig, "DialEarly cannot be used with InsecureSkipVerify: 0-RTT data would be sent without server identity verification")
-	}
-	return dial(ctx, cfg, true)
-}
-
-// dial 建立到 MBTA server 的 QUIC 连接；early=true 走 0-RTT 恢复路径（core spec §11.6）。
-func dial(ctx context.Context, cfg QUICClientConfig, early bool) (*Conn, error) {
 	tlsCfg, err := buildClientTLS(cfg.Credentials)
 	if err != nil {
 		return nil, err
@@ -334,26 +314,14 @@ func dial(ctx context.Context, cfg QUICClientConfig, early bool) (*Conn, error) 
 		return nil, core.WrapError(core.ErrCodeTransport, "listen UDP", err)
 	}
 
-	var (
-		qc  *quic.Conn
-		msg string
-	)
-	if early {
-		qc, err = quic.DialEarly(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
-		msg = "dial early (0-RTT)"
-	} else {
-		qc, err = quic.Dial(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
-		msg = "dial QUIC"
-	}
+	qc, err := quic.Dial(ctx, udpConn, udpAddr, tlsCfg, quicCfg)
 	if err != nil {
 		_ = udpConn.Close() // #nosec G104 -- best-effort cleanup on error path; close error is subordinate to dial error
-		return nil, core.WrapError(core.ErrCodeTransport, msg, err)
+		return nil, core.WrapError(core.ErrCodeTransport, "dial QUIC", err)
 	}
 
-	cs := qc.ConnectionState().TLS
 	return &Conn{
 		QC:         qc,
 		RemoteAddr: qc.RemoteAddr(),
-		TLSState:   cs,
 	}, nil
 }

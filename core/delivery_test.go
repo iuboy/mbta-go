@@ -1,6 +1,7 @@
 package core
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/iuboy/mbta-go/internal/testutil"
@@ -8,17 +9,10 @@ import (
 
 // TestSeqGenerator tests the SeqGenerator functionality.
 func TestSeqGenerator(t *testing.T) {
-	t.Run("NewSeqGenerator starts at 0", func(t *testing.T) {
-		g := NewSeqGenerator()
-		if got := g.Current(); got != 0 {
-			t.Errorf("Current() = %d, want 0", got)
-		}
-	})
-
 	t.Run("Next returns monotonically increasing values", func(t *testing.T) {
 		g := NewSeqGenerator()
 		expected := uint64(1)
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			got := g.Next()
 			if got != expected {
 				t.Errorf("Next() = %d, want %d", got, expected)
@@ -27,38 +21,34 @@ func TestSeqGenerator(t *testing.T) {
 		}
 	})
 
-	t.Run("Current returns last issued sequence", func(t *testing.T) {
-		g := NewSeqGenerator()
-		g.Next()
-		g.Next()
-		g.Next()
-		if got := g.Current(); got != 3 {
-			t.Errorf("Current() = %d, want 3", got)
-		}
-	})
-
 	t.Run("Next is thread-safe", func(t *testing.T) {
 		g := NewSeqGenerator()
-		done := make(chan bool)
+		var wg sync.WaitGroup
 		concurrency := 10
+		unique := make(chan uint64, concurrency*100)
 
-		for i := 0; i < concurrency; i++ {
+		for range concurrency {
+			wg.Add(1)
 			go func() {
-				for j := 0; j < 100; j++ {
-					g.Next()
+				defer wg.Done()
+				for range 100 {
+					unique <- g.Next()
 				}
-				done <- true
 			}()
 		}
+		wg.Wait()
+		close(unique)
 
-		// Wait for all goroutines
-		for i := 0; i < concurrency; i++ {
-			<-done
+		// 应产生 1000 个唯一序号（无重复即证明原子性）。
+		seen := make(map[uint64]bool, 1000)
+		for v := range unique {
+			if seen[v] {
+				t.Errorf("duplicate sequence number: %d", v)
+			}
+			seen[v] = true
 		}
-
-		// Should have exactly 1000 entries
-		if got := g.Current(); got != 1000 {
-			t.Errorf("Current() = %d, want 1000", got)
+		if len(seen) != 1000 {
+			t.Errorf("unique sequence count = %d, want 1000", len(seen))
 		}
 	})
 }
@@ -266,13 +256,6 @@ func TestReplayCacheUpdate(t *testing.T) {
 		if entry.Status != ReplayDurable {
 			t.Errorf("Status = %v, want ReplayDurable", entry.Status)
 		}
-
-		// Durable -> Rejected (should work even if unusual)
-		rc.Update(agent, chunk, ReplayRejected)
-		entry = rc.SeenOrAdd(agent, chunk)
-		if entry.Status != ReplayRejected {
-			t.Errorf("Status = %v, want ReplayRejected", entry.Status)
-		}
 	})
 
 	t.Run("update non-existent entry is no-op", func(t *testing.T) {
@@ -320,10 +303,10 @@ func TestReplayCacheConcurrentAccess(t *testing.T) {
 	opsPerGoroutine := 100
 	agent := testutil.RandAgentID()
 
-	for i := 0; i < concurrency; i++ {
+	for i := range concurrency {
 		go func(workerID int) {
 			chunkID := string(rune(workerID))
-			for j := 0; j < opsPerGoroutine; j++ {
+			for range opsPerGoroutine {
 				rc.SeenOrAdd(agent, chunkID)
 				rc.Update(agent, chunkID, ReplayAccepted)
 			}
@@ -332,13 +315,13 @@ func TestReplayCacheConcurrentAccess(t *testing.T) {
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < concurrency; i++ {
+	for range concurrency {
 		<-done
 	}
 
 	// 每个-worker 用唯一 chunkID，SeenOrAdd 应收敛到 concurrency 个唯一条目（无重复、无 panic）。
 	// 用 SeenOrAdd 验证：对已存在条目返回非 nil，对每个 workerID 的二次查效应命中。
-	for i := 0; i < concurrency; i++ {
+	for i := range concurrency {
 		chunkID := string(rune(i))
 		if existing := rc.SeenOrAdd(agent, chunkID); existing == nil {
 			t.Errorf("worker %d: SeenOrAdd returned nil for existing entry", i)
@@ -355,7 +338,6 @@ func TestReplayStatusValues(t *testing.T) {
 		{ReplayProcessing, 0},
 		{ReplayAccepted, 1},
 		{ReplayDurable, 2},
-		{ReplayRejected, 3},
 	}
 
 	for _, tt := range tests {

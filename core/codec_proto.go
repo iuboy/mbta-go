@@ -29,15 +29,9 @@ func (protoCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	if err := proto.Unmarshal(data, &pb); err != nil {
 		return nil, WrapError(ErrCodeValidation, "unmarshal signal batch", err)
 	}
-	sb := fromProtoSignalBatch(&pb)
-	// 反序列化后校验：proto 文件注释标注 signal_type 必填，空字符串视为无效消息。
-	for i, s := range sb.Signals {
-		if s.SignalType == "" {
-			return nil, WrapError(ErrCodeValidation, fmt.Sprintf("signal[%d]: signal_type is required but empty", i),
-				fmt.Errorf("missing signal_type"))
-		}
-	}
-	return sb, nil
+	// signal_type 空检查由调用方的 sb.Validate() 统一负责（handler_batch.go:258 →
+	// validateSignalType），codec 层不重复（cbor/json codec 也无此检查，保持一致）。
+	return fromProtoSignalBatch(&pb), nil
 }
 
 func init() {

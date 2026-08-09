@@ -81,11 +81,6 @@ var validSignalTypes = map[string]bool{
 	SignalTypeSpan: true, SignalTypeProfile: true,
 }
 
-// Deprecated: "metric" 不在 spec §6.2 的闭合枚举内（{log,gauge,counter,histogram,
-// summary,span,profile}），使用 SignalTypeGauge/SignalTypeCounter 等具体类型。
-// 保留仅为过渡；Validate 会拒绝该值。
-const SignalTypeMetric = "metric"
-
 // SignalBatch 是 BATCH payload 的规范结构，对齐协议文档 §6。
 type SignalBatch struct {
 	SchemaURL string          `json:"schema_url"`
@@ -108,7 +103,7 @@ func (b *SignalBatch) Validate() error {
 		return NewError(ErrCodeValidation, "signals must not be empty")
 	}
 	// Resource attributes 同样受条目数/key 长度约束，使用独立前缀避免 signal[-1] 错误消息。
-	if err := validateAttrsMap("resource.attributes", b.Resource.Attributes); err != nil {
+	if err := validateAttrsMap("", "resource.attributes", b.Resource.Attributes); err != nil {
 		return err
 	}
 	for i, s := range b.Signals {
@@ -222,61 +217,46 @@ func validateSignalFieldLengths(i int, s *SignalRecord) error {
 			return NewError(ErrCodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
 		}
 	}
-	if err := validateSignalAttrs(i, "attributes", s.Attributes); err != nil {
+	sigPrefix := fmt.Sprintf("signal[%d]: ", i)
+	if err := validateAttrsMap(sigPrefix, "attributes", s.Attributes); err != nil {
 		return err
 	}
-	if err := validateMetricFields(i, s.MetricFields); err != nil {
+	if err := validateMetricFields(sigPrefix, s.MetricFields); err != nil {
 		return err
 	}
 	return nil
 }
 
-// validateAttrsMap 校验 resource/scope 等非 signal 级别的 attributes map。
-// 与 validateSignalAttrs 的区别：不使用 signal 索引前缀，直接使用字段名定位。
-func validateAttrsMap(fieldName string, attrs map[string]any) error {
+// validateAttrsMap 校验 attributes map 的条目数上限 + key 合法性（长度 + 严格控制字符）。
+// prefix 用于错误消息定位（如 "resource.attributes" 或 "signal[3]: attributes"）。
+// value 为 any 类型不做递归校验（嵌套深度与内容类型由 codec 层协议约束保证）。
+func validateAttrsMap(prefix, fieldName string, attrs map[string]any) error {
 	if len(attrs) > MaxSignalAttrs {
-		return NewError(ErrCodeValidation, fmt.Sprintf("%s exceeds max entries %d (got %d)", fieldName, MaxSignalAttrs, len(attrs)))
+		return NewError(ErrCodeValidation, fmt.Sprintf("%s%s exceeds max entries %d (got %d)", prefix, fieldName, MaxSignalAttrs, len(attrs)))
 	}
 	for k := range attrs {
 		if len(k) > MaxSignalAttrKeyLen {
-			return NewError(ErrCodeValidation, fmt.Sprintf("%s key %q exceeds max length %d", fieldName, k, MaxSignalAttrKeyLen))
+			return NewError(ErrCodeValidation, fmt.Sprintf("%s%s key %q exceeds max length %d", prefix, fieldName, k, MaxSignalAttrKeyLen))
 		}
 		// attribute key 出现在日志/metrics label 中，使用严格控制字符校验防注入。
 		if hasStrictControlChars(k) {
-			return NewError(ErrCodeValidation, fmt.Sprintf("%s key contains control characters", fieldName))
+			return NewError(ErrCodeValidation, fmt.Sprintf("%s%s key contains control characters", prefix, fieldName))
 		}
 	}
 	return nil
 }
 
-// validateSignalAttrs 校验 signal 级别的 attributes map：条目数上限 + key 长度/控制字符。
-// value 为 any 类型不做递归校验（嵌套深度与内容类型由 codec 层协议约束保证）。
-func validateSignalAttrs(i int, fieldName string, attrs map[string]any) error {
-	if len(attrs) > MaxSignalAttrs {
-		return NewError(ErrCodeValidation, fmt.Sprintf("signal[%d]: %s exceeds max entries %d (got %d)", i, fieldName, MaxSignalAttrs, len(attrs)))
-	}
-	for k := range attrs {
-		if len(k) > MaxSignalAttrKeyLen {
-			return NewError(ErrCodeValidation, fmt.Sprintf("signal[%d]: %s key %q exceeds max length %d", i, fieldName, k, MaxSignalAttrKeyLen))
-		}
-		if hasStrictControlChars(k) {
-			return NewError(ErrCodeValidation, fmt.Sprintf("signal[%d]: %s key contains control characters", i, fieldName))
-		}
-	}
-	return nil
-}
-
-// validateMetricFields 校验 metric_fields map 的条目数上限 + key 合法性（长度 + 严格控制字符）。
-func validateMetricFields(i int, fields map[string]float64) error {
+// validateMetricFields 校验 metric_fields map：与 validateAttrsMap 同构，仅 map 值类型不同。
+func validateMetricFields(prefix string, fields map[string]float64) error {
 	if len(fields) > MaxSignalAttrs {
-		return NewError(ErrCodeValidation, fmt.Sprintf("signal[%d]: metric_fields exceeds max entries %d (got %d)", i, MaxSignalAttrs, len(fields)))
+		return NewError(ErrCodeValidation, fmt.Sprintf("%smetric_fields exceeds max entries %d (got %d)", prefix, MaxSignalAttrs, len(fields)))
 	}
 	for k := range fields {
 		if len(k) > MaxSignalAttrKeyLen {
-			return NewError(ErrCodeValidation, fmt.Sprintf("signal[%d]: metric_fields key %q exceeds max length %d", i, k, MaxSignalAttrKeyLen))
+			return NewError(ErrCodeValidation, fmt.Sprintf("%smetric_fields key %q exceeds max length %d", prefix, k, MaxSignalAttrKeyLen))
 		}
 		if hasStrictControlChars(k) {
-			return NewError(ErrCodeValidation, fmt.Sprintf("signal[%d]: metric_fields key contains control characters", i))
+			return NewError(ErrCodeValidation, prefix+"metric_fields key contains control characters")
 		}
 	}
 	return nil

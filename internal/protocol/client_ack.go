@@ -11,13 +11,6 @@ func (c *CoreClient) SetACKHandler(h func(chunkID, ackMode string)) {
 	c.ackHandler.Store(&h)
 }
 
-func (c *CoreClient) loadACKHandler() func(chunkID, ackMode string) {
-	if p := c.ackHandler.Load(); p != nil {
-		return *p
-	}
-	return nil
-}
-
 // dispatchACK 入队用户 ACK/NACK 回调异步执行。永不阻塞：队列满时丢弃回调（warn）。
 // 仅回调通知丢失——AckTracker 在 handleAck/handleNack 同步释放 slot，
 // ackReaper 仍会回收未 ACK batch 的 inflight 配额。
@@ -32,7 +25,20 @@ func (c *CoreClient) dispatchACK(chunkID, mode string) {
 
 // runACKWorker 消费 ackTask 并在单 goroutine 上调用已注册 handler，保持 ACK 到达顺序。
 // 关闭时先排空队列（带超时保护），使已入队回调仍能投递，但不会因 handler 阻塞而永久挂起。
+// 每次新鲜加载 handler（atomic load），使 SetACKHandler 更新立即生效。
 func (c *CoreClient) runACKWorker(ctx context.Context) {
+	// invoke 内联原 loadACKHandler + invokeACKHandler：atomic pointer load + 解引用 + 调用。
+	// recover 防止用户 ACKHandler panic 杀死 ackWorker goroutine（导致 ackWorkerDone 泄漏）。
+	invoke := func(t ackTask) {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Warn("ACK handler panicked", "chunk_id", t.chunkID, "panic", r)
+			}
+		}()
+		if p := c.ackHandler.Load(); p != nil {
+			(*p)(t.chunkID, t.mode)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -44,7 +50,7 @@ func (c *CoreClient) runACKWorker(ctx context.Context) {
 			for {
 				select {
 				case t := <-c.ackQueue:
-					c.invokeACKHandler(t)
+					invoke(t)
 				case <-drainDeadline.C:
 					if q := len(c.ackQueue); q > 0 {
 						slog.Warn("ACK worker drain timed out, dropping callbacks", "pending", q)
@@ -56,15 +62,8 @@ func (c *CoreClient) runACKWorker(ctx context.Context) {
 			}
 			return
 		case t := <-c.ackQueue:
-			c.invokeACKHandler(t)
+			invoke(t)
 		}
-	}
-}
-
-// invokeACKHandler 每次新鲜加载 handler，使 SetACKHandler 更新立即生效。
-func (c *CoreClient) invokeACKHandler(t ackTask) {
-	if h := c.loadACKHandler(); h != nil {
-		h(t.chunkID, t.mode)
 	}
 }
 
@@ -101,9 +100,4 @@ func (c *CoreClient) notifyDrainIfEmpty() {
 		default:
 		}
 	}
-}
-
-// countPendingAcks 返回当前待 ACK 的 batch 数（用于 close 日志）。
-func (c *CoreClient) countPendingAcks() int {
-	return c.tracker.PendingCount()
 }

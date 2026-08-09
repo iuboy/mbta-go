@@ -28,9 +28,6 @@ const ALPNProtocol = "mbta-ntls/1"
 // ALPNProtocolTLS is the ALPN identifier for mbta-tls/1 (TCP + TLS 1.3)。
 const ALPNProtocolTLS = "mbta-tls/1"
 
-// FrameVersion is the frame version for MBTA-NTLS (same as v1).
-const FrameVersion = 0x01
-
 // ServerConfig holds full server configuration for NTLS.
 //
 // TLSMode 切换两个 ALPN（core spec §10 对称两维）：
@@ -49,7 +46,7 @@ type ServerConfig struct {
 	Auth               core.TokenValidator
 	Policy             core.Policy
 	Sink               core.EventSink
-	Metrics            *core.MBTAMetrics
+	Metrics            core.Metrics
 	RedirectChecker    core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选）
 	OnSession          core.OnSession       // 会话生命周期回调（可选，nil=禁用）
 	SessionStore       *core.SessionStore   // 0-RTT 会话票据存储（nil=禁用 0-RTT）
@@ -301,20 +298,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if err := core.ValidateListenAddr(cfg.Address); err != nil {
 		return nil, core.WrapError(core.ErrCodeConfig, "Address", err)
 	}
-	// 用户未配置 Policy 时应用默认（cipher 跟随 ntls = GM）；已配置则保持不动。
-	if cfg.Policy.IsZeroPolicy() {
-		cfg.Policy = core.DefaultPolicy(corepb.CipherSuite_CIPHER_SUITE_GM)
-	}
-	// fail-fast：Auth/Sink/Policy 缺失属严重误配。
-	if cfg.Auth == nil {
-		return nil, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
-	}
-	if cfg.Sink == nil {
-		return nil, core.NewError(core.ErrCodeConfig, "Sink (EventSink) is required")
-	}
-	if err := cfg.Policy.Validate(); err != nil {
-		return nil, core.WrapError(core.ErrCodeConfig, "Policy", err)
-	}
+	// ntls 特有校验：TLCP 双 SM2 证书或 TLS1.3 证书。
 	if cfg.TLSMode {
 		if cfg.CertFile == "" || cfg.KeyFile == "" {
 			return nil, core.NewError(core.ErrCodeConfig, "TLS1.3 cert/key required for mbta-tls/1")
@@ -324,19 +308,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			return nil, core.NewError(core.ErrCodeConfig, "dual SM2 certificates (sign + enc, cert + key) required for mbta-ntls/1")
 		}
 	}
-	if cfg.ServerID == "" {
-		cfg.ServerID = core.NewChunkID().String()
-	}
 	hcfg := binding.HandlerConfig{
-		Auth:            cfg.Auth,
-		Policy:          cfg.Policy,
-		Sink:            cfg.Sink,
-		Metrics:         cfg.Metrics,
-		ServerID:        cfg.ServerID,
-		RedirectChecker: cfg.RedirectChecker,
-		OnSession:       cfg.OnSession,
-		SessionStore:    cfg.SessionStore,
+		Auth: cfg.Auth, Policy: cfg.Policy, Sink: cfg.Sink, Metrics: cfg.Metrics,
+		ServerID: cfg.ServerID, RedirectChecker: cfg.RedirectChecker,
+		OnSession: cfg.OnSession, SessionStore: cfg.SessionStore,
 	}
+	policy, err := binding.ResolveHandlerConfig(&hcfg, corepb.CipherSuite_CIPHER_SUITE_GM)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Policy = policy
 	return &Server{
 		Server: binding.NewServer[*Listener, net.Conn](cfg.MaxConcurrentConns, hcfg),
 		config: cfg,

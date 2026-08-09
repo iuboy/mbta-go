@@ -2,7 +2,6 @@ package v1
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,8 +20,6 @@ type ClientConfig struct {
 	Hostname     string           // agent 主机名 (sent in HELLO)
 	Token        string           // 认证 token
 	Capabilities []string         // 协商功能列表 (e.g. gzip, hmac-sha256)
-	PickStrategy string           // 流选择策略: "single" or "hash"
-	StreamCount  int              // hash 模式下打开的数据流数量（<=0 用 defaultStreamCount）
 
 	// OS / AgentVersion 写入 HELLO（供服务端 OnSession 回调读取，空则不发/回退默认）。
 	OS           string       // agent 操作系统（如 runtime.GOOS：linux/darwin/windows）
@@ -60,28 +57,10 @@ type v1ClientTransport struct {
 }
 
 func (t *v1ClientTransport) ReadFrame(ctx context.Context) (core.Frame, error) {
-	// ctx 感知读：通过 SetReadDeadline 让 ctx 取消/超时能中断阻塞读，
-	// 避免对端静默断开时 control loop 永久阻塞（goroutine 泄漏）。
-	if err := ctx.Err(); err != nil {
-		return core.Frame{}, err
-	}
-	dl, ok := ctx.Deadline()
-	if !ok {
-		dl = time.Now().Add(clientReadDefaultTimeout)
-	}
-	if err := t.controlStr.SetReadDeadline(dl); err != nil {
-		return core.Frame{}, core.WrapError(core.ErrCodeStream, "set control read deadline", err)
-	}
-	defer func() { _ = t.controlStr.SetReadDeadline(time.Time{}) }()
-	f, err := core.Read(t.controlStr, core.DefaultLimits())
-	if err != nil && ctx.Err() != nil {
-		return core.Frame{}, ctx.Err()
-	}
-	return f, err
+	return core.ReadFrameCtx(ctx, t.controlStr)
 }
 
-// clientReadDefaultTimeout 是客户端 control stream 读在 ctx 无 deadline 时的默认上限。
-const clientReadDefaultTimeout = 5 * time.Minute
+// 读超时统一用 core.DefaultReadTimeout。
 
 // WriteFrame 按 channel 路由：control 走 controlStr（controlMu 串行），
 // data 走 picker 选流 + per-stream ctx 感知写。
@@ -98,7 +77,7 @@ func (t *v1ClientTransport) WriteFrame(ctx context.Context, typ uint8, flags, ch
 	if pickerPtr == nil {
 		return core.NewError(core.ErrCodeSession, "data stream picker not initialized (auth incomplete?)")
 	}
-	ds, err := (*pickerPtr).Pick("", "") // tag/source 在多流选路中用于 hash 分流；CoreClient 传空
+	ds, err := (*pickerPtr).Pick()
 	if err != nil {
 		return core.WrapError(core.ErrCodeBatch, "pick stream", err)
 	}
@@ -134,7 +113,7 @@ func (w *quicStreamWrapper) writeFrameCtx(ctx context.Context, typ uint8, flags 
 	// ctx 无 deadline 时设默认上限，避免 QUIC 流控背压下 Write 永久阻塞（goroutine 泄漏）。
 	dl, ok := ctx.Deadline()
 	if !ok {
-		dl = time.Now().Add(30 * time.Second)
+		dl = time.Now().Add(core.DefaultWriteTimeout)
 	}
 	if err := w.stream.SetWriteDeadline(dl); err != nil {
 		return core.WrapError(core.ErrCodeStream, "set write deadline", err)
@@ -143,48 +122,25 @@ func (w *quicStreamWrapper) writeFrameCtx(ctx context.Context, typ uint8, flags 
 	return core.Write(w, core.Version, typ, flags, channel, payload)
 }
 
-// defaultStreamCount 是 hash 模式下默认打开的数据流数量。
-const defaultStreamCount = 4
-
 // NewClient creates a new MBTA client.
 func NewClient(cfg ClientConfig) (*Client, error) {
-	// fail-fast：构造期校验必填字段与格式，避免拖到 Connect 的 dial 层才报
-	// 低层 resolver 错误（错误归因不准）。
-	if cfg.AgentID == "" {
-		return nil, core.NewError(core.ErrCodeConfig, "AgentID required")
-	}
-	if cfg.Token == "" {
-		return nil, core.NewError(core.ErrCodeConfig, "Token required")
-	}
 	if err := core.ValidateHostPort(cfg.Transport.Server); err != nil {
 		return nil, core.WrapError(core.ErrCodeConfig, "Transport.Server", err)
 	}
-	// Capabilities 复用 Negotiate 的未知 stable capability 检测，拼错的 stable
-	// capability 在构造期即报错，而非拖到 HELLO 被服务端拒绝。
-	if unknown := core.FilterUnknownStable(cfg.Capabilities); len(unknown) > 0 {
-		return nil, core.NewError(core.ErrCodeProtocol, fmt.Sprintf("unknown stable capabilities: %v", unknown))
-	}
-	if cfg.PickStrategy != "" && cfg.PickStrategy != "single" && cfg.PickStrategy != "hash" {
-		return nil, core.NewError(core.ErrCodeConfig, fmt.Sprintf("invalid PickStrategy %q (want \"single\" or \"hash\")", cfg.PickStrategy))
-	}
-
-	cc := protocol.NewCoreClient(nil, protocol.CoreClientConfig{
+	// 公共校验 + CoreClient 构造委托 binding.NewClientCore（v1/ntls 共享）。
+	cc, err := binding.NewClientCore(binding.ClientCoreConfig{
 		AgentID:      cfg.AgentID,
 		Hostname:     cfg.Hostname,
 		Token:        cfg.Token,
 		Capabilities: cfg.Capabilities,
 		OS:           cfg.OS,
 		AgentVersion: cfg.AgentVersion,
-		// binding 默认算法（spec §8.3：跟随传输 binding 合规语境）。
-		// v1 走 QUIC + TLS1.3 → 国际密码套件；codec/compression 用协议 baseline 默认。
-		DefaultCodec:       corepb.Codec_CODEC_PROTO,
-		DefaultCipherSuite: corepb.CipherSuite_CIPHER_SUITE_INTL,
-		DefaultCompression: corepb.Compression_COMPRESSION_ZSTD,
-		Metrics:            cfg.Metrics,
-		DrainTimeout:       cfg.DrainTimeout,
-	})
-	cc.SetReadControlLoop(cc.ReadControlLoop)
-	cc.SetHeartbeatLoop(cc.HeartbeatLoop)
+		Metrics:      cfg.Metrics,
+		DrainTimeout: cfg.DrainTimeout,
+	}, corepb.CipherSuite_CIPHER_SUITE_INTL)
+	if err != nil {
+		return nil, err
+	}
 	return &Client{core: cc, cfg: cfg}, nil
 }
 
@@ -211,7 +167,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		func(ctx context.Context) error {
 			dialed, err := Dial(ctx, c.cfg.Transport)
 			if err != nil {
-				return core.WrapError(core.ErrCodeTransport, "dial", err)
+				return err // Dial 已 wrap ErrCodeTransport + "dial QUIC"
 			}
 			// dial 回调内二次检查：消除入口 c.conn==nil 检查与赋值之间的 TOCTOU 窗口。
 			c.mu.Lock()
@@ -240,9 +196,9 @@ func (c *Client) Connect(ctx context.Context) error {
 			cc.SetOnAuthed(func(context.Context) { conn.SetAuthed(true) })
 			return nil
 		},
-		// postAuth: StartLifecycle 后打开 data stream(s)
+		// postAuth: StartLifecycle 后打开 data stream
 		func(ctx context.Context) error {
-			picker, err := openDataStreams(ctx, conn, c.cfg.PickStrategy, c.cfg.StreamCount)
+			picker, err := openDataStream(ctx, conn)
 			if err != nil {
 				return err
 			}
@@ -250,11 +206,15 @@ func (c *Client) Connect(ctx context.Context) error {
 			return nil
 		},
 	)
-	// 握手失败：cc.Close() 仅在 transport 已注册时关连接，dial 成功但 setupTransport 失败时需在此显式关闭（仅关本协程建立的连接）。
+	// 握手失败清理：binding.Handshake 内部已调 cc.Close()（关 transport + 取消 lifecycle
+	// + 等 goroutine），但 cc.Close 只关 QUIC conn 本身，不清外层 v1.Client 的 c.conn 引用。
+	// 此处清理 c.conn（置 nil 防 use-after-close）并兜底关 conn（幂等，conn 可能已被 cc.Close 关闭）。
+	// v1 client transport 自身不开 goroutine（lifecycle goroutine 由 StartLifecycle 启动，
+	// 握手失败时未启动），故无 transport goroutine 泄漏风险。
 	if err != nil {
 		c.mu.Lock()
 		if connSet {
-			_ = conn.CloseWithError(0, "connect failed")
+			_ = conn.CloseWithError(0, "connect failed") // 幂等
 			c.conn = nil
 		}
 		c.mu.Unlock()
@@ -262,30 +222,8 @@ func (c *Client) Connect(ctx context.Context) error {
 	return err
 }
 
-// openDataStreams 按 PickStrategy 打开数据流并构造 StreamPicker。
-// 纯函数：不依赖 Client 实例状态，连接由调用方传入。
-func openDataStreams(ctx context.Context, conn *Conn, pickStrategy string, streamCount int) (StreamPicker, error) {
-	if pickStrategy == "hash" {
-		picker := NewHashStreamPicker()
-		n := streamCount
-		if n <= 0 {
-			n = defaultStreamCount
-		}
-		opened := make([]*quic.Stream, 0, n)
-		for i := 0; i < n; i++ {
-			ds, err := conn.OpenDataStream(ctx)
-			if err != nil {
-				for _, s := range opened {
-					_ = s.Close()
-				}
-				return nil, core.WrapError(core.ErrCodeStream, "open data stream", err)
-			}
-			opened = append(opened, ds)
-			picker.AddStream(&quicStreamWrapper{stream: ds, idx: i})
-		}
-		return picker, nil
-	}
-
+// openDataStream 打开单条数据流并构造 StreamPicker。
+func openDataStream(ctx context.Context, conn *Conn) (StreamPicker, error) {
 	ds, err := conn.OpenDataStream(ctx)
 	if err != nil {
 		return nil, core.WrapError(core.ErrCodeStream, "open data stream", err)
@@ -307,7 +245,7 @@ func (c *Client) SetACKHandler(h func(chunkID, ackMode string)) {
 
 // SetRedirectHandler registers a callback invoked when the server sends a
 // TypeRedirect frame (S→C cluster redirect to the HA leader).
-func (c *Client) SetRedirectHandler(h func(payload []byte)) {
+func (c *Client) SetRedirectHandler(h func(context.Context, []byte)) {
 	c.core.SetRedirectHandler(h)
 }
 

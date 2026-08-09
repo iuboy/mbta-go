@@ -1,22 +1,29 @@
 version: "2"
 linters:
   enable:
+    - copyloopvar
     - errname
+    - errorlint
     - exhaustive
+    - fatcontext
     - gocognit
     - goconst
     - gocritic
     - godox
     - gosec
+    - intrange
     - maintidx
     - misspell
     - nilerr
+    - nilnesserr
     - noctx
+    - perfsprint
     - prealloc
     - predeclared
     - revive
     - sloglint
     - unconvert
+    - unparam
     - whitespace
   settings:
     exhaustive:

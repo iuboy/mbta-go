@@ -175,9 +175,10 @@ func TestSessionKeys(t *testing.T) {
 
 // TestComputeChallengeResponse r2：按 CipherSuite 的挑战响应。
 func TestComputeChallengeResponse(t *testing.T) {
-	token, nonce := testutil.RandToken(), testutil.RandString(16)
-	intl := ComputeChallengeResponse(token, nonce, corepb.CipherSuite_CIPHER_SUITE_INTL)
-	gm := ComputeChallengeResponse(token, nonce, corepb.CipherSuite_CIPHER_SUITE_GM)
+	token, agentID, sessionID := testutil.RandToken(), testutil.RandAgentID(), testutil.RandString(16)
+	nonce := []byte(testutil.RandString(16))
+	intl := ComputeChallengeResponse(token, agentID, sessionID, nonce, corepb.CipherSuite_CIPHER_SUITE_INTL)
+	gm := ComputeChallengeResponse(token, agentID, sessionID, nonce, corepb.CipherSuite_CIPHER_SUITE_GM)
 	if len(intl) != 32 {
 		t.Errorf("intl challenge response len = %d, want 32 (SHA-256)", len(intl))
 	}
@@ -185,9 +186,18 @@ func TestComputeChallengeResponse(t *testing.T) {
 		t.Errorf("gm challenge response len = %d, want 32 (SM3)", len(gm))
 	}
 	// 不同 token 不同响应
-	other := ComputeChallengeResponse(testutil.RandToken(), nonce, corepb.CipherSuite_CIPHER_SUITE_INTL)
+	other := ComputeChallengeResponse(testutil.RandToken(), agentID, sessionID, nonce, corepb.CipherSuite_CIPHER_SUITE_INTL)
 	if string(intl) == string(other) {
 		t.Error("different tokens should yield different responses")
+	}
+	// 不同 transcript 不同响应（绑定 agentID/sessionID/nonce）
+	otherAgent := ComputeChallengeResponse(token, testutil.RandAgentID(), sessionID, nonce, corepb.CipherSuite_CIPHER_SUITE_INTL)
+	if string(intl) == string(otherAgent) {
+		t.Error("different agentID should yield different responses (transcript binding)")
+	}
+	otherSession := ComputeChallengeResponse(token, agentID, testutil.RandString(16), nonce, corepb.CipherSuite_CIPHER_SUITE_INTL)
+	if string(intl) == string(otherSession) {
+		t.Error("different sessionID should yield different responses (transcript binding)")
 	}
 }
 
@@ -238,7 +248,7 @@ func TestGenerateSessionKeysRandomness(t *testing.T) {
 		const iterations = 100
 		seenKeys := make(map[string]bool)
 
-		for i := 0; i < iterations; i++ {
+		for i := range iterations {
 			keys, err := GenerateSessionKeys(corepb.CipherSuite_CIPHER_SUITE_INTL)
 			if err != nil {
 				t.Errorf("GenerateSessionKeys() iteration %d error: %v", i, err)

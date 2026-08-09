@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
-	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
 // 常量（core spec §9.5 limits；与 v1/handler 对齐）。
@@ -78,19 +76,19 @@ type CoreHandler struct {
 	sessionID []byte
 	// helloMeta 保存 HELLO 帧中除 agentID 外的身份字段，供 OnSession CONNECTED 回调读取。
 	// 与 agentID/sessionID 一样在 handleHello 中写入，handshakeMu 保护。
-	hostname       string
-	instanceID     string
-	agentVersion   string
-	os             string
-	challengeNonce []byte
-	authAttempts   int
-	handshakeMu    sync.RWMutex
-	expiresAt      atomic.Int64
-	closeTimeout   time.Duration // 优雅关闭 drain 超时（从 CloseMessage.close_timeout_ms 协商，默认 5s）
-	earlyData      atomic.Bool   // 0-RTT resumption：HELLO 恢复 keys 后置位，dataLoop early 启动
-	authed         atomic.Bool   // 是否已认证成功（到达 READY）；决定 DISCONNECTED 是否触发（必须与 CONNECTED 配对）
-	lastPressure   atomic.Value
-	pressureMu     sync.Mutex // 保护 lastPressure 的"比较-更新-下发"序列（§9.2 避免同值重复 WINDOW）
+	hostname         string
+	instanceID       string
+	agentVersion     string
+	os               string
+	challengeNonce   []byte
+	authAttempts     int
+	handshakeMu      sync.RWMutex
+	expiresAt        atomic.Int64
+	closeTimeout     time.Duration                    // 优雅关闭 drain 超时（从 CloseMessage.close_timeout_ms 协商，默认 5s）
+	resumptionMaster atomic.Pointer[core.SessionKeys] // 0-RTT：HELLO 携带有效票据时存 master，handleAuth 派生子钥后清空
+	authed           atomic.Bool                      // 是否已认证成功（到达 READY）；决定 DISCONNECTED 是否触发（必须与 CONNECTED 配对）
+	lastPressure     atomic.Value
+	pressureMu       sync.Mutex // 保护 lastPressure 的"比较-更新-下发"序列（§9.2 避免同值重复 WINDOW）
 
 	dataOnce       sync.Once
 	dataWG         sync.WaitGroup     // 跟踪 data frame 处理 goroutine
@@ -102,40 +100,28 @@ type CoreHandler struct {
 	// worker（sinkWG）消费队列调 sink.OnSignalBatch。连接关闭时 close 队列等 worker 排空。
 	sinkQueue chan sinkTask
 	sinkWG    sync.WaitGroup
+	// sinkCtx 派生自 Handle 的 ctx，让 sinkWorker 调 OnSignalBatch 时尊重连接生命周期，
+	// 连接关闭后 sink 调用可被取消（防半开连接上 worker 永久阻塞）。
+	sinkCtx context.Context
 	// durableNotifier 在 sink 实现 AsyncDurableSink 时初始化（initSinkQueue），
 	// 投递时注入 task，sink 持久化后回调发 durable 升级帧。nil 表示 sink 非异步 Durable。
 	durableNotifier core.DurableNotifier
 }
 
-// sinkTask 是 sinkQueue 的投递单元，统一承载普通 EventSink 与 AsyncDurableSink 两路径。
-// routeAndACK 投递、worker 消费；asyncDurable=false 走普通 EventSink（fire-and-forget），
-// true 走 AsyncDurableSink（持久化后回调 notifier 发 durable 升级）。
-type sinkTask struct {
-	agentID      string
-	batch        *core.SignalBatch // 普通 EventSink + AsyncDurableSink 共用
-	asyncDurable bool              // true = AsyncDurableSink 路径
-	// AsyncDurableSink 路径专用：发 durable 升级帧所需的元信息。
-	seq         uint64
-	chunkID     []byte
-	eventsCount int
-	notifier    core.DurableNotifier // 协议层注入，sink 持久化后回调
-}
-
-// getAgentID 返回当前 agentID（并发安全读取，供 processBatch 等读路径使用）。
+// getAgentID / setAgentID —— handshakeMu 保护 agentID 的读写。
 func (h *CoreHandler) getAgentID() string {
 	h.handshakeMu.RLock()
 	defer h.handshakeMu.RUnlock()
 	return h.agentID
 }
 
-// setAgentID 设置 agentID（并发安全写入，供 controlLoop 握手写路径使用）。
 func (h *CoreHandler) setAgentID(id string) {
 	h.handshakeMu.Lock()
 	defer h.handshakeMu.Unlock()
 	h.agentID = id
 }
 
-// getSessionID 返回 sessionID 的拷贝（并发安全读取）。
+// getSessionID 返回 sessionID 的拷贝；setSessionID 防御性拷贝写入（与 getter 对称）。
 func (h *CoreHandler) getSessionID() []byte {
 	h.handshakeMu.RLock()
 	defer h.handshakeMu.RUnlock()
@@ -144,15 +130,13 @@ func (h *CoreHandler) getSessionID() []byte {
 	return cp
 }
 
-// setSessionID 设置 sessionID（并发安全写入，防御性拷贝与 getter 对称）。
 func (h *CoreHandler) setSessionID(id []byte) {
 	h.handshakeMu.Lock()
 	defer h.handshakeMu.Unlock()
 	h.sessionID = append(h.sessionID[:0], id...)
 }
 
-// setHelloMeta 保存 HELLO 帧的身份字段（hostname/instance_id/agent_version/os），
-// 供 AUTH_OK 后构造 SessionEvent 使用。在 handleHello 中一次性写入，handshakeMu 保护。
+// setHelloMeta 保存 HELLO 帧的身份字段，供 AUTH_OK 后构造 SessionEvent 使用。
 func (h *CoreHandler) setHelloMeta(hostname, instanceID, agentVersion, os string) {
 	h.handshakeMu.Lock()
 	defer h.handshakeMu.Unlock()
@@ -162,14 +146,13 @@ func (h *CoreHandler) setHelloMeta(hostname, instanceID, agentVersion, os string
 	h.os = os
 }
 
-// helloMeta 返回保存的 HELLO 身份字段（并发安全读取）。
 func (h *CoreHandler) helloMeta() (hostname, instanceID, agentVersion, os string) {
 	h.handshakeMu.RLock()
 	defer h.handshakeMu.RUnlock()
 	return h.hostname, h.instanceID, h.agentVersion, h.os
 }
 
-// getChallengeNonce 返回 challengeNonce 的拷贝（并发安全读取）。
+// getChallengeNonce 返回拷贝；setChallengeNonce 防御性拷贝写入。
 func (h *CoreHandler) getChallengeNonce() []byte {
 	h.handshakeMu.RLock()
 	defer h.handshakeMu.RUnlock()
@@ -178,7 +161,6 @@ func (h *CoreHandler) getChallengeNonce() []byte {
 	return cp
 }
 
-// setChallengeNonce 设置 challengeNonce（并发安全写入，防御性拷贝与 getter 对称）。
 func (h *CoreHandler) setChallengeNonce(nonce []byte) {
 	h.handshakeMu.Lock()
 	defer h.handshakeMu.Unlock()
@@ -191,10 +173,8 @@ func NewCoreHandler(tr Transport, cfg HandlerConfig) *CoreHandler {
 	if tr.Multiplexing() == MultiplexTCPSingleConn {
 		sem = maxConcurrentTCPBatches
 	}
-	// Metrics 为 nil（含 typed-nil，如 (*MBTAMetrics)(nil) 赋给接口）时回退到
-	// NoOpMetrics，handler 无需逐处 nil 检查。typed-nil 检测必要：(*MBTAMetrics)(nil)
-	// 转 core.Metrics 后 != nil（带类型信息），直接调用会 panic。
-	if isNilMetrics(cfg.Metrics) {
+	// Metrics 为 nil 时回退到 NoOpMetrics，handler 无需逐处 nil 检查。
+	if cfg.Metrics == nil {
 		cfg.Metrics = core.NoOpMetrics{}
 	}
 	h := &CoreHandler{
@@ -215,74 +195,6 @@ func NewCoreHandler(tr Transport, cfg HandlerConfig) *CoreHandler {
 	return h
 }
 
-// initSinkQueue 在 sink 支持异步投递时创建队列 + worker pool。
-// 启用条件：sink 是普通 EventSink（fire-and-forget）或 AsyncDurableSink（持久化后回调升级）。
-// 仅实现 DurableEventSink/RawEventSink 但未实现 AsyncDurableSink 的 sink 走同步路径（需 RouteResult）。
-// SinkQueueSize < 0 显式禁用异步（测试用）。
-func (h *CoreHandler) initSinkQueue() {
-	if h.config.Sink == nil {
-		return
-	}
-	// 判断是否可异步：普通 EventSink（非 Durable）或 AsyncDurableSink（Durable 的可选扩展）。
-	_, isAsyncDurable := h.config.Sink.(core.AsyncDurableSink)
-	_, isDurable := h.config.Sink.(core.DurableEventSink)
-	if isDurable && !isAsyncDurable {
-		return // 同步 Durable/Raw sink：需 RouteResult，不能异步
-	}
-	size := h.config.SinkQueueSize
-	if size == 0 {
-		size = defaultSinkQueueSize
-	}
-	if size < 0 {
-		return // 显式禁用异步
-	}
-	h.sinkQueue = make(chan sinkTask, size)
-	// AsyncDurableSink 路径需要 notifier 发 durable 升级帧。
-	if _, isAsyncDurable := h.config.Sink.(core.AsyncDurableSink); isAsyncDurable {
-		h.durableNotifier = &durableNotifier{handler: h}
-	}
-	workers := defaultSinkWorkers
-	if workers <= 0 {
-		workers = runtime.NumCPU()
-	}
-	for i := 0; i < workers; i++ {
-		h.sinkWG.Add(1)
-		go h.sinkWorker()
-	}
-}
-
-// sinkWorker 消费 sinkQueue，按 task 类型分发：普通 EventSink 调 OnSignalBatch，
-// AsyncDurableSink 调 OnSignalBatchAsync（持久化后回调 notifier 发 durable 升级）。
-func (h *CoreHandler) sinkWorker() {
-	defer h.sinkWG.Done()
-	for task := range h.sinkQueue {
-		if task.asyncDurable {
-			if asyncSink, ok := h.config.Sink.(core.AsyncDurableSink); ok {
-				asyncSink.OnSignalBatchAsync(context.Background(), task.agentID, task.batch,
-					task.notifier, task.seq, task.chunkID, task.eventsCount)
-			}
-		} else {
-			_ = h.config.Sink.OnSignalBatch(context.Background(), task.agentID, task.batch)
-		}
-	}
-}
-
-// durableNotifier 是协议层提供给 AsyncDurableSink 的回调接口实现。
-// sink 持久化完成后调 NotifyDurable，本实现发 ACK_MODE_DURABLE 升级帧。
-// 幂等保护：已发 durable 的 seq 不重复发（防 sink 误多次回调）。
-type durableNotifier struct {
-	handler *CoreHandler
-	seen    sync.Map // seq → struct{}{}，已发 durable 的去重
-}
-
-func (n *durableNotifier) NotifyDurable(seq uint64, chunkID []byte, eventsCount int) {
-	if _, loaded := n.seen.LoadOrStore(seq, struct{}{}); loaded {
-		return // 已发过 durable，幂等跳过
-	}
-	// durable 升级帧在 background ctx 发（worker goroutine 调，原 routeAndACK ctx 已退出）。
-	n.handler.sendAck(context.Background(), seq, chunkID, eventsCount, corepb.AckMode_ACK_MODE_DURABLE)
-}
-
 // Handle 运行连接生命周期：control loop → READY 后启动 data loop。
 func (h *CoreHandler) Handle(ctx context.Context) error {
 	// dataExited 标记所有 data goroutine 是否在 drain 超时前退出。
@@ -291,6 +203,11 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 	// 后存活的 processBatch 跳过 HMAC 校验（安全绕过）。
 	dataExited := false
 	defer h.cleanup(&dataExited)
+	// 派生 sinkCtx：controlLoop ctx 取消时传播到 sinkWorker 的 OnSignalBatch 调用，
+	// 使半开连接上的 sink 调用可被取消。controlLoop 退出即取消。
+	sinkCtx, sinkCancel := context.WithCancel(ctx)
+	h.sinkCtx = sinkCtx
+	defer sinkCancel()
 	// 会话生命周期回调：连接结束时触发 DISCONNECTED。
 	// 仅当该连接此前认证成功（agentID 非空）才触发，避免对未通过 HELLO/AUTH 的连接
 	// 误报 DISCONNECTED（无配对的 CONNECTED）。与 CONNECTED 严格成对。
@@ -394,8 +311,10 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			return core.NewError(core.ErrCodeProtocol, fmt.Sprintf("unexpected control type 0x%02x", f.Header.Type))
 		}
 
-		// READY 或 0-RTT early_data 后启动 data loop（exactly once）
-		if h.sm.State() == core.ServerStateReady || h.earlyData.Load() {
+		// 仅 READY 后启动 data loop（exactly once）。
+		// 0-RTT 早数据快路径已移除：票据恢复仍须 challenge-response + 派生子钥，
+		// 不允许 AUTH 前处理 BATCH（消除未认证数据 + key 复用风险）。
+		if h.sm.State() == core.ServerStateReady {
 			h.dataOnce.Do(func() {
 				// 派生可取消 context：controlLoop 退出后 Handle 调 cancelDataLoop，
 				// 使阻塞在 sink 的 processBatch goroutine 收到取消信号尽快退出。
@@ -404,6 +323,12 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 				h.dataWG.Add(1)
 				go func() {
 					defer h.dataWG.Done()
+					defer func() {
+						if r := recover(); r != nil {
+							// dataLoop 是分发循环，panic 不应发生但防御以防杀进程。
+							slog.Warn("dataLoop panicked", "session", string(h.getSessionID()), "panic", r)
+						}
+					}()
 					h.dataLoop(dataCtx)
 				}()
 			})
@@ -444,14 +369,22 @@ func (h *CoreHandler) dataLoop(ctx context.Context) {
 				h.dataWG.Add(1)
 				go func(pf core.Frame) {
 					defer func() { <-h.batchSem; h.dataWG.Done() }()
+					defer func() {
+						if r := recover(); r != nil {
+							// processBatch 调用 sink（用户实现）+ proto 解码，panic 不可控。
+							// recover 防止单连接 panic 杀死整个服务端进程；该 batch 丢弃。
+							slog.Warn("processBatch panicked, batch dropped",
+								"session", string(h.getSessionID()), "panic", r)
+						}
+					}()
 					h.processBatch(ctx, pf.Payload)
 				}(f)
 			default:
 				// 并发满，拒绝并要求退避。
-				h.sendThrottle(ctx, throttleRetryMs, core.ErrCodeTooManyBatches, "max concurrent batches exceeded")
+				h.sendThrottle(ctx, core.ErrCodeTooManyBatches, "max concurrent batches exceeded")
 			}
 		case core.TypeDatagram:
-			// r2 unreliable 通道：at-most-once，无 ACK/spool，HMAC 失败静默丢弃（core spec §11.4）。
+			// unreliable 通道：at-most-once，无 ACK/spool，HMAC 失败静默丢弃（core spec §11.4）。
 			h.processDatagram(ctx, f.Payload)
 		default:
 			slog.Debug("unexpected frame on data channel", "type", f.Header.Type)

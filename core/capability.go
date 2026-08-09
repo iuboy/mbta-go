@@ -107,7 +107,7 @@ func FilterUnknownStable(advertised []string) []string {
 	return unknown
 }
 
-// Policy 控制 server 接受的 capability 与默认算法（r2 capability-driven）。
+// Policy 控制 server 接受的 capability 与默认算法。
 // 默认 CipherSuite 跟随传输 binding 合规语境（core spec §8.3）。
 type Policy struct {
 	// SupportedCapabilities 是服务端支持的 stable capability 集合。
@@ -167,7 +167,7 @@ type NegotiateResult struct {
 	CipherSuite          corepb.CipherSuite
 }
 
-// Negotiate 计算 server 选定的 capability（r2 capability-driven）。
+// Negotiate 计算 server 选定的 capability。
 //
 // 协商失败语义（core spec §1.3）：
 //   - 客户端宣告的未识别 stable capability → 返回协议错误（不允许静默吞掉）；
@@ -225,6 +225,8 @@ func (p Policy) Validate() error {
 // codecCapability 返回 codec 枚举对应的 capability 名（UNSPECIFIED 无对应，ok=false）。
 func codecCapability(c corepb.Codec) (string, bool) {
 	switch c {
+	case corepb.Codec_CODEC_UNSPECIFIED:
+		return "", false
 	case corepb.Codec_CODEC_PROTO:
 		return CapCodecProto, true
 	case corepb.Codec_CODEC_CBOR:
@@ -238,6 +240,8 @@ func codecCapability(c corepb.Codec) (string, bool) {
 // compressionCapability 返回 compression 枚举对应的 capability 名。
 func compressionCapability(c corepb.Compression) (string, bool) {
 	switch c {
+	case corepb.Compression_COMPRESSION_UNSPECIFIED:
+		return "", false
 	case corepb.Compression_COMPRESSION_ZSTD:
 		return CapCompZstd, true
 	case corepb.Compression_COMPRESSION_LZ4:

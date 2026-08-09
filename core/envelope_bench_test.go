@@ -9,7 +9,7 @@ import (
 
 // envelopeBenchParams 构造一个合法的 BuildParams（已 codec 编码的 batch payload），
 // 用于 Build/Open 基准。payloadSize 控制 batch 字节数（测试不同 size 的加解密开销）。
-func envelopeBenchParams(b *testing.B, cs corepb.CipherSuite, payloadSize int) (BuildParams, []byte) {
+func envelopeBenchParams(b *testing.B, cs corepb.CipherSuite, payloadSize int) BuildParams {
 	b.Helper()
 	payload := make([]byte, payloadSize)
 	if _, err := rand.Read(payload); err != nil {
@@ -34,7 +34,7 @@ func envelopeBenchParams(b *testing.B, cs corepb.CipherSuite, payloadSize int) (
 	}
 	chunkID := NewChunkID()
 	p.ChunkID = chunkID
-	return p, payload
+	return p
 }
 
 // BenchmarkEnvelopeBuild 测量 SecureEnvelope 构建（压缩 + AEAD 加密 + HMAC 签名）延迟。
@@ -53,7 +53,7 @@ func BenchmarkEnvelopeBuild(b *testing.B) {
 		{"GM_64KB", corepb.CipherSuite_CIPHER_SUITE_GM, 65536},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
-			p, _ := envelopeBenchParams(b, tc.cs, tc.payload)
+			p := envelopeBenchParams(b, tc.cs, tc.payload)
 			b.ResetTimer()
 			b.SetBytes(int64(tc.payload))
 			b.ReportAllocs()
@@ -82,7 +82,7 @@ func BenchmarkEnvelopeOpen(b *testing.B) {
 		{"GM_64KB", corepb.CipherSuite_CIPHER_SUITE_GM, 65536},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
-			p, _ := envelopeBenchParams(b, tc.cs, tc.payload)
+			p := envelopeBenchParams(b, tc.cs, tc.payload)
 			env, err := Build(p)
 			if err != nil {
 				b.Fatal(err)
@@ -102,7 +102,7 @@ func BenchmarkEnvelopeOpen(b *testing.B) {
 // BenchmarkEnvelopeBuild_Open_RoundTrip 测量 Build + Open 完整往返（客户端加密 + 服务端解密
 // 的聚合延迟），用于评估 envelope 环节对端到端延迟的贡献。
 func BenchmarkEnvelopeBuild_Open_RoundTrip(b *testing.B) {
-	p, _ := envelopeBenchParams(b, corepb.CipherSuite_CIPHER_SUITE_INTL, 4096)
+	p := envelopeBenchParams(b, corepb.CipherSuite_CIPHER_SUITE_INTL, 4096)
 	b.ResetTimer()
 	b.SetBytes(4096)
 	b.ReportAllocs()

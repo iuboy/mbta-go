@@ -35,9 +35,9 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	}
 	h.setChallengeNonce(nonce)
 
-	// 0-RTT resumption：从 session ticket 恢复 keys（core spec §11.6）。
-	// 恢复后 earlyData=true，dataLoop 可在 AUTH 前启动处理 0-RTT BATCH。
-	// 票据单次使用：Get 后立即 Delete，防止捕获的票据被无限重放恢复密钥发 0-RTT。
+	// 0-RTT resumption（core spec §11.6）：从 session ticket 恢复 master 密钥。
+	// 仅暂存 master 到 resumptionMaster，等 handleAuth 完成 challenge-response 后
+	// 用 HKDF 派生独立子钥（前向保密）。票据单次使用：Get 后立即 Delete 防重放。
 	if ticket := msg.GetSessionTicket(); len(ticket) > 0 && h.config.SessionStore != nil {
 		if state, ok := h.config.SessionStore.Get(ticket); ok {
 			h.config.SessionStore.Delete(ticket)
@@ -48,12 +48,10 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 					"ticket_agent", core.SanitizeForLog(state.AgentID),
 					"hello_agent", core.SanitizeForLog(msg.GetAgentId()))
 			} else {
-				h.keys.Store(state.Keys)
-				// 先写 agentID 再置 earlyData：earlyData 是 dataLoop 启动门控，
-				// 用 atomic.Bool 的 Store 提供 happens-before，保证读端看到 agentID。
-				h.setAgentID(state.AgentID)
-				h.earlyData.Store(true)
-				slog.Info("0-RTT resumption: keys restored from ticket", "agent", core.SanitizeForLog(h.getAgentID()))
+				// 仅暂存 master，不置 keys——子钥在 handleAuth 派生。
+				// 这样即便后续 challenge-response 失败，攻击者也无法用 master 解密任何数据。
+				h.resumptionMaster.Store(state.Keys)
+				slog.Info("0-RTT resumption: master cached, awaiting re-auth for subkey derivation", "agent", core.SanitizeForLog(state.AgentID))
 			}
 		}
 	}
@@ -170,54 +168,17 @@ func (h *CoreHandler) handleAuth(ctx context.Context, payload []byte) error {
 		h.sendAuthFail(ctx, core.ErrCodeInternalError, "no negotiation result", true)
 		return core.NewError(core.ErrCodeConfig, "missing negotiation result")
 	}
-	keys, err := core.GenerateSessionKeys(negotiated.CipherSuite)
-	if err != nil {
-		h.sendAuthFail(ctx, core.ErrCodeInternalError, "key generation failed", true)
-		return core.WrapError(core.ErrCodeConfig, "session key generation", err)
+	keys, kerr := h.deriveSessionKeys(ctx, negotiated.CipherSuite)
+	if kerr != nil {
+		return kerr // deriveSessionKeys 已发 AUTH_FAIL
 	}
 	h.keys.Store(keys)
 	h.expiresAt.Store(time.Now().Add(core.DefaultSessionTTL).Unix())
 
 	agentID := h.getAgentID()
 	sessionID := h.getSessionID()
-	okMsg := &corepb.AuthOKMessage{
-		SessionId:     sessionID,
-		KeyId:         keys.KeyID,
-		HmacKey:       keys.HMACKey(),
-		CipherSuite:   keys.CipherSuite,
-		ExpiresAtUnix: h.expiresAt.Load(),
-	}
-	// 按协商套件下发对应 AEAD 密钥（intl=AesKey, gm=Sm4Key）。
-	if negotiated.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_INTL {
-		okMsg.AesKey = keys.AEADKey()
-	} else {
-		okMsg.Sm4Key = keys.AEADKey()
-	}
-	// 0-RTT session ticket：颁发新 ticket（client 保存用于下次 resumption，core spec §11.6）。
-	if h.config.SessionStore != nil {
-		ticket, err := core.NewTicket()
-		if err != nil {
-			h.sendAuthFail(ctx, core.ErrCodeInternalError, "ticket generation failed", true)
-			return core.WrapError(core.ErrCodeAuth, "generate session ticket", err)
-		}
-		if err := h.config.SessionStore.Put(ticket, &core.SessionState{
-			Keys:    keys,
-			AgentID: agentID,
-			Expiry:  time.Unix(h.expiresAt.Load(), 0),
-		}); err != nil {
-			// session store 已满或已关闭：不阻塞 AUTH_OK，但不下发 ticket——
-			// 否则客户端保存后用于 0-RTT 恢复时会静默失败（store 找不到该 ticket）。
-			slog.Warn("session store put failed, disabling 0-RTT ticket", "error", err)
-		} else {
-			okMsg.SessionTicket = ticket
-		}
-	}
-	okPayload, err := core.Encode(okMsg)
-	if err != nil {
-		return core.WrapError(core.ErrCodeProtocol, "marshal auth_ok", err)
-	}
-	if err := SendControlFrame(ctx, h.tr, core.TypeAuthOK, core.FlagControl, okPayload); err != nil {
-		return core.WrapError(core.ErrCodeStream, "write auth_ok", err)
+	if err := h.buildAndSendAuthOK(ctx, agentID, sessionID, keys); err != nil {
+		return err
 	}
 
 	if err := h.sm.Transition(core.ServerStateReady); err != nil {
@@ -289,7 +250,7 @@ func (h *CoreHandler) verifyChallenge(ctx context.Context, msg *corepb.AuthMessa
 		h.failAuth(ctx, core.ErrCodeInternalError, "challenge nonce or negotiation result missing")
 		return nil, core.NewError(core.ErrCodeConfig, "missing challenge nonce or negotiation result")
 	}
-	expected := core.ComputeChallengeResponse(token, string(challengeNonce), negotiated.CipherSuite)
+	expected := core.ComputeChallengeResponse(token, h.getAgentID(), string(h.getSessionID()), challengeNonce, negotiated.CipherSuite)
 	if !hmac.Equal(msg.GetAuthNonce(), expected) {
 		slog.Warn("auth challenge mismatch", "session", string(h.getSessionID()))
 		h.failAuth(ctx, core.ErrCodeChallengeMismatch, "auth_nonce HMAC verification failed")
@@ -298,12 +259,83 @@ func (h *CoreHandler) verifyChallenge(ctx context.Context, msg *corepb.AuthMessa
 	return negotiated, nil
 }
 
+// deriveSessionKeys 生成本次会话密钥。
+// 0-RTT resumption 时从 handleHello 暂存的 master 用 HKDF 派生子钥（前向保密）；
+// 非恢复路径全新生成。抽取自 handleAuth 以降低其认知复杂度。
+func (h *CoreHandler) deriveSessionKeys(ctx context.Context, cs corepb.CipherSuite) (*core.SessionKeys, error) {
+	// 0-RTT resumption：master 在 handleHello 暂存。challenge-response 通过后派生子钥。
+	if master := h.resumptionMaster.Swap(nil); master != nil {
+		serverRandom, randErr := randBytes(32)
+		if randErr != nil {
+			h.sendAuthFail(ctx, core.ErrCodeInternalError, "resumption random generation failed", true)
+			return nil, core.WrapError(core.ErrCodeEnvelope, "generate resumption server random", randErr)
+		}
+		keys, derr := core.DeriveResumptionKeys(master, serverRandom)
+		if derr != nil {
+			h.sendAuthFail(ctx, core.ErrCodeInternalError, "resumption key derivation failed", true)
+			return nil, core.WrapError(core.ErrCodeEnvelope, "derive resumption keys", derr)
+		}
+		return keys, nil
+	}
+	keys, gerr := core.GenerateSessionKeys(cs)
+	if gerr != nil {
+		h.sendAuthFail(ctx, core.ErrCodeInternalError, "key generation failed", true)
+		return nil, core.WrapError(core.ErrCodeConfig, "session key generation", gerr)
+	}
+	return keys, nil
+}
+
+// buildAndSendAuthOK 构造并发送 AUTH_OK 帧（含会话密钥 + 可选 0-RTT ticket）。
+// 抽取自 handleAuth 以降低认知复杂度。
+func (h *CoreHandler) buildAndSendAuthOK(ctx context.Context, agentID string, sessionID []byte, keys *core.SessionKeys) error {
+	okMsg := &corepb.AuthOKMessage{
+		SessionId:     sessionID,
+		KeyId:         keys.KeyID,
+		HmacKey:       keys.HMACKey(),
+		CipherSuite:   keys.CipherSuite,
+		ExpiresAtUnix: h.expiresAt.Load(),
+	}
+	// 按协商套件下发对应 AEAD 密钥（intl=AesKey, gm=Sm4Key）。
+	if keys.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_INTL {
+		okMsg.AesKey = keys.AEADKey()
+	} else {
+		okMsg.Sm4Key = keys.AEADKey()
+	}
+	// 0-RTT session ticket：颁发新 ticket（client 保存用于下次 resumption，core spec §11.6）。
+	if h.config.SessionStore != nil {
+		ticket, err := core.NewTicket()
+		if err != nil {
+			h.sendAuthFail(ctx, core.ErrCodeInternalError, "ticket generation failed", true)
+			return core.WrapError(core.ErrCodeAuth, "generate session ticket", err)
+		}
+		if err := h.config.SessionStore.Put(ticket, &core.SessionState{
+			Keys:    keys,
+			AgentID: agentID,
+			Expiry:  time.Unix(h.expiresAt.Load(), 0),
+		}); err != nil {
+			// session store 已满或已关闭：不阻塞 AUTH_OK，但不下发 ticket——
+			// 否则客户端保存后用于 0-RTT 恢复时会静默失败（store 找不到该 ticket）。
+			slog.Warn("session store put failed, disabling 0-RTT ticket", "error", err)
+		} else {
+			okMsg.SessionTicket = ticket
+		}
+	}
+	okPayload, err := core.Encode(okMsg)
+	if err != nil {
+		return core.WrapError(core.ErrCodeProtocol, "marshal auth_ok", err)
+	}
+	if err := SendControlFrame(ctx, h.tr, core.TypeAuthOK, core.FlagControl, okPayload); err != nil {
+		return core.WrapError(core.ErrCodeStream, "write auth_ok", err)
+	}
+	return nil
+}
+
 // resolveAuthToken 决定 token 来源（tokenless 反查 vs legacy 明文）。
 func (h *CoreHandler) resolveAuthToken(msg *corepb.AuthMessage) (token string, tokenless bool, err error) {
 	if h.config.Auth == nil {
 		return msg.GetToken(), false, nil
 	}
-	// r2 tokenless：保留 legacy 路径（无 TokenResolver 时用明文 token）。
+	// tokenless：有 TokenResolver 时反查 token；无则用 legacy 明文 token。
 	if resolver, ok := h.config.Auth.(core.TokenResolver); ok && resolver != nil {
 		t, rerr := resolver.ResolveToken(msg.GetAgentId())
 		if rerr != nil {

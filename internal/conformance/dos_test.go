@@ -49,7 +49,7 @@ func (s *dosSink) OnPressure(_ string) core.PressureState {
 // 返回 transport、keys、cipherSuite、agentID（后者用于 chunkID 关联，此处测试不严格需要）。
 func doHandshakeCfg(t *testing.T, cfg protocol.HandlerConfig) (*FakeTransport, *core.SessionKeys, corepb.CipherSuite) {
 	t.Helper()
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	// cfg.Policy 必须由调用方提供；若空则用默认测试 policy。
 	if len(cfg.Policy.SupportedCapabilities) == 0 {
@@ -86,7 +86,7 @@ func doHandshakeCfg(t *testing.T, cfg protocol.HandlerConfig) (*FakeTransport, *
 	_ = core.Decode(ackF.Payload, &ack)
 	cs := ack.GetCipherSuite()
 
-	authNonce := core.ComputeChallengeResponse(tok, string(ack.GetChallengeNonce()), cs)
+	authNonce := core.ComputeChallengeResponse(tok, agentID, string(ack.GetSessionId()), ack.GetChallengeNonce(), cs)
 	authMsg := &corepb.AuthMessage{Token: tok, AgentId: agentID, SessionId: ack.GetSessionId(), AuthNonce: authNonce}
 	ap, _ := core.Encode(authMsg)
 	tr.ControlIn <- MakeFrame(core.TypeAuth, core.FlagControl, core.ChannelControl, ap)

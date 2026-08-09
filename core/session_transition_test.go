@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -206,6 +207,6 @@ func TestStateMachineErrorIs(t *testing.T) {
 
 // IsMBTAError checks if an error is an MBTA *Error type.
 func IsMBTAError(err error) bool {
-	_, ok := err.(*Error)
-	return ok
+	var e *Error
+	return errors.As(err, &e)
 }

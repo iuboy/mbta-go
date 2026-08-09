@@ -11,13 +11,11 @@ import (
 	v1 "github.com/iuboy/mbta-go/v1"
 )
 
-const stateDisconnected = "disconnected"
-
 // ClientOption configures a Client.
 type ClientOption func(*ClientConfig) error
 
 // Client is a single-version MBTA client that connects to an MBTA server.
-// Each version (v1, v2, ntls) is a completely separate protocol — no automatic
+// Each version (v1, ntls) is a completely separate protocol — no automatic
 // fallback between versions. Create separate Client instances for different versions.
 type Client struct {
 	cfg    ClientConfig
@@ -31,7 +29,10 @@ type ACKHandler func(chunkID, ackMode string)
 // RedirectHandler is called when the server sends a TypeRedirect frame
 // (S→C cluster redirect to the HA leader). The payload is application-defined
 // (e.g. JSON {leaderAddr, leaderId}).
-type RedirectHandler func(payload []byte)
+//
+// ctx 带超时（redirectHandlerTimeout），handler 应在内部 IO/锁操作中检查 ctx.Done()
+// 并及时退出，否则超时后 goroutine 泄漏（Go runtime 无法杀死阻塞的 goroutine）。
+type RedirectHandler func(ctx context.Context, payload []byte)
 
 // versionedClient wraps version-specific clients with a common interface.
 type versionedClient interface {
@@ -45,8 +46,8 @@ type versionedClient interface {
 
 // ClientConfig holds the client configuration.
 type ClientConfig struct {
-	// Protocol version — one of Version1, Version2, VersionNTLS. Required.
-	// 类型化为 ProtocolVersion，编译期拒绝拼错的版本串。
+	// Protocol version — one of Version1, VersionNTLS. Required.
+	// 类型化为 ProtocolVersion，调用方传常量减少拼写错误（initClient 仍运行时分派）。
 	Version ProtocolVersion
 
 	// Connection settings
@@ -64,7 +65,7 @@ type ClientConfig struct {
 	NTLSCreds *ntls.ClientCredentials
 
 	// Metrics 可选的可观测性接口（nil=NoOp）。客户端侧指标（BatchesSent/BatchLatency）。
-	Metrics *core.MBTAMetrics
+	Metrics core.Metrics
 }
 
 // NewClient creates a single-version MBTA client.
@@ -145,8 +146,6 @@ func (c *Client) initClient() (versionedClient, error) {
 	switch c.cfg.Version {
 	case Version1:
 		return c.initV1Client()
-	case Version2:
-		return c.initV2Client()
 	case VersionNTLS:
 		return c.initNTLSClient()
 	default:
@@ -211,7 +210,7 @@ func (c *Client) State() string {
 	defer c.mu.RUnlock()
 
 	if c.client == nil {
-		return stateDisconnected
+		return core.StateDisconnected.String()
 	}
 	return c.client.State()
 }
@@ -275,11 +274,6 @@ func (c *Client) initV1Client() (versionedClient, error) {
 	return &v1ClientWrapper{client: client}, nil
 }
 
-// initV2Client 尚未实现（v2 依赖未集成的 GM TLS 库）；NewClient 阶段早失败返回 error。
-func (c *Client) initV2Client() (versionedClient, error) {
-	return nil, core.NewError(core.ErrCodeVersion, "v2 protocol not yet implemented (requires GM TLS library)")
-}
-
 // initNTLSClient 初始化 NTLS（TCP + TLCP）客户端。
 func (c *Client) initNTLSClient() (versionedClient, error) {
 	// fail-fast：NewClient 时校验凭证非空。
@@ -335,13 +329,10 @@ func (w *ntlsClientWrapper) SetRedirectHandler(handler RedirectHandler) {
 	w.client.SetRedirectHandler(handler)
 }
 
-// 注：v2ClientWrapper 仍待 v2（QUIC + RFC 8998 国密）落地后按 v1ClientWrapper 模式重建。
-
 // Client Options (functional options pattern)
 
-// WithVersion sets the protocol version. version 是 ProtocolVersion 类型，
-// 编译期已约束为合法常量（Version1/Version2/VersionNTLS），无需运行时 switch。
-// 从 string 构造时用 [ParseVersion] 转换。
+// WithVersion sets the protocol version. version 是 ProtocolVersion 类型（typed string），
+// 调用方须传 Version1/VersionNTLS 常量之一。从 string 构造时用 [ParseVersion] 转换。
 func WithVersion(version ProtocolVersion) ClientOption {
 	return func(cc *ClientConfig) error {
 		cc.Version = version
@@ -385,8 +376,8 @@ func WithV1Credentials(creds v1.ClientCredentials) ClientOption {
 	}
 }
 
-// WithClientNTLS configures NTLS credentials for the NTLS client version.
-func WithClientNTLS(cfg ntls.ClientCredentials) ClientOption {
+// WithNTLSCredentials configures NTLS credentials for the NTLS client version.
+func WithNTLSCredentials(cfg ntls.ClientCredentials) ClientOption {
 	return func(cc *ClientConfig) error {
 		cc.NTLSCreds = &cfg
 		return nil
@@ -395,7 +386,8 @@ func WithClientNTLS(cfg ntls.ClientCredentials) ClientOption {
 
 // WithClientMetrics configures the metrics collector for client-side observability
 // (BatchesSent/BatchLatency). Optional; nil uses a no-op collector.
-func WithClientMetrics(metrics *core.MBTAMetrics) ClientOption {
+// 注：客户端 option 保留 Client 前缀以与服务端 WithMetrics 区分（同包同名冲突）。
+func WithClientMetrics(metrics core.Metrics) ClientOption {
 	return func(cc *ClientConfig) error {
 		cc.Metrics = metrics
 		return nil

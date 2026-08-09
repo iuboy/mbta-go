@@ -81,14 +81,6 @@ func TestNewClient_Validation(t *testing.T) {
 				return c
 			},
 		},
-		{
-			name: "invalid pick strategy",
-			mutate: func(c ClientConfig) ClientConfig {
-				c.PickStrategy = "roundrobin"
-				return c
-			},
-			wantErr: "invalid PickStrategy",
-		},
 	}
 
 	for _, tt := range tests {

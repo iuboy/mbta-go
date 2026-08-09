@@ -16,7 +16,7 @@ type ServerConfig struct {
 	Auth               core.TokenValidator
 	Policy             core.Policy
 	ServerID           string
-	Metrics            *core.MBTAMetrics
+	Metrics            core.Metrics
 	Sink               core.EventSink       // 上层注入的事件投递接口
 	RedirectChecker    core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选）
 	OnSession          core.OnSession       // 会话生命周期回调（可选，nil=禁用）
@@ -34,36 +34,19 @@ type Server struct {
 
 // NewServer creates a new MBTA server.
 func NewServer(cfg ServerConfig) (*Server, error) {
-	// fail-fast：Address/Auth/Sink/Policy 为空或非法属严重误配，构造时暴露。
 	if err := core.ValidateListenAddr(cfg.Transport.Address); err != nil {
 		return nil, core.WrapError(core.ErrCodeConfig, "Transport.Address", err)
 	}
-	// 用户未配置 Policy 时应用默认（cipher 跟随 v1 = INTL）；已配置则保持不动。
-	if cfg.Policy.IsZeroPolicy() {
-		cfg.Policy = core.DefaultPolicy(corepb.CipherSuite_CIPHER_SUITE_INTL)
-	}
-	if cfg.Auth == nil {
-		return nil, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
-	}
-	if cfg.Sink == nil {
-		return nil, core.NewError(core.ErrCodeConfig, "Sink (EventSink) is required")
-	}
-	if err := cfg.Policy.Validate(); err != nil {
-		return nil, core.WrapError(core.ErrCodeConfig, "Policy", err)
-	}
-	if cfg.ServerID == "" {
-		cfg.ServerID = core.NewChunkID().String()
-	}
 	hcfg := binding.HandlerConfig{
-		Auth:            cfg.Auth,
-		Policy:          cfg.Policy,
-		Sink:            cfg.Sink,
-		Metrics:         cfg.Metrics,
-		ServerID:        cfg.ServerID,
-		RedirectChecker: cfg.RedirectChecker,
-		OnSession:       cfg.OnSession,
-		SessionStore:    cfg.SessionStore,
+		Auth: cfg.Auth, Policy: cfg.Policy, Sink: cfg.Sink, Metrics: cfg.Metrics,
+		ServerID: cfg.ServerID, RedirectChecker: cfg.RedirectChecker,
+		OnSession: cfg.OnSession, SessionStore: cfg.SessionStore,
 	}
+	policy, err := binding.ResolveHandlerConfig(&hcfg, corepb.CipherSuite_CIPHER_SUITE_INTL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Policy = policy
 	return &Server{
 		Server: binding.NewServer[*Listener, *Conn](cfg.MaxConcurrentConns, hcfg),
 		config: cfg,

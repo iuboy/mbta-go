@@ -199,7 +199,7 @@ func TestMetricsCount(t *testing.T) {
 		t.Fatalf("Gather() error: %v", err)
 	}
 
-	expectedCount := 20
+	expectedCount := 21 // C2：新增 sink_failures_total
 	if len(metricFamilies) != expectedCount {
 		t.Errorf("Expected %d metrics, got %d", expectedCount, len(metricFamilies))
 	}

@@ -68,31 +68,15 @@ func RandVersion() string {
 	return fmt.Sprintf("v%d.%d.%d", RandInt(0, 10), RandInt(0, 20), RandInt(0, 30))
 }
 
-// RandPayload 返回长度为 n 的随机字节切片。n <= 0 时返回 nil。
-// 用 crypto/rand 保证高熵，适合作为 envelope 加密 payload。
-func RandPayload(n int) []byte {
-	if n <= 0 {
-		return nil
-	}
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		// crypto/rand 失败极罕见；退化到 math/rand 保证测试可继续。
-		for i := range b {
-			b[i] = byte(mathrand.IntN(256))
-		}
-	}
-	return b
-}
-
 // RandPayloadString 返回长度为 n 的随机可打印字母数字字符串。
 // 用于 envelope/message 的 plaintext fixture（需可读且可序列化）。
 func RandPayloadString(n int) string {
 	return RandString(n)
 }
 
-// RandHexID 返回 length 个字符的小写 hex 字符串，保证非全零。
-// length 必须为偶数（trace_id=32, span_id=16）。
-func RandHexID(length int) string {
+// randHexID 返回 length 个字符的小写 hex 字符串，保证非全零。
+// length 必须为偶数（trace_id=32, span_id=16）。内部供 RandTraceID/RandSpanID 使用。
+func randHexID(length int) string {
 	if length <= 0 {
 		return ""
 	}
@@ -120,10 +104,10 @@ func RandHexID(length int) string {
 
 // RandTraceID 返回合法的 W3C trace_id：32 位小写 hex、非全零。
 func RandTraceID() string {
-	return RandHexID(32)
+	return randHexID(32)
 }
 
 // RandSpanID 返回合法的 W3C span_id：16 位小写 hex、非全零。
 func RandSpanID() string {
-	return RandHexID(16)
+	return randHexID(16)
 }

@@ -39,7 +39,7 @@ type ServerConfig struct {
 	Auth            core.TokenValidator
 	Policy          core.Policy
 	Sink            core.EventSink
-	Metrics         *core.MBTAMetrics
+	Metrics         core.Metrics
 	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
 	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）：CONNECTED/DISCONNECTED
 	SessionStore    *core.SessionStore   // 0-RTT 会话票据存储（nil=禁用 0-RTT resumption）
@@ -68,6 +68,14 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 	// Validate at least one version is enabled
 	if !cfg.EnableV1 && !cfg.EnableNTLS {
 		return nil, core.NewError(core.ErrCodeConfig, "at least one version must be enabled")
+	}
+	// Auth/Sink 非空校验在 facade fail-fast，避免错误延迟到 Start() 才暴露。
+	// 子层 v1/ntls NewServer 保留各自校验作为防御性兜底。
+	if cfg.Auth == nil {
+		return nil, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
+	}
+	if cfg.Sink == nil {
+		return nil, core.NewError(core.ErrCodeConfig, "Sink (EventSink) is required")
 	}
 
 	return &Server{cfg: cfg}, nil
@@ -198,7 +206,7 @@ func (s *Server) initV1Server() error {
 
 	v1srv, err := v1.NewServer(cfg)
 	if err != nil {
-		return core.WrapError(core.ErrCodeConfig, "v1 server init", err)
+		return err // v1.NewServer 已 wrap ErrCodeConfig + 具体字段，无需再包一层
 	}
 	s.v1Server = v1srv
 	return nil
@@ -217,7 +225,7 @@ func (s *Server) initNTLSServer() error {
 
 	server, err := ntls.NewServer(cfg)
 	if err != nil {
-		return core.WrapError(core.ErrCodeConfig, "ntls server init", err)
+		return err // ntls.NewServer 已 wrap ErrCodeConfig + 具体字段
 	}
 
 	s.ntlsServer = server
@@ -278,7 +286,8 @@ func WithEventSink(sink core.EventSink) ServerOption {
 }
 
 // WithMetrics sets the metrics collector for all versions.
-func WithMetrics(metrics *core.MBTAMetrics) ServerOption {
+// 接受 core.Metrics 接口（nil=NoOp）。New(reg) 返回的 *MBTAMetrics 自动满足接口。
+func WithMetrics(metrics core.Metrics) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.Metrics = metrics
 		return nil

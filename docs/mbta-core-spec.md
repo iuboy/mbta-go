@@ -218,7 +218,9 @@ envelope 的字段用二进制 schema（见 §6）编码。关键字段（语义
 
 ### 5.3 HMAC 签名输入
 
-HMAC 签名输入为 envelope 序列化字节的规范形式（canonical wire bytes）。确定性编码（§6）保证同一 envelope 跨实现逐字节一致，HMAC 可验证。签名输入用 canonical wire bytes，不用手工拼接字符串。
+HMAC 签名输入 = **域分隔前缀** `b"MBTA-ENVELOPE-MAC-V1\u00"` ‖ `EnvelopeVersion`(1B) ‖ envelope 序列化字节的规范形式（canonical wire bytes，mac 字段清空）。确定性编码（§6）保证同一 envelope 跨实现逐字节一致，HMAC 可验证。
+
+域分隔前缀固定 future-proof：新增字段或修订 wire 格式时 bump 版本字节，保证跨版本 HMAC 不可混淆，并与其他用途的 HMAC（如 challenge-response）输出互不可互换。
 
 ### 5.4 抗重放
 
@@ -349,7 +351,8 @@ HELLO 协商选套件；实现按套件选择算法。
 
 - nonce 显式随 envelope 传输；
 - 同密钥下 nonce 不复用；
-- 密文格式：`nonce || ciphertext || tag`。
+- 密文格式：`nonce || ciphertext || tag`；
+- **Associated Data（AD）绑定**：AEAD 的 AD = 长度前缀的 `session_id ‖ seq ‖ chunk_id ‖ message_type ‖ cipher_suite` 规范字节。AD 将密文绑定到 envelope 上下文，封堵密文剪贴攻击（把一条 envelope 的 `Payload+Nonce` 剪贴到不同 session/seq/chunk 的 envelope）。Build 与 Open 双端 AD 必须一致。
 
 ---
 
@@ -420,7 +423,7 @@ Agent                          Server
 
 **(3) AUTH（C→S）字段语义：**
 - 凭据按选定 cipher_suite 与部署：`token`（静态令牌）/ mTLS 证书 / SM2 证书（`sm2_cert_auth`）；
-- `auth_nonce`：客户端基于 `challenge_nonce` 计算的应答（challenge-response），防重放；
+- `auth_nonce`：客户端基于 `challenge_nonce` 计算的应答（challenge-response），绑定 transcript 防重放与跨会话剪贴。HMAC 输入 = 域分隔前缀 `b"MBTA-CHALLENGE-V1\u00"` ‖ 长度前缀的 `agent_id ‖ session_id ‖ challenge_nonce`，密钥为 token。transcript 绑定保证即便 nonce 罕见重复，响应也无法重放到不同 agent/session；
 - `session_id`：绑定本次认证到 HELLO_ACK 会话。
 
 **(4) AUTH_OK / AUTH_FAIL：**
@@ -539,20 +542,27 @@ PARTIAL_ACK MUST 通过 `event_id` 或 signal index 定位失败项，支持逐�
 - 重连后按 `seq` 升序重发 PendingBatches；
 - **DATAGRAM 不入 spool**，无删除语义。
 
-### 11.6 0-RTT 投递（capability `early_data`，仅 QUIC binding）
+### 11.6 Session Resumption 与密钥派生
 
-**语义：** `early_data` capability **仅 QUIC binding 支持**（`mbta/1`）。
+**语义：** 0-RTT 早数据快路径已移除（r3 安全加固）。Session ticket 仍用于减少 resumption 往返，但**不再允许 AUTH 前处理 BATCH**。
 
-QUIC 原生支持 0-RTT：客户端在握手完成前发送已 spooled 的 reliable BATCH（早期数据）。
+**Resumption 流程（MUST）：**
+1. 首次认证成功后，服务端颁发一次性 session ticket（32 字节随机），关联 master 会话密钥；
+2. 客户端下次连接在 HELLO 携带 ticket；
+3. 服务端 `handleHello` 校验 ticket 有效 + agentID 一致后，**暂存 master 密钥**（不直接置为活跃 keys，不启动 dataLoop）；
+4. 客户端**仍须发 AUTH** 完成 challenge-response（绑定 agentID/sessionID/nonce 的 transcript，§9.5）；
+5. 服务端 `handleAuth` 验证 challenge 通过后，用 **HKDF 从 master + 一次性 server random 派生新子钥**，作为本次会话的活跃密钥；
+6. AUTH_OK 下发派生密钥，dataLoop 此后才启动。
 
-**TCP binding 不支持 0-RTT data**（`mbta-tls/1` / `mbta-ntls/1`）——TCP binding 的传输层不支持握手前 application data。
+**安全保证：**
+- **master 密钥永不直接用于数据加密**——每次 resumption 产生独立子钥，限制单次票据泄露的影响面；
+- **AUTH 不可跳过**——即便持有有效 ticket，攻击者仍须通过 challenge-response 证明持有 token；
+- **票据单次使用**——`Get` 后立即 `Delete`，防捕获的票据被无限重放；
+- **agentID 绑定**——ticket 关联的 agentID 必须与 HELLO 声明一致，否则拒绝恢复（防票据跨 agent 重放）。
 
-**抗重放约束（MUST）：**
-- 0-RTT 早期数据 MUST 携带 `chunk_id`（ULID）；服务端 MUST 经去重缓存校验，重放的 0-RTT BATCH 命中则丢弃并回 ACK（effectively-once 场景）或拒绝（at-least-once 场景按部署策略）；
-- **AUTH MUST NOT 走 0-RTT**（认证凭据不可重放暴露）；0-RTT 仅限已认证会话的 resumption；
-- 服务端可按部署策略限制 0-RTT 批量上限（`max_early_data_bytes`），缩小重放影响面。
+**TCP binding 同样适用**——resumption 不依赖 QUIC 0-RTT 传输能力，纯协议层 ticket + HKDF 派生。
 
-**适用判断：** 客户端声明 capability `early_data` 且 binding 为 QUIC（`SupportsDatagram()==true`）时启用；TCP binding 不响应此 capability。
+**HKDF 参数：** `hash` 按 CipherSuite（intl=SHA-256, gm=SM3）；`salt` = 一次性 server random（32 字节）；`info` = `"MBTA-RESUMPTION-V1\u00" ‖ cipher_suite ‖ master_key_id`。
 
 ---
 
@@ -673,7 +683,7 @@ ACK/NACK/PARTIAL_ACK/DATAGRAM/spool/WINDOW/THROTTLE/SecureEnvelope 属 MBTA 传�
 | `durable_ack`         | stable | 支持 Durable ACK（持久化后确认）               | §11.3 / §11.5 |
 | `dedup`               | stable | 服务端持久化跨重连去重（effectively-once）     | §11.3         |
 | `unreliable_datagram` | stable | 支持不可靠 DATAGRAM 投递通道                   | §11.4         |
-| `early_data`          | stable | 支持 0-RTT 早期数据投递（**仅 QUIC binding**） | §11.6         |
+| `early_data`          | stable | 声明支持 session resumption（票据减往返，§11.6）。**注**：0-RTT AUTH 前早数据快路径已移除（前向保密加固），resumption 仍须完整 challenge-response。 | §11.6         |
 
 ### C.2 传输与通道
 

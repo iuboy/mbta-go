@@ -42,7 +42,7 @@ func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec)
 	// 注入 sink 需要在握手前设置——通过临时改写 policy。由于 doHandshakeCodec 不接受
 	// sink，这里用一个独立实现：先握手（sink=nil），再单独构造带 sink 的 handler 走 batch。
 	// 更简洁的方式：扩展 doHandshakeCodec 接受 sink。为保持 helper 通用，这里直接内联。
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	policy := core.Policy{
 		SupportedCapabilities: []string{core.CapCodecProto, core.CapCodecCbor, core.CapCodecJson, core.CapCSIntl},
@@ -80,7 +80,7 @@ func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec)
 	cs := ack.GetCipherSuite()
 
 	// AUTH
-	authNonce := core.ComputeChallengeResponse(tok, string(ack.GetChallengeNonce()), cs)
+	authNonce := core.ComputeChallengeResponse(tok, agentID, string(ack.GetSessionId()), ack.GetChallengeNonce(), cs)
 	authMsg := &corepb.AuthMessage{
 		Token: tok, AgentId: agentID,
 		SessionId: ack.GetSessionId(), AuthNonce: authNonce,
@@ -152,7 +152,7 @@ func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec)
 
 // TestCoreHandler_CodecNegotiation_DefaultProtoStillWorks 验证客户端 offer 全部三种 codec 时，服务端按优先级选 proto。
 func TestCoreHandler_CodecNegotiation_DefaultProtoStillWorks(t *testing.T) {
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	policy := core.Policy{
 		SupportedCapabilities: []string{core.CapCodecProto, core.CapCodecCbor, core.CapCodecJson, core.CapCSIntl},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,

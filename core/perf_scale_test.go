@@ -1,3 +1,6 @@
+// P5：perf_scale 做规模级压测（1万/10万/百万），原 init() 全局覆盖 slog 影响同包其他测试。
+// 改为在每个压测函数内 t.Cleanup 还原 slog，避免污染同包默认测试日志。
+
 package core
 
 import (
@@ -8,10 +11,12 @@ import (
 	"testing"
 )
 
-func init() {
-	// 压测期间 ReplayCache 的 Processing 淘汰会打 slog.Warn；规模级下百万次日志会
-	// 严重拖慢并污染输出。统一丢弃日志，保证压测只度量算法本身。
+// muteSlogForBench 在压测期间丢弃 slog 输出，t.Cleanup 还原默认 handler。
+// 替代原 init() 的全局覆盖——只在具体压测函数运行时生效。
+func muteSlogForBench(t testing.TB) {
+	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.DiscardHandler))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 }
 
 // 本文件做规模级压测（1万 / 10万 / 百万），重点验证本次优化的两个 O(n)→O(1) 退化点：
@@ -24,15 +29,16 @@ func init() {
 // BenchmarkReplayCache_FullEviction_New：缓存填满（全部 Processing）后持续插入，
 // 每次都触发淘汰。当前实现走 processingList 队首 O(1)。
 func BenchmarkReplayCache_FullEviction_New(b *testing.B) {
+	muteSlogForBench(b)
 	for _, n := range []int{10_000, 100_000, 1_000_000} {
 		b.Run(scaleName(n), func(b *testing.B) {
 			rc := NewReplayCacheWithSize(n)
-			for i := 0; i < n; i++ {
+			for i := range n {
 				rc.SeenOrAdd("a", strconv.Itoa(i))
 			}
 			b.ResetTimer()
 			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
+			for i := range b.N {
 				rc.SeenOrAdd("a", fmt.Sprintf("n%d", i))
 			}
 		})
@@ -43,10 +49,11 @@ func BenchmarkReplayCache_FullEviction_New(b *testing.B) {
 // 这是旧实现 O(n) 退化的真实触发场景（淘汰需扫描前段 Processing）。当前实现从 doneList
 // 队首 O(1) 取，性能与规模无关。
 func BenchmarkReplayCache_MixedEviction_New(b *testing.B) {
+	muteSlogForBench(b)
 	for _, n := range []int{10_000, 100_000, 1_000_000} {
 		b.Run(scaleName(n), func(b *testing.B) {
 			rc := NewReplayCacheWithSize(n)
-			for i := 0; i < n; i++ {
+			for i := range n {
 				rc.SeenOrAdd("a", strconv.Itoa(i))
 			}
 			// 将后半标记为已完成 -> doneList。
@@ -55,7 +62,7 @@ func BenchmarkReplayCache_MixedEviction_New(b *testing.B) {
 			}
 			b.ResetTimer()
 			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
+			for i := range b.N {
 				rc.SeenOrAdd("a", fmt.Sprintf("n%d", i))
 			}
 		})
@@ -123,10 +130,11 @@ func (rc *oldReplayCache) Update(key string, status ReplayStatus) {
 // 旧实现每次淘汰需线性扫描前段 Processing + append 切片搬移，O(n)。
 // 百万级会慢到不可用，故仅跑到 10万。
 func BenchmarkReplayCache_MixedEviction_Old(b *testing.B) {
+	muteSlogForBench(b)
 	for _, n := range []int{1_000, 10_000, 100_000} {
 		b.Run(scaleName(n), func(b *testing.B) {
 			rc := newOldReplayCache(n)
-			for i := 0; i < n; i++ {
+			for i := range n {
 				rc.SeenOrAdd(replayKey("a", strconv.Itoa(i)))
 			}
 			for i := n / 2; i < n; i++ {
@@ -134,7 +142,7 @@ func BenchmarkReplayCache_MixedEviction_Old(b *testing.B) {
 			}
 			b.ResetTimer()
 			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
+			for i := range b.N {
 				rc.SeenOrAdd(replayKey("a", fmt.Sprintf("n%d", i)))
 			}
 		})
@@ -146,6 +154,7 @@ func BenchmarkReplayCache_MixedEviction_Old(b *testing.B) {
 // =====================================================================
 
 func BenchmarkInflight_HighContention(b *testing.B) {
+	muteSlogForBench(b)
 	for _, p := range []int{8, 64, 256} {
 		b.Run(fmt.Sprintf("procs=%d", p), func(b *testing.B) {
 			inf := &Inflight{}

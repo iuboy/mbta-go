@@ -71,6 +71,8 @@ func TestAsyncDurableSink_Upgrade(t *testing.T) {
 		var ack core.AckMessage
 		_ = core.Decode(resp.Payload, &ack)
 		switch ack.GetAckMode() {
+		case corepb.AckMode_ACK_MODE_UNSPECIFIED:
+			// 无关分支，忽略
 		case corepb.AckMode_ACK_MODE_ACCEPTED:
 			acksAccepted++
 		case corepb.AckMode_ACK_MODE_DURABLE:
@@ -95,7 +97,7 @@ func TestAsyncDurableSink_Upgrade(t *testing.T) {
 // （用于协商 durable_ack，验证 useAckLevel 路径）。server cfg.Policy 必须已含对应 capability。
 func doHandshakeCfgWithPolicy(t *testing.T, cfg protocol.HandlerConfig, clientCaps []string) (*FakeTransport, *core.SessionKeys, corepb.CipherSuite) {
 	t.Helper()
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	if cfg.Auth == nil {
 		cfg.Auth = core.NewStaticTokenValidator(map[string]string{tok: agentID})
@@ -122,7 +124,7 @@ func doHandshakeCfgWithPolicy(t *testing.T, cfg protocol.HandlerConfig, clientCa
 	_ = core.Decode(ackF.Payload, &ack)
 	cs := ack.GetCipherSuite()
 
-	authNonce := core.ComputeChallengeResponse(tok, string(ack.GetChallengeNonce()), cs)
+	authNonce := core.ComputeChallengeResponse(tok, agentID, string(ack.GetSessionId()), ack.GetChallengeNonce(), cs)
 	authMsg := &corepb.AuthMessage{Token: tok, AgentId: agentID, SessionId: ack.GetSessionId(), AuthNonce: authNonce}
 	ap, _ := core.Encode(authMsg)
 	tr.ControlIn <- MakeFrame(core.TypeAuth, core.FlagControl, core.ChannelControl, ap)

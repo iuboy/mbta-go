@@ -13,7 +13,7 @@ func TestParseVersion(t *testing.T) {
 		wantErr bool
 	}{
 		{"v1", Version1, false},
-		{"v2", Version2, false},
+		{"v2", "", true}, // A2：v2 已删除，现在返回 error
 		{"ntls", VersionNTLS, false},
 		{"", "", true},
 		{"V1", "", true},   // 大小写敏感

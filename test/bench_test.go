@@ -189,8 +189,8 @@ func BenchmarkE2E_ConnectionSetup(b *testing.B) {
 			b.Fatal(err)
 		}
 		pool = append(pool, c)
-		// 窗口满：关闭并清空（不计入计时——drain 在 StopTimer 后或此处忽略）。
-		// 为不污染计时，窗口满时直接截断 pool（连接的真正 Close 留给 defer closeAll）。
+		// 窗口满：StopTimer 暂停计时，closeAll 关闭并清空 pool 内所有连接，
+		// StartTimer 恢复。P7：旧注释"Close 留给 defer"与实际代码（此处 inline closeAll）矛盾，已更正。
 		if len(pool) == poolSize {
 			b.StopTimer()
 			closeAll()

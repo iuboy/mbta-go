@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
@@ -14,13 +15,35 @@ type HandlerConfig struct {
 	Auth            core.TokenValidator
 	Policy          core.Policy
 	Sink            core.EventSink
-	Metrics         *core.MBTAMetrics
+	Metrics         core.Metrics
 	ServerID        string
 	RedirectChecker core.RedirectChecker
 	OnSession       core.OnSession
 	// SessionStore 可选：0-RTT 会话票据存储（single-use ticket 重放防护）。
 	// nil 则禁用 0-RTT resumption（不颁发/不验证 session ticket）。
 	SessionStore *core.SessionStore
+}
+
+// ResolveHandlerConfig 就地校验并填充 HandlerConfig 的公共字段：
+// 应用 Policy 默认值（按 binding 语境的 defaultCipherSuite）、校验 Auth/Sink 非空、
+// Policy.Validate、ServerID 默认值。返回解析后的 Policy 供调用方回填到自己的 ServerConfig。
+func ResolveHandlerConfig(hcfg *HandlerConfig, defaultCipherSuite corepb.CipherSuite) (core.Policy, error) {
+	if hcfg.Policy.IsZeroPolicy() {
+		hcfg.Policy = core.DefaultPolicy(defaultCipherSuite)
+	}
+	if hcfg.Auth == nil {
+		return hcfg.Policy, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
+	}
+	if hcfg.Sink == nil {
+		return hcfg.Policy, core.NewError(core.ErrCodeConfig, "Sink (EventSink) is required")
+	}
+	if err := hcfg.Policy.Validate(); err != nil {
+		return hcfg.Policy, core.WrapError(core.ErrCodeConfig, "Policy", err)
+	}
+	if hcfg.ServerID == "" {
+		hcfg.ServerID = core.NewChunkID().String()
+	}
+	return hcfg.Policy, nil
 }
 
 // AcceptLoop 是泛型 accept 循环骨架，消除 v1/ntls 的 ~50 行重复。

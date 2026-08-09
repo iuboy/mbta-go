@@ -19,7 +19,7 @@ import (
 // 返回捕获到的事件（按到达顺序）与 cancel（测试调用以触发 DISCONNECTED）。
 func runAuthedHandshakeWithOnSession(t *testing.T, helloHostname, helloOS, helloVersion string) (*sessionRecorder, context.CancelFunc, string) {
 	t.Helper()
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	tok, agentID := testutil.RandToken(), testutil.RandAgentID()
 	policy := core.Policy{
 		SupportedCapabilities: []string{core.CapCodecProto, core.CapCompZstd, core.CapCSIntl, core.CapDurableAck},
@@ -64,7 +64,7 @@ func runAuthedHandshakeWithOnSession(t *testing.T, helloHostname, helloOS, hello
 	cs := ack.GetCipherSuite()
 
 	// AUTH
-	authNonce := core.ComputeChallengeResponse(tok, string(ack.GetChallengeNonce()), cs)
+	authNonce := core.ComputeChallengeResponse(tok, agentID, string(ack.GetSessionId()), ack.GetChallengeNonce(), cs)
 	authMsg := &corepb.AuthMessage{
 		Token:     tok,
 		AgentId:   agentID,
@@ -80,10 +80,7 @@ func runAuthedHandshakeWithOnSession(t *testing.T, helloHostname, helloOS, hello
 
 	// CONNECTED 应在 AUTH_OK 后同步触发；等待它落盘。
 	dead := time.After(2 * time.Second)
-	for {
-		if rec.hasConnected() {
-			break
-		}
+	for !rec.hasConnected() {
 		select {
 		case <-dead:
 			cancel()
@@ -204,7 +201,7 @@ func TestOnSession_DisconnectedOnCancel(t *testing.T) {
 // TestOnSession_NoDisconnectedForUnauthedConnection 验证未通过认证的连接不产生
 // DISCONNECTED（没有配对的 CONNECTED）。发一个无效 AUTH 触发认证失败后结束。
 func TestOnSession_NoDisconnectedForUnauthedConnection(t *testing.T) {
-	tr := NewFakeTransport(false)
+	tr := NewFakeTransport()
 	policy := core.Policy{
 		SupportedCapabilities: []string{core.CapCodecProto, core.CapCSIntl},
 		DefaultCodec:          corepb.Codec_CODEC_PROTO,
@@ -232,13 +229,13 @@ func TestOnSession_NoDisconnectedForUnauthedConnection(t *testing.T) {
 	cs := ack.GetCipherSuite()
 
 	// 用错误 token 计算 challenge-response（必然校验失败）。
-	badNonce := core.ComputeChallengeResponse(testutil.RandToken(), string(ack.GetChallengeNonce()), cs)
+	badNonce := core.ComputeChallengeResponse(testutil.RandToken(), agentID, string(ack.GetSessionId()), ack.GetChallengeNonce(), cs)
 	authMsg := &corepb.AuthMessage{
 		Token: testutil.RandToken(), AgentId: agentID, SessionId: ack.GetSessionId(), AuthNonce: badNonce,
 	}
 	ap, _ := core.Encode(authMsg)
 	// 连续发送错误 AUTH 直到达到 maxAuthAttempts，handler 返回 error，Handle 退出。
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		select {
 		case tr.ControlIn <- MakeFrame(core.TypeAuth, core.FlagControl, core.ChannelControl, ap):
 		case <-time.After(200 * time.Millisecond):
