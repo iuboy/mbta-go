@@ -4,10 +4,13 @@ package mbta_test
 
 import (
 	"context"
+	"crypto/rand"
 	"testing"
 	"time"
 
 	mbtago "github.com/iuboy/mbta-go"
+	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 	v1 "github.com/iuboy/mbta-go/v1"
 )
 
@@ -89,6 +92,115 @@ func TestPerf_StagedLatency(t *testing.T) {
 	if steadyAvg > 100*time.Millisecond {
 		t.Errorf("稳态延迟 %v 过高（>100ms），疑似环境问题或回归", steadyAvg)
 	}
+
+	// --- 导出结构化 JSON 报告（含核心环节延迟 + 端到端分解）---
+	stages := measureCoreStages(t)
+	report := PerfReport{
+		E2E: E2EMetrics{
+			HandshakeMs:     handshakeLatency.Seconds() * 1000,
+			ColdSendMs:      coldLatency.Seconds() * 1000,
+			SteadySendUs:    steadyAvg.Seconds() * 1e6,
+			CloseMs:         closeLatency.Seconds() * 1000,
+			BatchPerSec:     steadyThroughput,
+			PayloadBytesPS:  steadyBytesPerSec,
+			PayloadPerBatch: payloadBytesPerBatch,
+		},
+		Stages: stages,
+	}
+	if path, err := writePerfReport(report); err != nil {
+		t.Errorf("write perf report: %v", err)
+	} else {
+		t.Logf("性能报告已导出: %s", path)
+	}
+}
+
+// measureCoreStages 测量协议核心环节的延迟（envelope/cipher/negotiate），返回结构化
+// 度量供 JSON 报告。每个环节跑 nPerStage 次取平均，数据自包含（无需跑 core bench）。
+func measureCoreStages(t *testing.T) []StageMetric {
+	t.Helper()
+	const nPerStage = 500
+
+	// 准备 envelope Build/Open 参数（INTL + GM，4KB payload）。
+	payload := make([]byte, 4096)
+	_, _ = rand.Read(payload)
+	intlHMAC := make([]byte, core.HMACKeyLen(corepb.CipherSuite_CIPHER_SUITE_INTL))
+	intlAEAD := make([]byte, core.AEADKeyLen(corepb.CipherSuite_CIPHER_SUITE_INTL))
+	gmHMAC := make([]byte, core.HMACKeyLen(corepb.CipherSuite_CIPHER_SUITE_GM))
+	gmAEAD := make([]byte, core.AEADKeyLen(corepb.CipherSuite_CIPHER_SUITE_GM))
+	_, _ = rand.Read(intlHMAC)
+	_, _ = rand.Read(intlAEAD)
+	_, _ = rand.Read(gmHMAC)
+	_, _ = rand.Read(gmAEAD)
+
+	mkParams := func(cs corepb.CipherSuite, hmacKey, aeadKey []byte) core.BuildParams {
+		return core.BuildParams{
+			SessionID: []byte("s"), KeyID: "k", Seq: 1, Codec: corepb.Codec_CODEC_PROTO,
+			Compression: corepb.Compression_COMPRESSION_NONE, CipherSuite: cs,
+			DeliveryMode: corepb.DeliveryMode_DELIVERY_MODE_RELIABLE,
+			MsgType:      corepb.EnvelopeMsgType_ENVELOPE_MSG_TYPE_BATCH,
+			HMACKey:      hmacKey, AEADKey: aeadKey, BatchPayload: payload, ChunkID: core.NewChunkID(),
+		}
+	}
+	intlP := mkParams(corepb.CipherSuite_CIPHER_SUITE_INTL, intlHMAC, intlAEAD)
+	gmP := mkParams(corepb.CipherSuite_CIPHER_SUITE_GM, gmHMAC, gmAEAD)
+	intlEnv, _ := core.Build(intlP)
+	gmEnv, _ := core.Build(gmP)
+
+	var stages []StageMetric
+
+	// Envelope Build/Open（INTL + GM）。
+	stages = append(stages, avgStage("EnvelopeBuild/INTL_4KB", nPerStage, 4096, 0, func() {
+		_, _ = core.Build(intlP)
+	}))
+	stages = append(stages, avgStage("EnvelopeBuild/GM_4KB", nPerStage, 4096, 0, func() {
+		_, _ = core.Build(gmP)
+	}))
+	stages = append(stages, avgStage("EnvelopeOpen/INTL_4KB", nPerStage, 4096, 0, func() {
+		_, _ = core.Open(intlEnv, intlHMAC, intlAEAD)
+	}))
+	stages = append(stages, avgStage("EnvelopeOpen/GM_4KB", nPerStage, 4096, 0, func() {
+		_, _ = core.Open(gmEnv, gmHMAC, gmAEAD)
+	}))
+
+	// HMAC（INTL + GM）。
+	intlH, _ := core.NewHMAC(corepb.CipherSuite_CIPHER_SUITE_INTL, intlHMAC)
+	gmH, _ := core.NewHMAC(corepb.CipherSuite_CIPHER_SUITE_GM, gmHMAC)
+	stages = append(stages, avgStage("HMAC/INTL_SHA256_4KB", nPerStage, 4096, 0, func() {
+		intlH.Reset()
+		intlH.Write(payload)
+		_ = intlH.Sum(nil)
+	}))
+	stages = append(stages, avgStage("HMAC/GM_SM3_4KB", nPerStage, 4096, 0, func() {
+		gmH.Reset()
+		gmH.Write(payload)
+		_ = gmH.Sum(nil)
+	}))
+
+	// Negotiate（典型 2 caps）。
+	policy := core.DefaultPolicy(corepb.CipherSuite_CIPHER_SUITE_INTL)
+	typicalCaps := []string{core.CapCodecProto, core.CapCSIntl}
+	stages = append(stages, avgStage("Negotiate/typical_2caps", nPerStage, 0, 0, func() {
+		_, _ = core.Negotiate(typicalCaps, policy)
+	}))
+
+	return stages
+}
+
+// avgStage 跑 n 次 op 取平均耗时，返回 StageMetric。payloadBytes>0 时计算 MB/s。
+func avgStage(name string, n int, payloadBytes int, allocsPerOp float64, op func()) StageMetric {
+	// 预热一次（消除首次初始化噪声）。
+	op()
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		op()
+	}
+	elapsed := time.Since(start)
+	nsPerOp := float64(elapsed.Nanoseconds()) / float64(n)
+	mbPerSec := 0.0
+	if payloadBytes > 0 && nsPerOp > 0 {
+		mbPerSec = float64(payloadBytes) / nsPerOp * 1e3 // bytes/ns → MB/s
+	}
+	return StageMetric{Name: name, NsPerOp: nsPerOp, MBPerSec: mbPerSec, AllocsPerOp: allocsPerOp}
 }
 
 // TestPerf_LargeBatch_Throughput 大 batch（100 events × 1KB）端到端吞吐。
@@ -137,5 +249,22 @@ func TestPerf_LargeBatch_Throughput(t *testing.T) {
 	// 等待 sink 收齐（异步投递），验证无丢失。
 	if !waitCount(sink, int64(nBatches), 5*time.Second) {
 		t.Errorf("sink 收到 %d batch, want %d（异步投递丢失？）", sink.count.Load(), nBatches)
+	}
+
+	// 导出大 batch 吞吐到 JSON 报告。
+	report := PerfReport{
+		LargeBatch: &LargeBatchRow{
+			EventsPerBatch: nEvents,
+			BodyBytes:      bodyBytes,
+			NBatches:       nBatches,
+			ThroughputMBps: throughputMBps,
+			BatchPerSec:    batchPerSec,
+			AvgLatencyMs:   elapsed.Seconds() * 1000 / float64(nBatches),
+		},
+	}
+	if path, err := writePerfReport(report); err != nil {
+		t.Errorf("write perf report: %v", err)
+	} else {
+		t.Logf("大 batch 报告已导出: %s", path)
 	}
 }

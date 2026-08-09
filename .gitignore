@@ -47,3 +47,5 @@ CLAUDE.md
 /testdata/certificates/*.srl
 # PEM 是 Go crypto/tls / x509 标准库最常用的证书/密钥格式，私钥若意外提交构成安全风险。
 *.pem
+# 性能基准报告产物（perf test 运行时生成，不提交）
+/test/results/

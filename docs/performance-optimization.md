@@ -142,12 +142,27 @@ caller 可安全使用 `context.WithTimeout + defer cancel` 限定握手时长�
 # 全部环节级 bench（快，秒级完成）
 go test -bench=. -benchtime=200ms ./core/
 
-# 端到端各环节延迟分解（可读报告）
+# 端到端各环节延迟分解（可读报告 + 自动导出 JSON）
 go test -tags integration -run TestPerf_StagedLatency -v ./test/
 
 # 端到端聚合吞吐 bench
 go test -tags integration -bench=. -benchtime=3s ./test/
 ```
+
+### JSON 报告导出
+
+perf test（`TestPerf_StagedLatency` / `TestPerf_LargeBatch_Throughput`）跑完自动写
+结构化 JSON 报告到 `test/results/perf-<timestamp>.json`，含：
+
+- 环境信息（go_version / goos / goarch / num_cpu）
+- 端到端各环节延迟（握手/冷启动/稳态 SendBatch/Close）+ 吞吐（batch/s、bytes/s）
+- 核心环节度量（envelope Build/Open、HMAC、Negotiate，INTL vs GM）
+- 大 batch 吞吐（events/batch、MB/s、batch/s、avg latency）
+
+报告文件被 .gitignore 排除（运行时产物）。CI 可归档不同 commit 的报告做回归对比，
+或解析 JSON 绘制趋势图。无需 benchstat 等外部工具。
+
+---
 
 ---
 
