@@ -103,17 +103,51 @@ caller 可安全使用 `context.WithTimeout + defer cancel` 限定握手时长�
 
 ## 七、压测与基准文件索引
 
+各环节延迟与吞吐基准。`core/*_bench_test.go` 测协议各子环节（纳秒~微秒级），
+`test/*.go` 测端到端聚合（含传输往返）。
+
+### 环节级基准（`core/`，`go test -bench=. ./core/`）
+
+| 文件 | 覆盖环节 | 报告维度 |
+| ---- | ---- | ---- |
+| `core/cipher_bench_test.go` | HMAC（SHA-256/SM3）、AEAD Seal/Open（AES-256-GCM/SM4-GCM） | ns/op + MB/s（加密吞吐） |
+| `core/envelope_bench_test.go` | SecureEnvelope Build/Open（压缩+AEAD+HMAC），INTL/GM × 3 size | ns/op + MB/s + allocs |
+| `core/negotiate_bench_test.go` | HELLO 协商（Negotiate：交集+选算法），2/12/256 caps | ns/op + allocs |
+| `core/signal_bench_test.go` | SignalBatch marshal/unmarshal（proto codec）各层开销 | ns/op |
+| `core/frame_bench_test.go` | Frame Write/Read 真实开销 | ns/op |
+| `core/codec` (codec_test.go Benchmark) | 各 codec 编解码 | ns/op |
+| `core/delivery_bench_test.go` | ReplayCache SeenOrAdd/淘汰 | ns/op |
+| `core/flow_bench_test.go` | Window/AckTracker/Inflight 流控 | ns/op |
+| `core/session_bench_test.go` | session 状态机 Transition | ns/op |
+| `core/perf_scale_test.go` | ReplayCache/Inflight 高并发规模压测 | ns/op |
+
+### 端到端基准（`test/`，`go test -tags integration -bench=. ./test/`）
+
+| 文件 | 覆盖 | 报告维度 |
+| ---- | ---- | ---- |
+| `test/perf_stages_test.go` | **各环节延迟分解**：握手/首次/稳态 SendBatch/Close + 大 batch 吞吐 | 各环节延迟 + batch/s + MB/s |
+| `test/bench_test.go` | 单连接/大 batch/多连接聚合吞吐/连接建立速率 | ns/op + MB/s + batch/op |
+
+### 其他
+
 | 文件 | 覆盖 |
 | ---- | ---- |
-| `core/perf_scale_test.go` | ReplayCache / Inflight 高并发规模压测 |
-| `core/signal_bench_test.go` | SignalBatch marshal/unmarshal（proto codec）各层开销 |
-| `core/frame_bench_test.go` | Write/Read 真实开销 |
-| `core/delivery_bench_test.go` | ReplayCache 淘汰 |
-| `core/flow_bench_test.go` | EnhancedRouter / EventSink |
-| `core/session_bench_test.go` | session 状态机 |
 | `v1/stream_picker_test.go` | 一致哈希 StreamPicker |
-| `v1/e2e_test.go` | 端到端 QUIC（握手 + SendBatch + sink） |
-| `ntls/e2e_test.go` | 端到端 TCP + TLCP / TLS 1.3 |
+| `v1/e2e_test.go` | 端到端 QUIC（握手 + SendBatch + sink）正确性 |
+| `ntls/e2e_test.go` | 端到端 TCP + TLCP / TLS 1.3 正确性 |
+
+### 运行示例
+
+```bash
+# 全部环节级 bench（快，秒级完成）
+go test -bench=. -benchtime=200ms ./core/
+
+# 端到端各环节延迟分解（可读报告）
+go test -tags integration -run TestPerf_StagedLatency -v ./test/
+
+# 端到端聚合吞吐 bench
+go test -tags integration -bench=. -benchtime=3s ./test/
+```
 
 ---
 

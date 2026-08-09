@@ -14,9 +14,9 @@ import (
 )
 
 // setupBenchServer 启动一个 v1 server 并返回（addr, cleanup）。
-// 复用 integration_test.go 的 helper（同 package）。
-func setupBenchServer(b *testing.B, sink core.EventSink) (*mbtago.Server, context.CancelFunc) {
-	b.Helper()
+// 复用 integration_test.go 的 helper（同 package）。接受 testing.TB，bench/test 通用。
+func setupBenchServer(tb testing.TB, sink core.EventSink) (*mbtago.Server, context.CancelFunc) {
+	tb.Helper()
 	tok, agentID := "bench-tok", "bench-agent"
 	srv, err := mbtago.NewServer(
 		mbtago.WithV1(v1.QUICServerConfig{
@@ -30,26 +30,26 @@ func setupBenchServer(b *testing.B, sink core.EventSink) (*mbtago.Server, contex
 		mbtago.WithAuth(core.NewStaticTokenValidator(map[string]string{tok: agentID})),
 	)
 	if err != nil {
-		b.Fatalf("NewServer: %v", err)
+		tb.Fatalf("NewServer: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Start(ctx) }()
-	waitAddr(b, srv)
+	waitAddr(tb, srv)
 	return srv, cancel
 }
 
-func benchConnect(b *testing.B, addr string) *mbtago.Client {
-	b.Helper()
+func benchConnect(tb testing.TB, addr string) *mbtago.Client {
+	tb.Helper()
 	c, err := mbtago.NewClient(
 		mbtago.WithServer(addr),
 		mbtago.WithAgent("bench-agent", "h", "bench-tok"),
 		mbtago.WithV1Credentials(v1.ClientCredentials{InsecureSkipVerify: true}),
 	)
 	if err != nil {
-		b.Fatalf("NewClient: %v", err)
+		tb.Fatalf("NewClient: %v", err)
 	}
 	if err := c.Connect(context.Background()); err != nil {
-		b.Fatalf("Connect: %v", err)
+		tb.Fatalf("Connect: %v", err)
 	}
 	return c
 }
@@ -69,6 +69,7 @@ func BenchmarkE2E_V1_SendBatch(b *testing.B) {
 	sb := smallBatch(1, 256)
 
 	b.ResetTimer()
+	b.SetBytes(256) // payload 字节数，让 bench 报 MB/s 吞吐
 	b.ReportAllocs()
 	for b.Loop() {
 		if _, err := c.SendBatch(context.Background(), sb, "tag", "src"); err != nil {
@@ -93,6 +94,7 @@ func BenchmarkE2E_V1_SendBatch_LargeBatch(b *testing.B) {
 	sb := smallBatch(100, 1024)
 
 	b.ResetTimer()
+	b.SetBytes(100 * 1024) // 100 events × 1KB
 	b.ReportAllocs()
 	for b.Loop() {
 		if _, err := c.SendBatch(context.Background(), sb, "tag", "src"); err != nil {
