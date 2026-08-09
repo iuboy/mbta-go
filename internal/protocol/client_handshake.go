@@ -86,12 +86,17 @@ func (c *CoreClient) RecvHelloAck(ctx context.Context) (*core.HelloAckMessage, e
 	if len(ack.GetChallengeNonce()) == 0 {
 		return nil, core.NewError(core.ErrCodeHandshake, "server did not provide challenge_nonce in HELLO_ACK")
 	}
-	c.negotiated.Store(&core.NegotiateResult{
+	result := &core.NegotiateResult{
 		SelectedCapabilities: ack.GetSelectedCapabilities(),
 		Codec:                ack.GetCodec(),
 		Compression:          ack.GetCompression(),
 		CipherSuite:          ack.GetCipherSuite(),
-	})
+	}
+	c.negotiated.Store(result)
+	// ACK 升级机制（sink 异步化设计 §2.2）：协商到 durable_ack 时启用 AckLevel 流控——
+	// accepted 仅标记 slot 不释放，durable 才释放。仅 Durable sink 连接声明 durable_ack，
+	// 纯 EventSink 连接协商不到，保持 useAckLevel=false（旧行为）。
+	c.useAckLevel = result.IsCapabilitySelected(core.CapDurableAck)
 	// 防御性拷贝：GetChallengeNonce 返回 proto 内部 slice 引用，直接 Store 会在
 	// proto 消息被复用/pool 化时被静默篡改，影响 HMAC 计算安全性。
 	nonce := make([]byte, len(ack.GetChallengeNonce()))

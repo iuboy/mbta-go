@@ -75,6 +75,11 @@ func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 }
 
 // handleAck 处理 ACK：释放 tracker slot（seq+chunkID 校验），观测 latency，回调。
+//
+// ACK 升级机制（sink 异步化设计 §2.3）：
+//   - useAckLevel=false（纯 EventSink 连接）：accepted/durable 都立即 Release slot（旧行为）。
+//   - useAckLevel=true（Durable sink 连接）：accepted 仅 MarkAccepted（slot 保留），
+//     durable 才 Release。这让"未持久化=仍 inflight"由窗口强制表达。
 func (c *CoreClient) handleAck(payload []byte) {
 	var ack core.AckMessage
 	if err := core.Decode(payload, &ack); err != nil {
@@ -89,10 +94,19 @@ func (c *CoreClient) handleAck(payload []byte) {
 		slog.Warn("ack chunk_id not valid ULID, cannot match pending batch", "len", len(ack.GetChunkId()))
 		return
 	}
-	// Release 用 ACK 帧自带的 seq 取模定位 slot，chunkID 二次校验。
-	// 三路并发 claim（ack/nack/reaper）中首个成功者清空 slot.seq，后续见 seq==0 失败。
-	if slot, ok := c.tracker.Release(ack.GetSeq(), chunkID); ok {
-		c.metrics.BatchLatency().Observe(time.Since(slot.SentAt).Seconds())
+
+	// 分层流控：useAckLevel=true 时 accepted 不释放 slot（等 durable）；其余情况 Release。
+	released := false
+	var slot core.AckSlot
+	if c.useAckLevel && ack.GetAckMode() == corepb.AckMode_ACK_MODE_ACCEPTED {
+		c.tracker.MarkAccepted(ack.GetSeq(), chunkID)
+	} else {
+		// Release 用 ACK 帧自带的 seq 取模定位 slot，chunkID 二次校验。
+		// 三路并发 claim（ack/nack/reaper）中首个成功者清空 slot.seq，后续见 seq==0 失败。
+		slot, released = c.tracker.Release(ack.GetSeq(), chunkID)
+		if released {
+			c.metrics.BatchLatency().Observe(time.Since(slot.SentAt).Seconds())
+		}
 	}
 
 	chunkIDText := chunkID.String()

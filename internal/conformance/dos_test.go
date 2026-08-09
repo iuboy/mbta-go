@@ -12,10 +12,12 @@ import (
 	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
-// dosSink 是 DoS 防护测试用的 sink：可控制 OnPressure 返回值与 OnSignalBatch 阻塞时长。
+// dosSink 是 DoS 防护测试用的 sink：可控制 OnPressure 返回值与 OnSignalBatch 阻塞。
+// block 字段非 nil 时，OnSignalBatch 阻塞至 block 关闭（用于模拟慢/卡 sink 让队列堆积）。
 type dosSink struct {
 	pressure atomic.Value // core.PressureState
 	delay    time.Duration
+	block    chan struct{} // 非 nil 时 worker 阻塞至此 chan 关闭
 	count    atomic.Int64
 }
 
@@ -26,6 +28,13 @@ func newDoSSink() *dosSink {
 }
 
 func (s *dosSink) OnSignalBatch(_ context.Context, _ string, _ *core.SignalBatch) error {
+	if s.block != nil {
+		// 阻塞至测试释放，或 3s 超时自解（防测试异常时 handler sinkWG.Wait 死锁）。
+		select {
+		case <-s.block:
+		case <-time.After(3 * time.Second):
+		}
+	}
 	if s.delay > 0 {
 		time.Sleep(s.delay)
 	}
@@ -139,29 +148,43 @@ func TestDoS_SinkPressure_PreRouteThrottle(t *testing.T) {
 	}
 }
 
-// TestDoS_SinkTimeout 验证 A：sink 阻塞超过 SinkTimeout 时，handler goroutine 不永久挂起——
-// routeAndACK 通过 goroutine 隔离 + select 超时，放弃 sink 结果并发 THROTTLE（让客户端重试）。
-// 关键：即使 sink 用 time.Sleep 不响应 ctx，handler 也不被阻塞——select 不等 Sleep 完成。
-func TestDoS_SinkTimeout(t *testing.T) {
+// TestDoS_SinkQueueFull_Throttle 验证阶段 1：普通 EventSink 异步投递队列满时，
+// 发 THROTTLE（让客户端重试）。
+// 用阻塞 sink（worker 卡住）+ 小队列（容量 1），并发投 5 帧让队列堆积，验证至少一个 THROTTLE。
+func TestDoS_SinkQueueFull_Throttle(t *testing.T) {
 	sink := newDoSSink()
-	sink.delay = 2 * time.Second // sink 阻塞 2s（不响应 ctx，远超 SinkTimeout）
+	sink.block = make(chan struct{}) // worker 阻塞至此 chan 关闭
 	tr, keys, cs := doHandshakeCfg(t, protocol.HandlerConfig{
-		Sink:        sink,
-		SinkTimeout: 200 * time.Millisecond,
+		Sink:          sink,
+		SinkQueueSize: 1, // 极小队列，worker 卡住时 1 个 batch 即满
 	})
+	// 测试结束时释放 block，让 handler 的 sinkWG.Wait() 不死锁。
+	// （在读完响应后显式关闭，见下方；此处不 defer 以避免与 t.Cleanup cancel 的顺序竞态。）
 
-	start := time.Now()
-	envPayload := buildDosBatchEnvelope(t, keys, cs, 1)
-	tr.DataIn <- MakeFrame(core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, envPayload)
-
-	// 应在 SinkTimeout 附近收到 THROTTLE（而非等满 sink 的 2s）。
-	resp := ReadFrame(t, tr.Sent)
-	elapsed := time.Since(start)
-	if resp.Header.Type != core.TypeThrottle {
-		t.Fatalf("expected THROTTLE after sink timeout, got type %d", resp.Header.Type)
+	// 并发投足够多的帧（远超 worker 数 + 队列容量），让 worker 全部卡在 block 后
+	// sinkQueue 堆积至满，后续帧 THROTTLE。worker 数 = runtime.NumCPU()（可能 ~10），
+	// 队列容量 1，投 30 帧足以让队列满。
+	const nFrames = 30
+	for i := 1; i <= nFrames; i++ {
+		envPayload := buildDosBatchEnvelope(t, keys, cs, uint64(i))
+		tr.DataIn <- MakeFrame(core.TypeBatch, core.FlagEnvelope|core.FlagData, core.ChannelData, envPayload)
 	}
-	// 应在 1s 内（远小于 sink 的 2s，证明 handler 未被 sink 阻塞）。
-	if elapsed > 1*time.Second {
-		t.Errorf("THROTTLE took %v, expected ~SinkTimeout (handler should not block on slow sink)", elapsed)
+
+	// 读响应，统计 ACK/THROTTLE。读到第一个 THROTTLE 即证明队列满触发背压。
+	acks, throttles := 0, 0
+	deadline := time.Now().Add(5 * time.Second)
+	for acks+throttles < nFrames && time.Now().Before(deadline) {
+		resp := ReadFrame(t, tr.Sent)
+		switch resp.Header.Type {
+		case core.TypeAck:
+			acks++
+		case core.TypeThrottle:
+			throttles++
+		}
+	}
+	// 读完响应后释放 block，让阻塞的 worker 继续，handler 可干净退出。
+	close(sink.block)
+	if throttles == 0 {
+		t.Errorf("expected at least one THROTTLE when sink queue full, got acks=%d throttles=%d", acks, throttles)
 	}
 }

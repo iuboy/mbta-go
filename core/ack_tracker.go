@@ -25,7 +25,24 @@ type AckSlot struct {
 	Bytes    int64     // 本 batch 字节数
 	SentAt   time.Time // 发送时刻，BatchLatency 观测 + reaper 超时判定
 	Deadline time.Time // 此 batch 无 ACK 的超时时刻，供 ReapExpired 判定
+	// AckLevel 记录本 batch 的确认级别（仅 useAckLevel=true 的连接使用）。
+	// AckLevelAccepted：已接受但未持久化，slot 保留（等 durable 或超时）。
+	// AckLevelDurable/零：Durable ACK 经 Release 释放 slot 时级别无关紧要。
+	// 零值（AckLevelNone）= 未确认，兼容 useAckLevel=false 的旧路径（不读取此字段）。
+	AckLevel AckLevel
 }
+
+// AckLevel 标记单个 inflight batch 的确认级别（ACK 升级机制，sink 异步化设计 §2.3）。
+type AckLevel int8
+
+const (
+	// AckLevelNone 未收到任何 ACK（零值）。
+	AckLevelNone AckLevel = 0
+	// AckLevelAccepted 已收到 accepted ACK（仅 useAckLevel=true 时标记，slot 保留）。
+	AckLevelAccepted AckLevel = 1
+	// AckLevelDurable 已收到 durable ACK（释放 slot）。
+	AckLevelDurable AckLevel = 2
+)
 
 // AckTracker 是 client 端流控的单一数据结构，定长，编译期确定内存。
 //
@@ -166,6 +183,23 @@ func (t *AckTracker) Release(seq uint64, chunkID ChunkID) (AckSlot, bool) {
 
 	t.recomputeOldestSeqLocked()
 	return s, true
+}
+
+// MarkAccepted 标记 seq 对应 slot 为 AckLevelAccepted（不释放）。
+// 仅 useAckLevel=true 的连接在收到 accepted ACK 时调用：slot 保留至后续 durable ACK
+// （Release）或 ReapExpired（超时）。ackMode 升级机制下 accepted 不恢复流控配额，
+// 强制客户端在 durable 前受窗口约束（更安全的背压语义）。
+// seq+chunkID 不匹配时返回 false（如 slot 已被 durable Release 或 reaper 回收）。
+func (t *AckTracker) MarkAccepted(seq uint64, chunkID ChunkID) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	idx := seq % AckRingSize
+	s := &t.slots[idx]
+	if s.Seq != seq || s.ChunkID != chunkID {
+		return false
+	}
+	s.AckLevel = AckLevelAccepted
+	return true
 }
 
 // ReapExpired 回收所有 deadline 早于 now 的 slot，返回被回收的 slot 列表。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
 
@@ -137,6 +138,12 @@ func testCodecNegotiation(t *testing.T, codecCap string, wantCodec corepb.Codec)
 		_ = core.Decode(resp.Payload, &n)
 		t.Fatalf("expected ACK for %v batch, got type %d (nack code=%s reason=%s)",
 			wantCodec, resp.Header.Type, n.GetCode(), n.GetReason())
+	}
+	// sink 异步投递（阶段 1 fire-and-forget）：ACK 在 worker 处理前发出，
+	// 需轮询等待 worker 调 OnSignalBatch 后再断言事件数。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && sink.count.Load() < 2 {
+		time.Sleep(2 * time.Millisecond)
 	}
 	if got := sink.count.Load(); got != 2 {
 		t.Errorf("sink received %d events, want 2 (decode + route succeeded)", got)

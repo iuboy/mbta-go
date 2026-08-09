@@ -372,3 +372,62 @@ func TestAckTracker_AggregateCountersAccurate(t *testing.T) {
 		t.Error("CanSend should reject exceeding remaining events aggregate")
 	}
 }
+
+// TestAckTracker_MarkAccepted 验证 ACK 升级机制：MarkAccepted 标记 slot 为 Accepted
+// 但不释放（slot 保留，count 不减），后续 durable ACK 的 Release 才释放。
+// 模拟 Durable sink 连接（useAckLevel=true）的 accepted→durable 序列。
+func TestAckTracker_MarkAccepted(t *testing.T) {
+	tr := NewAckTracker(10, 100, 1000)
+	now := time.Now()
+	cid := mkChunkID(1)
+
+	tr.Reserve(1, cid, 5, 100, now, now.Add(time.Minute))
+	if tr.PendingCount() != 1 {
+		t.Fatalf("PendingCount after reserve = %d, want 1", tr.PendingCount())
+	}
+
+	// accepted：MarkAccepted 标记，不释放 slot。
+	if !tr.MarkAccepted(1, cid) {
+		t.Fatal("MarkAccepted should succeed for matching seq+chunkID")
+	}
+	if tr.PendingCount() != 1 {
+		t.Errorf("PendingCount after MarkAccepted = %d, want 1 (slot retained)", tr.PendingCount())
+	}
+	if tr.Empty() {
+		t.Error("Empty should be false after MarkAccepted (slot retained)")
+	}
+	// slot 仍在且 AckLevel=Accepted。
+	idx := 1 % AckRingSize
+	if tr.slots[idx].AckLevel != AckLevelAccepted { //nolint:gosec // 测试直接读 slot 验证级别
+		t.Errorf("AckLevel = %d, want AckLevelAccepted", tr.slots[idx].AckLevel)
+	}
+
+	// durable：Release 释放 slot。
+	slot, ok := tr.Release(1, cid)
+	if !ok {
+		t.Fatal("Release should succeed for durable ACK after MarkAccepted")
+	}
+	if slot.AckLevel != AckLevelAccepted {
+		t.Errorf("released slot AckLevel = %d, want AckLevelAccepted", slot.AckLevel)
+	}
+	if tr.PendingCount() != 0 {
+		t.Errorf("PendingCount after Release = %d, want 0", tr.PendingCount())
+	}
+	if !tr.Empty() {
+		t.Error("Empty should be true after durable Release")
+	}
+}
+
+// TestAckTracker_MarkAccepted_WrongChunkID 验证 MarkAccepted 对不匹配的 chunkID 返回 false。
+func TestAckTracker_MarkAccepted_WrongChunkID(t *testing.T) {
+	tr := NewAckTracker(10, 100, 1000)
+	now := time.Now()
+	tr.Reserve(1, mkChunkID(1), 5, 100, now, now.Add(time.Minute))
+
+	if tr.MarkAccepted(1, mkChunkID(2)) {
+		t.Error("MarkAccepted should fail for wrong chunkID")
+	}
+	if tr.PendingCount() != 1 {
+		t.Errorf("PendingCount = %d, want 1 (unchanged after failed MarkAccepted)", tr.PendingCount())
+	}
+}

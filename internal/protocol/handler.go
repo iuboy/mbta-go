@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
 // 常量（core spec §9.5 limits；与 v1/handler 对齐）。
@@ -29,10 +31,12 @@ const (
 	// maxDrainTimeout 限制客户端 close_timeout_ms 的上限，防恶意客户端发 MaxUint32
 	// 致 handler goroutine 阻塞 ~49 天（内存/goroutine DoS）。
 	maxDrainTimeout = 30 * time.Second
-	// defaultSinkTimeout 是 routeAndACK 调用 sink 的默认超时（HandlerConfig.SinkTimeout
-	// 为 0 时用此值）。防慢/恶意 sink 阻塞 handler goroutine 导致 DoS：超时后发 NACK
-	// 释放 inflight，让客户端重试，handler goroutine 不永久挂起。
-	defaultSinkTimeout = 10 * time.Second
+	// defaultSinkQueueSize 是普通 EventSink 异步投递队列的默认容量。
+	// 满 → 发 THROTTLE 让客户端重试，是 sink 处理跟不上时的精准背压信号。
+	defaultSinkQueueSize = 256
+	// defaultSinkWorkers 是异步投递 worker pool 的默认 worker 数。
+	// runtime.NumCPU() 在多数场景平衡吞吐与 goroutine 开销。
+	defaultSinkWorkers = 0 // 0 = 运行时按 runtime.NumCPU() 取
 )
 
 // envelope 算法一致性复核失败的 wire NACK code 定义在 core.ErrCodeEnvelopeAlgoMismatch
@@ -48,10 +52,10 @@ type HandlerConfig struct {
 	SessionStore    *core.SessionStore   // 0-RTT resumption（可选，nil = 不支持 early_data）
 	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
 	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）：AUTH_OK 后 CONNECTED、连接断开 DISCONNECTED
-	// SinkTimeout 限制 routeAndACK 调用 sink 的最长耗时。0 = 用 defaultSinkTimeout(10s)；
-	// 负值 = 不限（仅测试/受控场景用，生产不推荐——慢 sink 会阻塞 handler goroutine）。
-	// 防 DoS：慢/恶意 sink 超时后发 NACK 释放 inflight，客户端可重试。
-	SinkTimeout time.Duration
+	// SinkQueueSize 是普通 EventSink 的异步投递队列容量（fire-and-forget）。
+	// 0 = 默认 256；负 = 禁用异步（同步阻塞调用，仅测试用）。满则发 THROTTLE 背压。
+	// 仅对普通 EventSink 生效（DurableEventSink/RawEventSink 仍同步，待阶段 3 改造）。
+	SinkQueueSize int
 }
 
 // CoreHandler 是 server 端协议状态机核心，仅依赖 Transport 接口，
@@ -92,6 +96,29 @@ type CoreHandler struct {
 	dataWG         sync.WaitGroup     // 跟踪 data frame 处理 goroutine
 	batchSem       chan struct{}      // data frame 并发上限（QUIC=64 / TCP=8）
 	cancelDataLoop context.CancelFunc // 取消 dataLoop 派生 context，使 processBatch 尽快退出
+
+	// sinkQueue 是普通 EventSink 的异步投递队列（fire-and-forget）。
+	// 非 nil 时 routeAndACK 把 batch 投到此队列立即返回 ACK；nil 表示同步（Durable/Raw sink 或禁用异步）。
+	// worker（sinkWG）消费队列调 sink.OnSignalBatch。连接关闭时 close 队列等 worker 排空。
+	sinkQueue chan sinkTask
+	sinkWG    sync.WaitGroup
+	// durableNotifier 在 sink 实现 AsyncDurableSink 时初始化（initSinkQueue），
+	// 投递时注入 task，sink 持久化后回调发 durable 升级帧。nil 表示 sink 非异步 Durable。
+	durableNotifier core.DurableNotifier
+}
+
+// sinkTask 是 sinkQueue 的投递单元，统一承载普通 EventSink 与 AsyncDurableSink 两路径。
+// routeAndACK 投递、worker 消费；asyncDurable=false 走普通 EventSink（fire-and-forget），
+// true 走 AsyncDurableSink（持久化后回调 notifier 发 durable 升级）。
+type sinkTask struct {
+	agentID      string
+	batch        *core.SignalBatch // 普通 EventSink + AsyncDurableSink 共用
+	asyncDurable bool              // true = AsyncDurableSink 路径
+	// AsyncDurableSink 路径专用：发 durable 升级帧所需的元信息。
+	seq         uint64
+	chunkID     []byte
+	eventsCount int
+	notifier    core.DurableNotifier // 协议层注入，sink 持久化后回调
 }
 
 // getAgentID 返回当前 agentID（并发安全读取，供 processBatch 等读路径使用）。
@@ -181,7 +208,79 @@ func NewCoreHandler(tr Transport, cfg HandlerConfig) *CoreHandler {
 	}
 	h.lastPressure.Store(core.PressureNormal)
 	h.replay.SetMetrics(cfg.Metrics)
+	// 普通 EventSink（非 Durable/Raw）启用异步投递队列：协议层 fire-and-forget，
+	// worker pool 异步调 OnSignalBatch。Durable/Raw sink 仍同步（需 RouteResult）。
+	// SinkQueueSize < 0 显式禁用异步（测试用）。
+	h.initSinkQueue()
 	return h
+}
+
+// initSinkQueue 在 sink 支持异步投递时创建队列 + worker pool。
+// 启用条件：sink 是普通 EventSink（fire-and-forget）或 AsyncDurableSink（持久化后回调升级）。
+// 仅实现 DurableEventSink/RawEventSink 但未实现 AsyncDurableSink 的 sink 走同步路径（需 RouteResult）。
+// SinkQueueSize < 0 显式禁用异步（测试用）。
+func (h *CoreHandler) initSinkQueue() {
+	if h.config.Sink == nil {
+		return
+	}
+	// 判断是否可异步：普通 EventSink（非 Durable）或 AsyncDurableSink（Durable 的可选扩展）。
+	_, isAsyncDurable := h.config.Sink.(core.AsyncDurableSink)
+	_, isDurable := h.config.Sink.(core.DurableEventSink)
+	if isDurable && !isAsyncDurable {
+		return // 同步 Durable/Raw sink：需 RouteResult，不能异步
+	}
+	size := h.config.SinkQueueSize
+	if size == 0 {
+		size = defaultSinkQueueSize
+	}
+	if size < 0 {
+		return // 显式禁用异步
+	}
+	h.sinkQueue = make(chan sinkTask, size)
+	// AsyncDurableSink 路径需要 notifier 发 durable 升级帧。
+	if _, isAsyncDurable := h.config.Sink.(core.AsyncDurableSink); isAsyncDurable {
+		h.durableNotifier = &durableNotifier{handler: h}
+	}
+	workers := defaultSinkWorkers
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	for i := 0; i < workers; i++ {
+		h.sinkWG.Add(1)
+		go h.sinkWorker()
+	}
+}
+
+// sinkWorker 消费 sinkQueue，按 task 类型分发：普通 EventSink 调 OnSignalBatch，
+// AsyncDurableSink 调 OnSignalBatchAsync（持久化后回调 notifier 发 durable 升级）。
+func (h *CoreHandler) sinkWorker() {
+	defer h.sinkWG.Done()
+	for task := range h.sinkQueue {
+		if task.asyncDurable {
+			if asyncSink, ok := h.config.Sink.(core.AsyncDurableSink); ok {
+				asyncSink.OnSignalBatchAsync(context.Background(), task.agentID, task.batch,
+					task.notifier, task.seq, task.chunkID, task.eventsCount)
+			}
+		} else {
+			_ = h.config.Sink.OnSignalBatch(context.Background(), task.agentID, task.batch)
+		}
+	}
+}
+
+// durableNotifier 是协议层提供给 AsyncDurableSink 的回调接口实现。
+// sink 持久化完成后调 NotifyDurable，本实现发 ACK_MODE_DURABLE 升级帧。
+// 幂等保护：已发 durable 的 seq 不重复发（防 sink 误多次回调）。
+type durableNotifier struct {
+	handler *CoreHandler
+	seen    sync.Map // seq → struct{}{}，已发 durable 的去重
+}
+
+func (n *durableNotifier) NotifyDurable(seq uint64, chunkID []byte, eventsCount int) {
+	if _, loaded := n.seen.LoadOrStore(seq, struct{}{}); loaded {
+		return // 已发过 durable，幂等跳过
+	}
+	// durable 升级帧在 background ctx 发（worker goroutine 调，原 routeAndACK ctx 已退出）。
+	n.handler.sendAck(context.Background(), seq, chunkID, eventsCount, corepb.AckMode_ACK_MODE_DURABLE)
 }
 
 // Handle 运行连接生命周期：control loop → READY 后启动 data loop。
@@ -235,6 +334,12 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 		// 超时：仍有 data goroutine 存活，cleanup 不会零化 keys，避免存活的
 		// processBatch 因 keys==nil 跳过 HMAC 校验（安全绕过）。keys 由 GC 回收。
 		slog.Warn("data frame goroutines did not exit within drain timeout; keeping keys to avoid HMAC bypass", "session", string(h.getSessionID()), "timeout", drainTimeout)
+	}
+	// data goroutine 退出后关闭 sink 投递队列，等 worker 排空剩余 task。
+	// sinkQueue nil（Durable/Raw sink 或禁用异步）时跳过。
+	if h.sinkQueue != nil {
+		close(h.sinkQueue)
+		h.sinkWG.Wait()
 	}
 	return err
 }

@@ -124,6 +124,11 @@ type CoreClient struct {
 
 	ackTimeout        time.Duration // max time to wait for ACK (default 5 min)
 	heartbeatInterval time.Duration // PING 发送间隔（从 HELLO_ACK 获取，默认 30s）
+	// useAckLevel 在协商到 durable_ack capability 时置 true（RecvHelloAck 设置）。
+	// true 时 handleAck 对 accepted ACK 仅 MarkAccepted（保留流控 slot，等 durable 释放），
+	// 让 Durable sink 连接的"未持久化=仍 inflight"由窗口强制表达（更安全背压）。
+	// false（纯 EventSink 连接）时 accepted 立即释放 slot（旧行为）。
+	useAckLevel bool
 
 	// lifecycleCtx 驱动所有后台 goroutine，独立于 Connect 调用方 ctx，
 	// 避免 WithTimeout + defer cancel 级联停掉后台 goroutine。

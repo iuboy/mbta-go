@@ -66,6 +66,29 @@ type RawEventSink interface {
 	OnRawBatch(ctx context.Context, agentID string, eventsCount int, batchData []byte) (*RouteResult, error)
 }
 
+// DurableNotifier 由协议层提供，sink 持有。持久化完成后调 NotifyDurable，
+// 协议层据此发 ACK durable 升级帧（先 accepted 后 durable，sink 异步化设计 §3）。
+//
+// sink 实现 AsyncDurableSink 时，协议层在投递时注入本接口；持久化异步完成后回调。
+// 未实现 AsyncDurableSink 的 sink 走同步路径（OnSignalBatchWithResult 直接返回 RouteResult）。
+type DurableNotifier interface {
+	// NotifyDurable 通知某 batch 已持久化。seq/chunkID/eventsCount 来自原 batch，
+	// 协议层据此发 ACK_MODE_DURABLE。多次调用幂等（仅首次发 durable 帧）。
+	NotifyDurable(seq uint64, chunkID []byte, eventsCount int)
+}
+
+// AsyncDurableSink 可选接口：实现此接口的 DurableEventSink 走异步投递路径。
+// 协议层把 batch 投递到 sink queue 立即发 ACK accepted，worker 调 OnSignalBatchAsync；
+// sink 持久化完成后调注入的 notifier.NotifyDurable，协议层发 durable 升级帧。
+//
+// 不实现此接口的 DurableEventSink/RawEventSink 走同步路径（OnSignalBatchWithResult
+// / OnRawBatch 直接返回 RouteResult）。渐进式：老 sink 不受影响，新 sink 享异步。
+type AsyncDurableSink interface {
+	// OnSignalBatchAsync 异步投递 batch。立即返回（不阻塞协议层）；
+	// 持久化完成后调 notifier.NotifyDurable(seq, chunkID, eventsCount)。
+	OnSignalBatchAsync(ctx context.Context, agentID string, batch *SignalBatch, notifier DurableNotifier, seq uint64, chunkID []byte, eventsCount int)
+}
+
 // BatchTraceSink 扩展 EventSink，透传 batch 级 W3C trace 上下文（capability
 // w3c_trace_context，spec §6.2.2）。顺项目「渐进 interface 扩展」范式（EventSink →
 // DurableEventSink → RawEventSink）：不实现的 sink 不受影响，原路由路径不变。
