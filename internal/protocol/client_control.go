@@ -284,7 +284,7 @@ func (c *CoreClient) dispatchRedirect(payload []byte) {
 }
 
 // ackReapInterval 是客户端 RESULT 超时扫描间隔（AckTimeout 的实际驱动——
-// 此前 MarkFailed/ReapExpired 无生产调用方，AckTimeout 是死配置）。
+// 此前 ReapExpired 无生产调用方，AckTimeout 是死配置）。
 const ackReapInterval = 30 * time.Second
 
 // AckReaperLoop 周期扫描超时 slot：标记失败 + 通知回调（level="timeout"）+

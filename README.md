@@ -169,6 +169,7 @@ default:
 | `WithSinkQueue(size, maxB)` | sink 队列条数+字节双限界          |
 | `WithSinkDeadline(d)`       | handler done 超时（合成 released） |
 | `WithMetrics(metrics)`      | 注入指标收集器                    |
+| `WithZstdDict(id, dict)`    | 配置 zstd_dict 静态字典（≤1MB）   |
 | `WithRedirectChecker(fn)`   | HA leader 重定向检查              |
 | `WithOnSession(fn)`         | 会话生命周期回调                  |
 | `WithMaxConcurrentConns(n)` | 并发连接上限                      |

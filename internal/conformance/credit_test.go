@@ -121,9 +121,6 @@ func TestCreditLedger_ReapNoCreditReturn(t *testing.T) {
 	_ = l.Consume(1, 100, "", past)                        // 已过期
 	_ = l.Consume(2, 100, "", time.Now().Add(time.Minute)) // 未过期
 
-	if s := l.MarkFailed(2); s == nil || !s.Failed {
-		t.Error("MarkFailed did not mark slot 2 failed")
-	}
 	reaped := l.ReapExpired(time.Now())
 	if len(reaped) != 1 || reaped[0].Seq != 1 || !reaped[0].Failed {
 		t.Fatalf("reaped = %+v, want only seq=1 marked failed", reaped)

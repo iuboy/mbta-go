@@ -9,7 +9,7 @@ import (
 
 // SignalCodec 是 SignalBatch 的编码/解码契约（core spec §6.3）。
 //
-// 每种 wire Codec（PROTO/CBOR/JSON）实现一个，通过 RegisterCodec 注册到包级注册表。
+// 每种 wire Codec（PROTO/CBOR）实现一个，通过 RegisterCodec 注册到包级注册表。
 // 协议核心（internal/protocol）通过 MarshalSignalBatchCodec / UnmarshalSignalBatchCodec
 // 按 HELLO 协商结果分发，不直接依赖具体 codec 实现——新增 codec 只需 RegisterCodec，
 // 不改动分发逻辑。

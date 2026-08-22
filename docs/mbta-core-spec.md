@@ -725,7 +725,7 @@ Outcome{ Level, Code, RetryAfter }         // handler 经 done 回报
 
 ---
 
-### 11.5 部署模型与投递语义
+### 11.6 部署模型与投递语义
 
 **单领导处理（推荐）**：HA 部署经 REDIRECT 机制收敛到单领导处理——全部 agent
 连接领导副本，epoch 分配与去重状态集中在单进程内，语义完备。follower 副本仅

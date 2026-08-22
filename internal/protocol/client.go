@@ -45,12 +45,10 @@ type CoreClient struct {
 	seq     *core.SeqGenerator
 	ledger  atomic.Pointer[core.CreditLedger]
 	keys    atomic.Pointer[core.SessionKeys]
-	negCaps atomic.Value // []string
-	codec   atomic.Value // corepb.Codec
-	limits  atomic.Value // *corepb.Limits
-	ackMode atomic.Int32
-
-	zdict atomic.Pointer[core.ZstdDictCodec] // zstd_dict：连接持有的字典 codec（DICT 帧后非 nil）
+	negCaps atomic.Value                       // []string
+	codec   atomic.Value                       // corepb.Codec
+	limits  atomic.Value                       // *corepb.Limits
+	zdict   atomic.Pointer[core.ZstdDictCodec] // zstd_dict：连接持有的字典 codec（DICT 帧后非 nil）
 
 	resultHandler    atomic.Pointer[func(seq uint64, level string, code uint32, correlation string)]
 	redirectHandler  atomic.Pointer[func(ctx context.Context, payload []byte)]
@@ -180,7 +178,6 @@ func (c *CoreClient) Handshake(ctx context.Context) error {
 		c.negCaps.Store(ack.GetSelectedCapabilities())
 		c.codec.Store(core.CodecFor(ack.GetSelectedCapabilities()))
 		c.limits.Store(ack.GetLimits())
-		c.ackMode.Store(int32(ack.GetAckMode()))
 		c.ledger.Store(core.NewCreditLedger(
 			int64(ack.GetCredits().GetBatches()), int64(ack.GetCredits().GetBytes()), 0, 0))
 		c.expiry.Store(ack.GetExpiryUnix())
@@ -508,9 +505,6 @@ func (c *CoreClient) SessionID() string {
 	return ""
 }
 
-// AckMode 返回服务端声明的确认模式。
-func (c *CoreClient) AckMode() corepb.AckMode { return corepb.AckMode(c.ackMode.Load()) }
-
 // SelectedCapabilities 返回协商结果。
 func (c *CoreClient) SelectedCapabilities() []string {
 	if v := c.negCaps.Load(); v != nil {
@@ -521,14 +515,6 @@ func (c *CoreClient) SelectedCapabilities() []string {
 
 // DictActive 报告 zstd 字典是否已到达并激活（DICT 帧处理后为 true）。
 func (c *CoreClient) DictActive() bool { return c.zdict.Load() != nil }
-
-// DictID 返回最近一次 DICT 帧的 dict_id（未收到为 0）。
-func (c *CoreClient) DictID() uint32 {
-	if d := c.zdict.Load(); d != nil {
-		return d.ID
-	}
-	return 0
-}
 
 func hmacEqual(a, b []byte) bool {
 	if len(a) != len(b) {

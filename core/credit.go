@@ -187,17 +187,6 @@ func (l *CreditLedger) Rollback(seq uint64) *OutSlot {
 	return s
 }
 
-// MarkFailed 客户端 reaper 标记超时（仅通知语义；不回补 credit）。
-func (l *CreditLedger) MarkFailed(seq uint64) *OutSlot {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if s, ok := l.slots[seq]; ok {
-		s.Failed = true
-		return s
-	}
-	return nil
-}
-
 // ReapExpired 回收 deadline 已过的 slot（标记失败并移出 pending；不回补 credit）。
 func (l *CreditLedger) ReapExpired(now time.Time) []*OutSlot {
 	l.mu.Lock()
@@ -349,9 +338,6 @@ type SettleGrant struct {
 	done     bool // Settle/Release 单次生效
 	accepted bool // Accept（中间态）单次生效
 }
-
-// Seq 返回占位 seq。
-func (g *SettleGrant) Seq() uint64 { return g.seq }
 
 // Consume 扣减额度并登记帧字节数。额度不足返回错误并自动释放占位
 // （调用方应 ABORT：客户端在无额度下发送属协议违规）。
@@ -539,17 +525,6 @@ func (m *CreditManager) OldestBefore(cutoff time.Time) (uint64, InflightSlot, bo
 		return 0, InflightSlot{}, false
 	}
 	return bestSeq, *best, true
-}
-
-// LookupSlot 返回在途占位（幂等回执与 done 回调用）。
-func (m *CreditManager) LookupSlot(seq uint64) (InflightSlot, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	s, ok := m.seen[seq]
-	if !ok {
-		return InflightSlot{}, false
-	}
-	return *s, true
 }
 
 func (m *CreditManager) releaseLocked(seq uint64) {

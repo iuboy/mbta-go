@@ -91,9 +91,6 @@ linters:
           - errcheck
           - revive
         path: examples/
-      - linters:
-          - goconst
-        path: core/capability\.go
     paths:
       - third_party$
       - builtin$

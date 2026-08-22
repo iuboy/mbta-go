@@ -1,4 +1,4 @@
-.PHONY: test lint vet cover bench bench-int fmt check clean proto proto-lint proto-breaking gen-certs test-int
+.PHONY: test test-all test-int lint vet cover bench bench-int fmt tidy check clean proto proto-lint proto-breaking gen-certs help
 
 # Go parameters
 GOCMD  := go

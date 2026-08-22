@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### chore: 无用代码与文档清理（第七轮：r3 收尾后无引用面清扫）
+
+- **死代码删除**（全部经 GitNexus impact + 全仓 grep 验证零引用）：`CreditLedger.MarkFailed`（生产 reaper 用 `ReapExpired`，仅测试引用的死 API，连同 conformance 断言一并移除）、`CreditManager.LookupSlot`、`SettleGrant.Seq`、`CoreClient.AckMode`（连同 write-only 的 `ackMode` 字段与握手 Store）、`CoreClient.DictID`、`SessionEvent.Hostname/InstanceID/AgentVersion/OS`（r3 HELLO 无对应 wire 字段、handler 从未填充，扩展元数据经 HELLO.meta 自由携带）。
+- **过时注释修正**：v1/quic_transport.go 旧帧名（ACK/NACK/WINDOW/THROTTLE/AUTH_OK → r3 RESULT/CREDIT/PONG/DICT/CLOSE/ABORT）；AUTH_OK 术语（→ HELLO_ACK）；core/codec.go 已删除的 JSON codec 提及；client_control.go 对已删 MarkFailed 的提及。
+- **文档修正**：docs/performance-optimization.md 全量重写（原为 r3 前实现笔记，引用已删除的 delivery.go/ack_tracker.go/flow.go/RawEventSink 接口族/AUTH_OK 密钥下发/0-RTT 等大量失效内容）；docs/README.md「已知实现差距」三条已关闭项移除（100ms 定时攒批/客户端压缩启发/Draining 显式入口均已实现）；mbta-core-spec.md 重复的 §11.5 编号修正（部署模型 → §11.6）；v2-design.md 悬空引用 §4.3/§4.4 修正；根 README 服务端选项表补 `WithZstdDict`；CHANGELOG §11.5 引用同步；.golangci.yml 移除指向不存在的 core/capability.go 的 goconst 豁免；Makefile `.PHONY` 补全（test-all/tidy/help）；AGENTS.md/CLAUDE.md 索引计数刷新。
+
 ### 协议 r3 重设计（破坏性，直接在 v1 代码库原地重构，不引入新版本号）
 
 按 docs/v2-design.md（r3 实施版）执行的全量协议重写，**无向后兼容**（无生产部署）：
@@ -65,7 +71,7 @@
 - **ntls TLSMode→profile 推导**：facade `initNTLSServer` 按传输模式推导（mbta-tls/1→intl、mbta-ntls/1→gm），消除"TLS1.3 通道上跑 SM2/SM4 应用层"的静默错配。
 - **zstd 字典从进程单例改为键控注册表**：`core.ZstdDictCodec`（池化 encoder + 共享 decoder），`RegisterZstdDict` 按 (dict_id, 内容哈希) 幂等注册（LRU 上界 8 防字典洪水）；`SealParams.Dict`/`OpenEnvelope` 显式传 codec——共享的是池（性能），隔离的是选择权（正确性）；同进程多服务端/多客户端配不同字典不再互相覆盖。
 - **CREDIT 100ms 定时攒批**：服务端 reaper 增加 flush ticker，任何 >0 回收量按时发放——消除低吞吐连接的额度拖死与"服务端阈值>客户端钳制"饿死组合。
-- **多副本 at-least-once 边界的应用层闭环**：新增 `core.CorrelationDeduper`（进程级 LRU + 可选 TTL）；spec §11.5"部署模型与投递语义"成文（单领导处理推荐 / active-active 边界 / 重启语义）。
+- **多副本 at-least-once 边界的应用层闭环**：新增 `core.CorrelationDeduper`（进程级 LRU + 可选 TTL）；spec §11.6"部署模型与投递语义"成文（单领导处理推荐 / active-active 边界 / 重启语义）。
 - zstd encoder 池化（4KB seal 374µs/13.5MB allocs → 微秒级）；v1.Dial UDP socket 泄漏修复（Conn 持有引用、全部关闭路径统一 `Conn.Close`）。
 - 回归测试 +8：帧自定义上限/TTL 拒绝/定时攒批/TLSMode 推导（gm/intl）/v1 恒 intl/CorrelationDeduper 4 项。
 

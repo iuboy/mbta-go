@@ -17,7 +17,7 @@ import (
 // 模型（core spec §10 / MultiplexQuicMultiStream）：
 //   - 第一个 AcceptStream = control stream（构造时 accept）；
 //   - 后续 AcceptStream = data streams，后台 goroutine 聚合其帧到 RecvDataFrame；
-//   - server 发送均走 control stream（ACK/NACK/WINDOW/THROTTLE/PONG/AUTH_OK 等）；
+//   - server 发送均走 control stream（RESULT/CREDIT/PONG/DICT/CLOSE/ABORT 等）；
 //   - DATAGRAM 通道走 QUIC DATAGRAM（需 quic.Config.EnableDatagrams=true）。
 type quicTransport struct {
 	conn       *Conn

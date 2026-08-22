@@ -53,7 +53,8 @@
 
 ### 已知实现差距（相对设计记录，见 core spec 对照）
 
-- CREDIT 攒批仅阈值触发（初始窗/4），100ms 定时器未接线；
-- DGRAM 字节速率限桶默认未启用（并发槽 64 已生效）；
-- 客户端发送路径暂固定 COMPRESSION_NONE（接收端四算法全支持）；
-- 服务端 Draining 态无显式入口（收尾语义经 released(server_draining) 路径达成）。
+- DGRAM 字节速率限桶默认未启用（`Policy.DatagramRateBytes` 默认 0=不限；并发槽 64 已生效）。
+
+其余差距已在 r3 收尾中关闭：CREDIT 攒批有 100ms 懒定时 flush（`maybeScheduleFlush`）、
+客户端发送路径按尺寸启发选择 ZSTD/ZSTD_DICT（`pickCompression`）、服务端 CLOSE 显式进入
+Draining 态（`handleClose` → `ServerStateDraining`）。

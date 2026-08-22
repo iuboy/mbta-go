@@ -23,7 +23,7 @@ type tcpTransport struct {
 	conn     net.Conn
 	maxFrame uint64        // 帧上限（policy.MaxFrameBytes；0=默认 16MB）
 	writeSem chan struct{} // 容量 1 的信号量，替代 sync.Mutex 支持 ctx 取消
-	authed   atomic.Bool   // AUTH_OK 后置位（protocol.AuthMarker）：读 deadline 从 pre-auth 短超时切到空闲超时
+	authed   atomic.Bool   // HELLO_ACK 后置位（protocol.AuthMarker）：读 deadline 从 pre-auth 短超时切到空闲超时
 
 	controlCh chan core.Frame // control 帧（type 高位=0）
 	dataCh    chan core.Frame // data 帧（BATCH/DATAGRAM）
@@ -99,7 +99,7 @@ func (t *tcpTransport) readLoop() {
 	}
 }
 
-// MarkAuthed 实现 protocol.AuthMarker：AUTH_OK 后由协议层调用，切换读超时档位。
+// MarkAuthed 实现 protocol.AuthMarker：HELLO_ACK 后由协议层调用，切换读超时档位。
 func (t *tcpTransport) MarkAuthed() { t.authed.Store(true) }
 
 // RecvControlFrame 从 control 逻辑通道读。

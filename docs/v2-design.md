@@ -1,7 +1,7 @@
 # MBTA 协议重设计（r3 实施版）
 
 > 状态：**实施规格（r3）**。r2 经第二轮深度审查（实施完备性 + 本库可行性两路）修订；**实施方式变更为：直接在 v1 代码库原地破坏性重构，不引入新版本号**（ALPN 保持 `mbta/1`/`mbta-ntls/1`；无生产部署故无兼容负担）。
-> r3 裁决记录见 §18；密钥日程物料与依赖验证结论见 §4.4。
+> r3 裁决记录与密钥日程依赖验证结论见 §18。
 
 ## 18. r3 实施裁决（闭合 r2 审查发现）
 
@@ -341,7 +341,7 @@ func (s *Server) OnBatch(opts SinkOptions, handler func(ctx context.Context, ev 
 |---|---|
 | frame.go magic/version/channel | 删除域；2B 头 + varint；接收 MUST 清单（§2.1） |
 | envelope.go 密钥下发/明文模式 | ECDH 派生；明文模式删除；dual_integrity 可选 |
-| auth.go challenge/票据 master | token_proof + ResolveToken；票据机制整体后移为演进项（§4.3） |
+| auth.go challenge/票据 master | token_proof + ResolveToken；票据机制整体后移为演进项（§15.4） |
 | ack_tracker.go ring/span | credit 账本（模型 B）+ 终态环 |
 | delivery.go ReplayCache | inflight 集合窗 + 终态环 K |
 | handler_batch.go sink 分支 | OnBatch 单路径 + §11.1 契约 |
