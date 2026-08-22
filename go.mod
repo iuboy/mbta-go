@@ -3,6 +3,7 @@ module github.com/iuboy/mbta-go
 go 1.26.5
 
 require (
+	github.com/emmansun/gmsm v0.44.1
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/iuboy/pollux-go v0.4.4
 	github.com/klauspost/compress v1.19.2
@@ -20,7 +21,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/emmansun/gmsm v0.44.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
