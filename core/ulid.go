@@ -19,6 +19,13 @@ import (
 // [16]byte 可比、可作 map key，满足 ReplayCache / spool 的键需求。
 type ChunkID [16]byte
 
+// chunkEntropy 是进程级共享的单调熵源：跨调用保持 ms/entropy 状态，同一毫秒内
+// 生成的 ULID 严格递增（毫秒内有序对 spool 文件名排序等场景有意义）。
+// LockedMonotonicReader 保证并发安全。
+// 不能在 NewChunkID 内每次新建 Monotonic 实例——新实例无历史状态，毫秒内单调性
+// 完全失效，且每次调用额外分配一个 4KB bufio 缓冲（热路径：每个 batch 一次）。
+var chunkEntropy = &ulid.LockedMonotonicReader{MonotonicReader: ulid.Monotonic(rand.Reader, 0)}
+
 // NewChunkID 生成一个新的 ULID ChunkID（并发安全）。
 // MustNew panic（熵源失败/单调溢出）时降级为随机 ChunkID，保证进程不崩溃。
 func NewChunkID() ChunkID {
@@ -44,7 +51,7 @@ func NewChunkID() ChunkID {
 				}
 			}
 		}()
-		u = ulid.MustNew(ulid.Timestamp(time.Now()), &ulid.LockedMonotonicReader{MonotonicReader: ulid.Monotonic(rand.Reader, 0)})
+		u = ulid.MustNew(ulid.Timestamp(time.Now()), chunkEntropy)
 	}()
 	return ChunkID(u)
 }

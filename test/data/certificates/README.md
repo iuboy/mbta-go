@@ -27,7 +27,7 @@ import (
 )
 
 // Load server certificates
-cert, err := tls.LoadX509KeyPair("testdata/certificates/server.crt", "testdata/certificates/server.key")
+cert, err := tls.LoadX509KeyPair("test/data/certificates/server.crt", "test/data/certificates/server.key")
 if err != nil {
     t.Fatal(err)
 }
@@ -35,7 +35,7 @@ if err != nil {
 // Create TLS config
 tlsConfig := &tls.Config{
     Certificates: []tls.Certificate{cert},
-    ClientCA:    loadCA("testdata/certificates/ca.crt"),
+    ClientCA:    loadCA("test/data/certificates/ca.crt"),
 }
 ```
 

@@ -28,13 +28,13 @@ const MaxAgentIDLen = 256
 // （syslog/ELK 行伪造），因此使用 hasStrictControlChars 而非 hasControlChars。
 func validateAgentID(agentID string) error {
 	if len(agentID) == 0 {
-		return NewError(ErrCodeValidation, "agent_id must not be empty")
+		return NewError(ErrCodeBatchInvalid, "agent_id must not be empty")
 	}
 	if len(agentID) > MaxAgentIDLen {
-		return NewError(ErrCodeValidation, fmt.Sprintf("agent_id exceeds maximum length %d", MaxAgentIDLen))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("agent_id exceeds maximum length %d", MaxAgentIDLen))
 	}
 	if hasStrictControlChars(agentID) {
-		return NewError(ErrCodeValidation, "agent_id contains control characters")
+		return NewError(ErrCodeBatchInvalid, "agent_id contains control characters")
 	}
 	return nil
 }
@@ -67,10 +67,10 @@ func hasStrictControlChars(s string) bool {
 // 返回的 error 已包含字段名，便于定位。
 func validateTextField(name, val string) error {
 	if len(val) > MaxSignalFieldLen {
-		return NewError(ErrCodeValidation, fmt.Sprintf("%s exceeds maximum length %d", name, MaxSignalFieldLen))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%s exceeds maximum length %d", name, MaxSignalFieldLen))
 	}
 	if hasControlChars(val) {
-		return NewError(ErrCodeValidation, name+" contains control characters")
+		return NewError(ErrCodeBatchInvalid, name+" contains control characters")
 	}
 	return nil
 }
@@ -88,7 +88,7 @@ func validateHexID(name, val string, wantBytes int) error {
 	}
 	wantHexLen := wantBytes * 2
 	if len(val) != wantHexLen {
-		return NewError(ErrCodeValidation, fmt.Sprintf("%s must be %d lowercase hex chars (%d bytes), got len %d",
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%s must be %d lowercase hex chars (%d bytes), got len %d",
 			name, wantHexLen, wantBytes, len(val)))
 	}
 	// 必须是小写 hex（解码同时校验字符集；hex.DecodeString 接受大小写，但 W3C
@@ -96,12 +96,12 @@ func validateHexID(name, val string, wantBytes int) error {
 	for _, r := range val {
 		isLowerHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')
 		if !isLowerHex {
-			return NewError(ErrCodeValidation, fmt.Sprintf("%s must be lowercase hex, contains invalid char %q", name, r))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%s must be lowercase hex, contains invalid char %q", name, r))
 		}
 	}
 	decoded := make([]byte, wantBytes)
 	if _, err := hex.Decode(decoded, []byte(val)); err != nil {
-		return NewError(ErrCodeValidation, fmt.Sprintf("%s is not valid hex: %v", name, err))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%s is not valid hex: %v", name, err))
 	}
 	// 全零值非法（对齐 OTel）。
 	allZero := true
@@ -112,7 +112,7 @@ func validateHexID(name, val string, wantBytes int) error {
 		}
 	}
 	if allZero {
-		return NewError(ErrCodeValidation, name+" must not be all zeros")
+		return NewError(ErrCodeBatchInvalid, name+" must not be all zeros")
 	}
 	return nil
 }
@@ -121,10 +121,10 @@ func validateHexID(name, val string, wantBytes int) error {
 // W3C Trace Context 规范（MaxTraceStateFieldLen=256），且不含控制字符。
 func validateTraceStateEntryField(name, val string) error {
 	if len(val) > MaxTraceStateFieldLen {
-		return NewError(ErrCodeValidation, fmt.Sprintf("%s exceeds maximum length %d", name, MaxTraceStateFieldLen))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%s exceeds maximum length %d", name, MaxTraceStateFieldLen))
 	}
 	if hasControlChars(val) {
-		return NewError(ErrCodeValidation, name+" contains control characters")
+		return NewError(ErrCodeBatchInvalid, name+" contains control characters")
 	}
 	return nil
 }
@@ -134,11 +134,11 @@ func validateTraceStateEntryField(name, val string) error {
 // 控制字符。多余成员不静默截断——返回错误让调用方显式收敛，避免无声丢语义。
 func validateTraceState(entries []*TraceStateEntry) error {
 	if len(entries) > 32 {
-		return NewError(ErrCodeValidation, fmt.Sprintf("trace_state exceeds 32 entries (got %d)", len(entries)))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("trace_state exceeds 32 entries (got %d)", len(entries)))
 	}
 	for i, e := range entries {
 		if e == nil || e.Key == "" {
-			return NewError(ErrCodeValidation, fmt.Sprintf("trace_state[%d]: empty key", i))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("trace_state[%d]: empty key", i))
 		}
 		if err := validateTraceStateEntryField(fmt.Sprintf("trace_state[%d].key", i), e.Key); err != nil {
 			return err
@@ -166,10 +166,10 @@ func ValidateBatchTraceContext(tc *TraceContext) error {
 		fieldTCParent = "trace_context.parent_span_id"
 	)
 	if tc.TraceId == "" {
-		return NewError(ErrCodeValidation, fieldTCID+" must not be empty")
+		return NewError(ErrCodeBatchInvalid, fieldTCID+" must not be empty")
 	}
 	if tc.SpanId == "" {
-		return NewError(ErrCodeValidation, fieldTCSpan+" must not be empty")
+		return NewError(ErrCodeBatchInvalid, fieldTCSpan+" must not be empty")
 	}
 	if err := validateHexID(fieldTCID, tc.TraceId, 16); err != nil {
 		return err
@@ -182,7 +182,7 @@ func ValidateBatchTraceContext(tc *TraceContext) error {
 	}
 	// trace-flags 是 W3C traceparent 的 1 字节字段（仅低 8 位有效）。
 	if tc.TraceFlags > 0xff {
-		return NewError(ErrCodeValidation, fmt.Sprintf("trace_context.trace_flags exceeds 8-bit W3C range (0x%x)", tc.TraceFlags))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("trace_context.trace_flags exceeds 8-bit W3C range (0x%x)", tc.TraceFlags))
 	}
 	if err := validateTraceState(tc.TraceState); err != nil {
 		return err

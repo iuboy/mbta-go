@@ -1,5 +1,5 @@
 // Package main demonstrates a minimal MBTA server that accepts agent connections
-// and routes events through a custom EventSink.
+// and delivers event batches to a registered BatchHandler.
 package main
 
 import (
@@ -14,28 +14,25 @@ import (
 	v1 "github.com/iuboy/mbta-go/v1"
 )
 
-// demoSink is a simple EventSink implementation that prints received signals to the console.
-type demoSink struct{}
-
-func (d *demoSink) OnSignalBatch(_ context.Context, agentID string, batch *core.SignalBatch) error {
-	for _, sig := range batch.Signals {
-		fmt.Printf("[agent=%s] signal_type=%s body=%v\n", agentID, sig.SignalType, sig.Body)
+// demoHandler 打印收到的 signal 到控制台（core.BatchHandler 注册式投递面）。
+// accepted-only 模式下 done 无 wire 效果，但仍按契约调用以保持幂等语义。
+func demoHandler(_ context.Context, ev core.BatchEvent, done func(core.Outcome)) {
+	if ev.Decoded != nil {
+		for _, sig := range ev.Decoded.Signals {
+			fmt.Printf("[agent=%s] signal_type=%s body=%v\n", ev.Agent, sig.SignalType, sig.Body)
+		}
 	}
-	return nil
-}
-
-func (d *demoSink) OnPressure(_ string) core.PressureState {
-	return core.PressureNormal
+	done(core.Outcome{Level: core.OutcomeAccepted})
 }
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	sink := &demoSink{}
-
 	server, err := mbtago.NewServer(
-		mbtago.WithEventSink(sink),
+		// SinkOptions{} 默认逐事件解码供给（Decoded 非 nil）；需要原始字节供给时
+		// 置 Raw=true，需要持久化确认时置 Durable=true（配合 policy ack_mode=durable）。
+		mbtago.WithSink(core.SinkOptions{}, demoHandler),
 		mbtago.WithAuth(core.NewStaticTokenValidator(map[string]string{
 			"my-secret-token": "example-agent",
 		})),

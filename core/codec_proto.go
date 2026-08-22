@@ -27,7 +27,7 @@ func (protoCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 func (protoCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	var pb corepb.SignalBatch
 	if err := proto.Unmarshal(data, &pb); err != nil {
-		return nil, WrapError(ErrCodeValidation, "unmarshal signal batch", err)
+		return nil, WrapError(ErrCodeBatchInvalid, "unmarshal signal batch", err)
 	}
 	// signal_type 空检查由调用方的 sb.Validate() 统一负责（handler_batch.go:258 →
 	// validateSignalType），codec 层不重复（cbor/json codec 也无此检查，保持一致）。

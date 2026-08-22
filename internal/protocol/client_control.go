@@ -1,22 +1,20 @@
 package protocol
 
+// client_control.go：客户端 control loop（RESULT/CREDIT/PING/PONG/CLOSE/REDIRECT/ABORT）
+// + 结果回调 worker + 心跳（仅 TCP binding）。
+
 import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
-	corepb "github.com/iuboy/mbta-go/corepb"
-
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
-// --- control 帧处理（readControlLoop / handleAck / handleNack / handleWindow / handleThrottle / handlePing）---
-// 这些方法原在 v1/control.go 与 ntls/control.go 中重复。PONG 写经 c.tr.WriteFrame。
-
-// ReadControlLoop 读 control 帧并分发。由 StartLifecycle 启动为后台 goroutine。
-// 注意：此方法作为默认 readControlFn，binding 通过 SetReadControlLoop 注入时
-// 可包装此方法（当前 binding 直接使用此默认实现）。
+// ReadControlLoop 读 control 帧并分发（StartLifecycle 启动为后台 goroutine）。
 func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 	for {
 		select {
@@ -24,210 +22,297 @@ func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 			return
 		default:
 		}
-
 		f, err := c.tr.ReadFrame(ctx)
 		if err != nil {
-			// 区分临时错误（EAGAIN/EINTR 等可恢复）与致命错误（连接关闭/EOF）。
-			// 临时错误继续循环，仅致命错误退出，避免网络抖动不必要地终止控制帧处理。
 			if isTemporaryError(err) && ctx.Err() == nil {
-				slog.Debug("control loop temporary read error, continuing", "error", err)
 				continue
 			}
 			if ctx.Err() == nil {
-				slog.Warn("control loop read error, exiting", "error", err)
+				slog.Warn("control loop read error", "error", err)
+				c.fatalTeardown("read error")
 			}
 			return
 		}
-
 		switch f.Header.Type {
-		case core.TypeAck:
-			c.handleAck(f.Payload)
-		case core.TypeNack:
-			c.handleNack(f.Payload)
-		case core.TypePartialAck:
-			// future
-		case core.TypeWindow:
-			c.handleWindow(f.Payload)
-		case core.TypeThrottle:
-			c.handleThrottle(f.Payload)
+		case core.TypeResult:
+			c.handleResult(f.Payload)
+		case core.TypeCredit:
+			c.handleCredit(f.Payload)
 		case core.TypeClose:
 			slog.Info("server sent close")
+			c.fatalTeardown("server close")
+			return
+		case core.TypeAbort:
+			var a core.AbortMsg
+			if err := core.Decode(f.Payload, &a); err == nil {
+				slog.Warn("server aborted", "code", core.CodeName(a.GetCode()), "detail", a.GetDetail())
+			}
+			c.fatalTeardown("server abort")
 			return
 		case core.TypePing:
-			c.handlePing(f.Payload)
-		case core.TypeError:
-			var errMsg core.ErrorMessage
-			if err := core.Decode(f.Payload, &errMsg); err != nil {
-				slog.Debug("invalid error payload", "error", err)
-			} else {
-				// MatchWireCode 把对端 wire 码反查为 ErrorCode，日志携带大类 Num 便于过滤；
-				// 未注册码回退 ErrCodeUnknown（不影响 fatal 判定）。
-				ec := core.MatchWireCode(errMsg.GetCode())
-				slog.Warn("server error", "code", ec.Code, "num", ec.Num, "reason", core.SanitizeForLog(errMsg.GetReason()), "fatal", errMsg.GetFatal())
-				if errMsg.GetFatal() {
-					return
-				}
-			}
+			c.handlePing(ctx, f.Payload)
+		case core.TypePong:
+			// TCP 心跳应答：忽略（保活由发送侧判定）
 		case core.TypeRedirect:
 			c.dispatchRedirect(f.Payload)
+		case core.TypeDict:
+			c.handleDict(f.Payload)
+		case core.TypeHello, core.TypeHelloAck, core.TypeHelloNak:
+			slog.Debug("handshake frame after ready; ignoring", "type", f.Header.Type)
+		default:
+			slog.Debug("unknown control type; skipping", "type", f.Header.Type)
 		}
 	}
 }
 
-// handleAck 处理 ACK：释放 tracker slot（seq+chunkID 校验），观测 latency，回调。
-//
-// ACK 升级机制（sink 异步化设计 §2.3）：
-//   - useAckLevel=false（纯 EventSink 连接）：accepted/durable 都立即 Release slot（旧行为）。
-//   - useAckLevel=true（Durable sink 连接）：accepted 仅 MarkAccepted（slot 保留），
-//     durable 才 Release。这让"未持久化=仍 inflight"由窗口强制表达。
-func (c *CoreClient) handleAck(payload []byte) {
-	var ack core.AckMessage
-	if err := core.Decode(payload, &ack); err != nil {
-		slog.Debug("invalid ack payload", "error", err)
+// handleResult 处理 RESULT：slot 终态 + 回调 + drain 唤醒。
+func (c *CoreClient) handleResult(payload []byte) {
+	var r core.Result
+	if err := core.Decode(payload, &r); err != nil {
+		slog.Debug("invalid result payload", "error", err)
 		return
 	}
-
-	chunkID, valid := chunkIDFromWire(ack.GetChunkId())
-	if !valid {
-		// chunk_id 非 16 字节 ULID：服务端返回了无法解析的 chunk_id，tracker 无法定位 slot，
-		// 记录告警便于定位（不调用 Release，计数器不变）。
-		slog.Warn("ack chunk_id not valid ULID, cannot match pending batch", "len", len(ack.GetChunkId()))
+	if err := core.ValidateResultLevel(r.GetLevel()); err != nil {
+		slog.Debug("invalid result level", "level", r.GetLevel())
 		return
 	}
+	l := c.ledger.Load()
+	if l == nil {
+		return
+	}
+	l.Terminal(r.GetRefSeq()) // RESULT 不隐含返还 credit（模型 B：返还经 CREDIT）
+	c.notifyDrainIfEmpty()
+	c.dispatchResult(resultNotify{
+		seq: r.GetRefSeq(), level: r.GetLevel().String(), code: r.GetCode(), correlation: r.GetCorrelation(),
+	})
+	if r.GetLevel() == corepb.ResultLevel_RESULT_LEVEL_REJECTED ||
+		r.GetLevel() == corepb.ResultLevel_RESULT_LEVEL_RELEASED {
+		c.metrics.SinkFailures().Inc()
+	}
+}
 
-	// 分层流控：useAckLevel=true 时 accepted 不释放 slot（等 durable）；其余情况 Release。
-	released := false
-	var slot core.AckSlot
-	if c.useAckLevel && ack.GetAckMode() == corepb.AckMode_ACK_MODE_ACCEPTED {
-		c.tracker.MarkAccepted(ack.GetSeq(), chunkID)
-	} else {
-		// Release 用 ACK 帧自带的 seq 取模定位 slot，chunkID 二次校验。
-		// 三路并发 claim（ack/nack/reaper）中首个成功者清空 slot.seq，后续见 seq==0 失败。
-		slot, released = c.tracker.Release(ack.GetSeq(), chunkID)
-		if released {
-			c.metrics.BatchLatency().Observe(time.Since(slot.SentAt).Seconds())
+// handleCredit 处理 CREDIT 增量。校验规则（r3 §6.3）：
+// 双零 delta 忽略；任一维为 0 且另一维 >0 = 协议违规（功能性冻结）→ ABORT；
+// 负值/回绕/超钳制由账本钳制消化（非致命）。
+func (c *CoreClient) handleCredit(payload []byte) {
+	var cr core.Credit
+	if err := core.Decode(payload, &cr); err != nil {
+		slog.Debug("invalid credit payload", "error", err)
+		return
+	}
+	if cr.GetBatches() == 0 || cr.GetBytes() == 0 {
+		slog.Warn("invalid CREDIT (single-zero dimension); aborting",
+			"batches", cr.GetBatches(), "bytes", cr.GetBytes())
+		c.fatalTeardown("credit protocol violation")
+		return
+	}
+	l := c.ledger.Load()
+	if l == nil {
+		return
+	}
+	l.OnCredit(int64(cr.GetBatches()), int64(cr.GetBytes()))
+}
+
+// dispatchResult 入队结果回调（队列满丢弃 + warn，不阻塞 control loop）。
+func (c *CoreClient) dispatchResult(n resultNotify) {
+	if c.ackQueue == nil {
+		return
+	}
+	select {
+	case c.ackQueue <- n:
+	default:
+		slog.Warn("result callback queue full, dropping", "seq", n.seq)
+	}
+}
+
+// runResultWorker 串行执行结果回调（保序；panic recover）。
+func (c *CoreClient) runResultWorker(ctx context.Context) {
+	invoke := func(n resultNotify) {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Warn("result handler panicked", "seq", n.seq, "panic", r)
+			}
+		}()
+		if p := c.resultHandler.Load(); p != nil {
+			(*p)(n.seq, n.level, n.code, n.correlation)
 		}
 	}
-
-	chunkIDText := chunkID.String()
-	c.dispatchACK(chunkIDText, ackModeString(ack.GetAckMode()))
-	c.notifyDrainIfEmpty()
-
-	slog.Debug("ack received", "seq", ack.GetSeq(), "chunk", chunkIDText, "count", ack.GetCount(), "mode", ackModeString(ack.GetAckMode()))
+	for {
+		select {
+		case <-ctx.Done():
+			deadline := time.NewTimer(5 * time.Second)
+			defer deadline.Stop()
+		drain:
+			for {
+				select {
+				case n := <-c.ackQueue:
+					invoke(n)
+				case <-deadline.C:
+					if q := len(c.ackQueue); q > 0 {
+						slog.Warn("result worker drain timed out", "pending", q)
+					}
+					break drain
+				default:
+					break drain
+				}
+			}
+			return
+		case n := <-c.ackQueue:
+			invoke(n)
+		}
+	}
 }
 
-// handleNack 处理 NACK：释放 tracker slot（seq+chunkID 校验），回调。
-func (c *CoreClient) handleNack(payload []byte) {
-	var nack core.NackMessage
-	if err := core.Decode(payload, &nack); err != nil {
-		slog.Debug("invalid nack payload", "error", err)
-		return
+// fatalTeardown 控制读循环致命退出后的会话收敛（僵尸会话防护）：
+// 取消 lifecycle、退回 Idle（非 Ready 状态可重连语义）、清空账本、关闭连接。
+// 不消耗 closeOnce——用户随后的 Close 仍执行完整清理（幂等）。
+func (c *CoreClient) fatalTeardown(cause string) {
+	c.closed.Store(true) // 与 close 共享终态语义（IsClosed 立即真；StartLifecycle 被拒）
+	c.teardownPhase(cause)
+	if c.tr != nil {
+		if err := c.tr.CloseConn(); err != nil {
+			slog.Debug("fatal teardown close conn", "cause", cause, "error", err)
+		}
 	}
-
-	chunkID, valid := chunkIDFromWire(nack.GetChunkId())
-	if !valid {
-		slog.Warn("nack chunk_id not valid ULID, cannot match pending batch", "len", len(nack.GetChunkId()))
-		return
-	}
-	// NACK 同样释放 slot（不计 latency：被拒 batch 的 latency 无意义）。
-	c.tracker.Release(nack.GetSeq(), chunkID)
-
-	chunkIDText := chunkID.String()
-	c.dispatchACK(chunkIDText, "nack")
-	c.notifyDrainIfEmpty()
-
-	slog.Warn("nack received", "seq", nack.GetSeq(), "code", nack.GetCode(), "reason", core.SanitizeForLog(nack.GetReason()), "retryable", nack.GetRetryable())
+	slog.Info("session torn down", "cause", cause, "session", c.SessionID())
 }
 
-func (c *CoreClient) handleWindow(payload []byte) {
-	var win core.WindowMessage
-	if err := core.Decode(payload, &win); err != nil {
-		slog.Debug("invalid window payload", "error", err)
+// handleDict 处理 DICT 帧（zstd_dict 能力；服务端在 HELLO_ACK 后立即下发）：
+// 注册字典到 core 进程级单例（encoder pool / decoder 重建）并标记可用——
+// 此后 SendBatch 对 > 512B 的 batch 选用 COMPRESSION_ZSTD_DICT。
+// 后续 DICT 帧（字典轮换为演进项）按"最后写入者生效"覆盖。
+func (c *CoreClient) handleDict(payload []byte) {
+	// 协商校验：未协商 zstd_dict 而收到 DICT = 对端越权，拒绝处理
+	// （防恶意服务端在未协商通道注入字典消耗 CPU/内存）。
+	if !slices.Contains(c.SelectedCapabilities(), core.CapZstdDict) {
+		slog.Warn("unsolicited DICT frame (zstd_dict not negotiated); ignoring")
 		return
 	}
-	c.tracker.UpdateLimits(int(win.GetMaxInflightBatches()), int(win.GetMaxInflightEvents()), win.GetMaxInflightBytes())
-	slog.Debug("window updated", "batches", win.GetMaxInflightBatches(), "events", win.GetMaxInflightEvents())
-}
-
-func (c *CoreClient) handleThrottle(payload []byte) {
-	var throt core.ThrottleMessage
-	if err := core.Decode(payload, &throt); err != nil {
-		slog.Debug("invalid throttle payload", "error", err)
+	var d core.ZstdDict
+	if err := core.Decode(payload, &d); err != nil {
+		slog.Warn("invalid DICT frame; ignoring", "error", err)
 		return
 	}
-	c.throttle.Apply(int(throt.GetRetryDelayMs()))
-	slog.Info("throttled", "delay_ms", throt.GetRetryDelayMs(), "reason", core.SanitizeForLog(throt.GetReason()))
-}
-
-func (c *CoreClient) handlePing(payload []byte) {
-	var ping core.PingMessage
-	if err := core.Decode(payload, &ping); err != nil {
-		slog.Debug("invalid ping payload", "error", err)
+	// 尺寸上限（与服务端 Policy 同值）：防恶意服务端连发大字典
+	// 翻搅注册表（sha256+拷贝+解码器构造的 CPU 放大）。
+	if len(d.GetDict()) > core.MaxZstdDictBytes {
+		slog.Warn("DICT exceeds size limit; ignoring", "dict_id", d.GetDictId(),
+			"bytes", len(d.GetDict()), "limit", core.MaxZstdDictBytes)
 		return
 	}
-
-	pong := &corepb.PongMessage{TimeUnixMs: ping.GetTimeUnixMs(), Nonce: ping.GetNonce(), Status: "ok"}
-	pongPayload, err := core.Encode(pong)
+	codec, err := core.RegisterZstdDict(d.GetDictId(), d.GetDict())
 	if err != nil {
-		slog.Warn("marshal pong failed", "error", err)
+		slog.Warn("failed to activate zstd dict; ignoring", "dict_id", d.GetDictId(), "error", err)
 		return
 	}
-	if err := c.tr.WriteFrame(context.Background(), core.TypePong, core.FlagControl, core.ChannelControl, pongPayload); err != nil {
-		slog.Warn("write pong failed", "error", err)
+	c.zdict.Store(codec)
+	slog.Info("zstd dictionary activated", "dict_id", d.GetDictId(), "bytes", len(d.GetDict()))
+}
+
+// handlePing 回 PONG。
+func (c *CoreClient) handlePing(ctx context.Context, payload []byte) {
+	var ping core.PingMsg
+	if err := core.Decode(payload, &ping); err != nil {
+		return
+	}
+	pong := &core.PongMsg{TimeUnixMs: ping.GetTimeUnixMs(), Nonce: ping.GetNonce(), Status: "ok"}
+	p, err := core.Encode(pong)
+	if err != nil {
+		return
+	}
+	if err := c.tr.WriteFrame(ctx, core.TypePong, p); err != nil {
+		slog.Debug("write pong failed", "error", err)
 	}
 }
 
-// --- 心跳 ---
-
-// HeartbeatLoop 周期发送 PING 保活。由 binding 通过 SetHeartbeatLoop 注入
-// （或直接使用此默认实现，因 PING 写已走 c.tr.WriteFrame）。
+// HeartbeatLoop 周期发送 PING（仅 TCP binding 注入；QUIC 用内置 keepalive）。
 func (c *CoreClient) HeartbeatLoop(ctx context.Context) {
-	if c.heartbeatInterval <= 0 {
-		return
-	}
-	ticker := time.NewTicker(c.heartbeatInterval)
+	interval := 30 * time.Second
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ping := &corepb.PingMessage{TimeUnixMs: time.Now().UnixMilli(), Nonce: core.NewChunkID().String()}
-			payload, err := core.Encode(ping)
+			ping := &core.PingMsg{TimeUnixMs: time.Now().UnixMilli()}
+			p, err := core.Encode(ping)
 			if err != nil {
-				slog.Debug("marshal ping failed", "error", err)
 				continue
 			}
-			if err := c.tr.WriteFrame(context.Background(), core.TypePing, core.FlagControl, core.ChannelControl, payload); err != nil {
-				slog.Warn("write ping failed", "error", err)
+			wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if err := c.tr.WriteFrame(wctx, core.TypePing, p); err != nil {
+				cancel()
+				slog.Debug("heartbeat write failed; exiting", "error", err)
 				return
 			}
+			cancel()
 		}
 	}
 }
 
-// --- 辅助函数（原 v1/control.go 与 ntls/control.go 重复的包级函数）---
-
-// ackModeString 把 corepb.AckMode 转为回调期望的字符串（"durable"/"accepted"）。
-func ackModeString(m corepb.AckMode) string {
-	if m == corepb.AckMode_ACK_MODE_DURABLE {
-		return "durable"
+// dispatchRedirect 异步调用 redirect handler（单飞行 + 30s 超时 + panic 防护）。
+func (c *CoreClient) dispatchRedirect(payload []byte) {
+	var h func(context.Context, []byte)
+	if p := c.redirectHandler.Load(); p != nil {
+		h = *p
 	}
-	return "accepted"
+	if h == nil {
+		return
+	}
+	cp := make([]byte, len(payload))
+	copy(cp, payload)
+	if !c.redirectInflight.CompareAndSwap(false, true) {
+		slog.Debug("redirect handler in flight; dropping duplicate")
+		return
+	}
+	go func() {
+		defer c.redirectInflight.Store(false)
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Warn("redirect handler panicked", "panic", r)
+			}
+		}()
+		parent := c.lifecycleCtx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+		defer cancel()
+		h(ctx, cp)
+	}()
 }
 
-// chunkIDFromWire 把 wire chunk_id（ULID 16B）解析为 ChunkID。
-// 第二个返回值 ok 表示 chunk_id 是否为合法 16 字节 ULID；ok=false 时调用方不应
-// 调用 tracker.Release（seq 索引虽可定位 slot，但 chunkID 校验会失败，且计数器不应变动）。
-func chunkIDFromWire(chunkID []byte) (core.ChunkID, bool) {
-	if c, err := core.ChunkIDFromBytes(chunkID); err == nil {
-		return c, true
+// ackReapInterval 是客户端 RESULT 超时扫描间隔（AckTimeout 的实际驱动——
+// 此前 MarkFailed/ReapExpired 无生产调用方，AckTimeout 是死配置）。
+const ackReapInterval = 30 * time.Second
+
+// AckReaperLoop 周期扫描超时 slot：标记失败 + 通知回调（level="timeout"）+
+// 唤醒 drain。不回补 credit（模型 B：返还权威在服务端；服务端 reaper 保证
+// 最终 RESULT(released)+CREDIT——连接存活期间该回收只是迟到而非缺席）。
+// 由 StartLifecycle 作为独立 goroutine 启动（与心跳并列）。
+func (c *CoreClient) AckReaperLoop(ctx context.Context) {
+	ticker := time.NewTicker(ackReapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			l := c.ledger.Load()
+			if l == nil {
+				continue
+			}
+			for _, s := range l.ReapExpired(time.Now()) {
+				slog.Warn("batch result timed out", "seq", s.Seq, "age", time.Since(s.SentAt).Round(time.Second))
+				c.dispatchResult(resultNotify{seq: s.Seq, level: "timeout", code: core.CodeInternal})
+			}
+			c.notifyDrainIfEmpty()
+		}
 	}
-	return core.ChunkID{}, false
 }
 
-// isTemporaryError 报告错误是否为可恢复的临时 I/O 错误（如 EAGAIN/EINTR）。
-// 对此类错误应继续循环而非终止控制帧读取。
+// isTemporaryError 报告可恢复临时 I/O 错误。
 func isTemporaryError(err error) bool {
 	var ne interface{ Temporary() bool }
 	if errors.As(err, &ne) {

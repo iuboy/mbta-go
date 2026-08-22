@@ -57,11 +57,11 @@ func LookupCodec(codec corepb.Codec) SignalCodec {
 // codec 未注册返回错误（不应发生在协商后的正常路径——协商保证双方都注册了该 codec）。
 func MarshalSignalBatchCodec(codec corepb.Codec, sb *SignalBatch) ([]byte, error) {
 	if sb == nil {
-		return nil, NewError(ErrCodeValidation, "nil signal batch")
+		return nil, NewError(ErrCodeBatchInvalid, "nil signal batch")
 	}
 	c := LookupCodec(codec)
 	if c == nil {
-		return nil, NewError(ErrCodeValidation, fmt.Sprintf("codec not registered: %v", codec))
+		return nil, NewError(ErrCodeBatchInvalid, fmt.Sprintf("codec not registered: %v", codec))
 	}
 	return c.Marshal(sb)
 }
@@ -69,11 +69,11 @@ func MarshalSignalBatchCodec(codec corepb.Codec, sb *SignalBatch) ([]byte, error
 // UnmarshalSignalBatchCodec 按 codec 分发解码 SignalBatch。
 func UnmarshalSignalBatchCodec(codec corepb.Codec, data []byte) (*SignalBatch, error) {
 	if len(data) == 0 {
-		return nil, NewError(ErrCodeValidation, "empty signal batch data")
+		return nil, NewError(ErrCodeBatchInvalid, "empty signal batch data")
 	}
 	c := LookupCodec(codec)
 	if c == nil {
-		return nil, NewError(ErrCodeValidation, fmt.Sprintf("codec not registered: %v", codec))
+		return nil, NewError(ErrCodeBatchInvalid, fmt.Sprintf("codec not registered: %v", codec))
 	}
 	return c.Unmarshal(data)
 }

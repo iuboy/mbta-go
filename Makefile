@@ -1,4 +1,4 @@
-.PHONY: test lint vet cover bench fmt check clean proto proto-lint proto-breaking
+.PHONY: test lint vet cover bench bench-int fmt check clean proto proto-lint proto-breaking gen-certs test-int
 
 # Go parameters
 GOCMD  := go
@@ -19,17 +19,18 @@ proto-lint:
 proto-breaking:
 	buf breaking --against '.git#branch=main'
 
-## test: Run unit + conformance tests (excludes integration/e2e via build tag)
+## test: Run unit tests (excludes integration/e2e via build tag)
 test:
 	$(GOCMD) test $(GOFLAGS) -race -cover $(PKGS)
 
-## test-conf: Run conformance tests only (FakeTransport protocol verification)
-test-conf:
-	$(GOCMD) test $(GOFLAGS) -race ./internal/conformance/
+## gen-certs: 生成集成/e2e 测试所需证书（TLS + SM2 双证书，gitignored）
+gen-certs:
+	bash test/data/certificates/gen_certs.sh
+	go run test/data/ntls/gen_certs.go
 
-## test-int: Run integration/e2e tests (requires certificates + ports)
+## test-int: Run integration/e2e tests (requires certificates: run `make gen-certs` first)
 test-int:
-	$(GOCMD) test $(GOFLAGS) -race -tags=integration ./v1/ ./ntls/
+	$(GOCMD) test $(GOFLAGS) -race -tags=integration ./test/ ./v1/ ./ntls/
 
 ## test-all: Run all tests including integration
 test-all:
@@ -52,6 +53,10 @@ cover:
 ## bench: Run benchmark tests
 bench:
 	$(GOCMD) test $(GOFLAGS) -bench=. -benchmem -run=^$ $(PKGS)
+
+## bench-int: Run integration-tagged E2E benchmarks (requires certificates)
+bench-int:
+	$(GOCMD) test $(GOFLAGS) -bench=. -benchmem -run=^$ -tags=integration ./test/
 
 ## fmt: Format Go code
 fmt:

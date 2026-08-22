@@ -21,6 +21,8 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/emmansun/gmsm/sm2"
@@ -98,9 +100,16 @@ func issueCert(cn string, keyUsage x509.KeyUsage, holder *sm2.PrivateKey,
 }
 
 func main() {
-	dir := "testdata/ntls"
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		dir = "."
+	// 输出目录基于源文件位置解析（runtime.Caller），与执行时的 cwd 无关——
+	// 从仓库根执行 `go run test/data/ntls/gen_certs.go` 时也能写到 test/data/ntls/
+	// 而不是 fallback 到仓库根。
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("cannot locate source file path")
+	}
+	dir := filepath.Dir(thisFile)
+	if _, err := os.Stat(dir); err != nil {
+		panic(fmt.Sprintf("output dir %s not accessible: %v", dir, err))
 	}
 
 	caCert, caKey := selfSignCA()

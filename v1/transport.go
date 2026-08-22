@@ -199,6 +199,19 @@ type Conn struct {
 	controlClaimed bool
 	controlMu      sync.Mutex
 	authed         atomic.Bool
+	// udpConn 是客户端 Dial 自建的本地 socket（服务端侧为 nil，由 Listener 持有）。
+	// quic-go single-use Transport（createdConn=false）不负责关闭调用方 PacketConn——
+	// 不持有引用会在每次 dial 泄漏 1 个 socket + 接收 goroutine（高频重连累积）。
+	udpConn *net.UDPConn
+}
+
+// Close 关闭连接：QUIC 层优雅关闭后补关本地 UDP socket（幂等）。
+func (c *Conn) Close() error {
+	err := c.QC.CloseWithError(0, "conn closed")
+	if c.udpConn != nil {
+		_ = c.udpConn.Close() // #nosec G104 -- QUIC 关闭错误为主，socket 关闭尽力而为
+	}
+	return err
 }
 
 // Accept waits for and returns the next QUIC connection.
@@ -309,7 +322,10 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 	if err != nil {
 		return nil, core.WrapError(core.ErrCodeTransport, "resolve address", err)
 	}
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	// 本地 socket 绑定 wildcard（nil addr → 双栈 socket）：固定 IPv4zero 会在对端为
+	// IPv6（v6-only 域名 / [::1] 字面量）时于 Linux 上 WriteToUDP 报 EINVAL
+	// （macOS 内核宽容纯属平台巧合）。双栈 socket 对 v4/v6 对端均可写。
+	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return nil, core.WrapError(core.ErrCodeTransport, "listen UDP", err)
 	}
@@ -323,5 +339,6 @@ func Dial(ctx context.Context, cfg QUICClientConfig) (*Conn, error) {
 	return &Conn{
 		QC:         qc,
 		RemoteAddr: qc.RemoteAddr(),
+		udpConn:    udpConn, // Close 时补关（防泄漏，见 Conn 注释）
 	}, nil
 }

@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/iuboy/mbta-go/core"
+	"github.com/iuboy/mbta-go/internal/protocol"
 	ntls "github.com/iuboy/mbta-go/ntls"
 	v1 "github.com/iuboy/mbta-go/v1"
 )
@@ -23,6 +26,7 @@ type Server struct {
 	cfg        *ServerConfig
 	v1Server   *v1.Server
 	ntlsServer *ntls.Server
+	epochs     *protocol.EpochAllocator // v1+ntls 双监听共享（同 agent 跨 binding 纪元单调）
 	mu         sync.RWMutex
 	started    bool
 }
@@ -37,18 +41,37 @@ type ServerConfig struct {
 
 	// Shared configuration (all versions)
 	Auth            core.TokenValidator
-	Policy          core.Policy
-	Sink            core.EventSink
+	Policy          core.ServerPolicy // 零值 = 各版本按 ProfileFor 取默认（v1=intl、ntls=gm）
 	Metrics         core.Metrics
-	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
+	RedirectChecker core.RedirectChecker // HA：握手完成后检查角色，非 leader 发 REDIRECT（可选，nil=禁用）
 	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）：CONNECTED/DISCONNECTED
-	SessionStore    *core.SessionStore   // 0-RTT 会话票据存储（nil=禁用 0-RTT resumption）
+
+	// Sink 注册面（替代旧 EventSink 接口）：opts 声明供给偏好，handler 是投递回调。
+	SinkOpts    core.SinkOptions
+	SinkHandler core.BatchHandler
 
 	// V1 specific configuration
 	V1QUIC v1.QUICServerConfig
 
 	// NTLS specific configuration
 	NTLSCfg ntls.ServerConfig
+
+	// MaxConcurrentConns 可选：并发连接上限（各版本共用）。0 = 使用各版本默认
+	// （binding.DefaultMaxConcurrentConns）。达到上限时新连接在 accept 处背压
+	// （transport 层握手完成但 HELLO 不被读取），而非直接拒绝。
+	MaxConcurrentConns int
+
+	// SinkDeadline 可选：sink handler 的 done 调用超时（0=默认 60s，超时合成 released）。
+	SinkDeadline time.Duration
+	// SinkQueueSize 可选：sink 异步投递队列容量（0=默认 256，负=禁用异步退回同步调用）。
+	SinkQueueSize int
+	// SinkQueueMaxBytes 可选：sink 异步投递队列字节上限（0=默认 32MB，负=不限）。
+	SinkQueueMaxBytes int64
+
+	// ZstdDict/ZstdDictID 可选：zstd_dict 能力的服务端静态字典（WithZstdDict 设置）。
+	// 配置后各版本把 zstd_dict 加入协商能力集；客户端协商成功即收到 DICT 帧。
+	ZstdDict   []byte
+	ZstdDictID uint32
 }
 
 // NewServer creates a multi-version MBTA server.
@@ -69,13 +92,13 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 	if !cfg.EnableV1 && !cfg.EnableNTLS {
 		return nil, core.NewError(core.ErrCodeConfig, "at least one version must be enabled")
 	}
-	// Auth/Sink 非空校验在 facade fail-fast，避免错误延迟到 Start() 才暴露。
+	// Auth/SinkHandler 非空校验在 facade fail-fast，避免错误延迟到 Start() 才暴露。
 	// 子层 v1/ntls NewServer 保留各自校验作为防御性兜底。
 	if cfg.Auth == nil {
 		return nil, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
 	}
-	if cfg.Sink == nil {
-		return nil, core.NewError(core.ErrCodeConfig, "Sink (EventSink) is required")
+	if cfg.SinkHandler == nil {
+		return nil, core.NewError(core.ErrCodeConfig, "SinkHandler is required")
 	}
 
 	return &Server{cfg: cfg}, nil
@@ -86,6 +109,7 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 // Server init is done serially before the accept loops to avoid concurrent field writes.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
+	s.epochs = &protocol.EpochAllocator{}
 	if s.started {
 		s.mu.Unlock()
 		return core.NewError(core.ErrCodeSession, "server already started")
@@ -191,17 +215,53 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// derivePolicy 从共享 Policy 推导 binding 专属策略：零值时取 profile 对应默认，
+// 显式配置时仅覆盖 Profile 字段（profile 是 binding 内禀属性：v1=intl、ntls=gm，
+// 由版本映射决定，防止 v1/ntls 监听器与声明的密码组合错配）。
+func derivePolicy(base core.ServerPolicy, prof core.Profile) core.ServerPolicy {
+	if base.IsZero() {
+		return core.DefaultServerPolicy(prof)
+	}
+	p := base
+	p.Profile = prof
+	return p
+}
+
+// withZstdDict 把静态字典并入派生策略：设置 ZstdDict/ZstdDictID 并把 zstd_dict
+// 加入 SupportedCapabilities（幂等）。未配置字典时原样返回（handler 侧的协商
+// 守卫会在无字典时剔除该能力，双保险）。
+func withZstdDict(p core.ServerPolicy, dictID uint32, dict []byte) core.ServerPolicy {
+	if len(dict) == 0 || dictID == 0 {
+		return p
+	}
+	p.ZstdDict = dict
+	p.ZstdDictID = dictID
+	if !slices.Contains(p.SupportedCapabilities, core.CapZstdDict) {
+		p.SupportedCapabilities = append(slices.Clone(p.SupportedCapabilities), core.CapZstdDict)
+	}
+	return p
+}
+
 // initV1Server initializes the V1 server.
 func (s *Server) initV1Server() error {
+	profile, err := ProfileFor(Version1)
+	if err != nil {
+		return err
+	}
 	cfg := v1.ServerConfig{
-		Transport:       s.cfg.V1QUIC,
-		Auth:            s.cfg.Auth,
-		Policy:          s.cfg.Policy,
-		Sink:            s.cfg.Sink,
-		Metrics:         s.cfg.Metrics,
-		RedirectChecker: s.cfg.RedirectChecker,
-		OnSession:       s.cfg.OnSession,
-		SessionStore:    s.cfg.SessionStore,
+		Transport:          s.cfg.V1QUIC,
+		Auth:               s.cfg.Auth,
+		Policy:             withZstdDict(derivePolicy(s.cfg.Policy, profile), s.cfg.ZstdDictID, s.cfg.ZstdDict),
+		Metrics:            s.cfg.Metrics,
+		RedirectChecker:    s.cfg.RedirectChecker,
+		OnSession:          s.cfg.OnSession,
+		SinkOpts:           s.cfg.SinkOpts,
+		SinkHandler:        s.cfg.SinkHandler,
+		SinkDeadline:       s.cfg.SinkDeadline,
+		MaxConcurrentConns: s.cfg.MaxConcurrentConns,
+		SinkQueueSize:      s.cfg.SinkQueueSize,
+		SinkQueueMaxBytes:  s.cfg.SinkQueueMaxBytes,
+		Epochs:             s.epochs, // facade 双监听共享（同 agent 跨 binding 纪元单调）
 	}
 
 	v1srv, err := v1.NewServer(cfg)
@@ -214,14 +274,20 @@ func (s *Server) initV1Server() error {
 
 // initNTLSServer initializes the NTLS server.
 func (s *Server) initNTLSServer() error {
+	profile := NTLSProfileFor(s.cfg.NTLSCfg.TLSMode)
 	cfg := s.cfg.NTLSCfg
 	cfg.Auth = s.cfg.Auth
-	cfg.Policy = s.cfg.Policy
-	cfg.Sink = s.cfg.Sink
+	cfg.Epochs = s.epochs // facade 双监听共享
+	cfg.Policy = withZstdDict(derivePolicy(s.cfg.Policy, profile), s.cfg.ZstdDictID, s.cfg.ZstdDict)
 	cfg.Metrics = s.cfg.Metrics
 	cfg.RedirectChecker = s.cfg.RedirectChecker
 	cfg.OnSession = s.cfg.OnSession
-	cfg.SessionStore = s.cfg.SessionStore
+	cfg.SinkOpts = s.cfg.SinkOpts
+	cfg.SinkHandler = s.cfg.SinkHandler
+	cfg.SinkDeadline = s.cfg.SinkDeadline
+	cfg.MaxConcurrentConns = s.cfg.MaxConcurrentConns
+	cfg.SinkQueueSize = s.cfg.SinkQueueSize
+	cfg.SinkQueueMaxBytes = s.cfg.SinkQueueMaxBytes
 
 	server, err := ntls.NewServer(cfg)
 	if err != nil {
@@ -269,18 +335,91 @@ func WithAuth(auth core.TokenValidator) ServerOption {
 	}
 }
 
-// WithPolicy sets the session policy for all versions.
-func WithPolicy(policy core.Policy) ServerOption {
+// WithPolicy sets the server policy for all versions.
+// 零值 Policy（不调用本 option）时各版本按版本映射取默认 profile 的默认策略；
+// Profile 字段会被版本映射覆盖（v1=intl、ntls=gm），其余字段（ack_mode/credits/
+// limits/capabilities）按调用方声明生效。
+func WithPolicy(policy core.ServerPolicy) ServerOption {
 	return func(sc *ServerConfig) error {
+		if err := policy.Validate(); err != nil {
+			return core.WrapError(core.ErrCodeConfig, "policy", err)
+		}
 		sc.Policy = policy
 		return nil
 	}
 }
 
-// WithEventSink sets the event sink for all versions.
-func WithEventSink(sink core.EventSink) ServerOption {
+// WithSink registers the batch delivery handler for all versions（替代旧
+// WithEventSink）。opts 声明供给偏好（Raw/Durable/Async——Raw+Async 组合静默丢
+// 数据这类缺陷在结构上不可表达），handler 通过 done 报告投递结果。
+func WithSink(opts core.SinkOptions, handler core.BatchHandler) ServerOption {
 	return func(sc *ServerConfig) error {
-		sc.Sink = sink
+		if handler == nil {
+			return core.NewError(core.ErrCodeConfig, "sink handler must not be nil")
+		}
+		sc.SinkOpts = opts
+		sc.SinkHandler = handler
+		return nil
+	}
+}
+
+// WithMaxConcurrentConns sets the concurrent connection limit (shared by all
+// enabled versions). n <= 0 uses the version default. At the limit, new
+// connections are back-pressured at accept rather than rejected.
+func WithMaxConcurrentConns(n int) ServerOption {
+	return func(sc *ServerConfig) error {
+		sc.MaxConcurrentConns = n
+		return nil
+	}
+}
+
+// WithSinkQueue sets the async sink delivery queue bounds (shared by all
+// enabled versions). size < 0 disables async delivery; maxBytes < 0 disables
+// the byte bound. See v1/ntls ServerConfig docs for semantics.
+func WithSinkQueue(size int, maxBytes int64) ServerOption {
+	return func(sc *ServerConfig) error {
+		sc.SinkQueueSize = size
+		sc.SinkQueueMaxBytes = maxBytes
+		return nil
+	}
+}
+
+// WithSinkDeadline sets the sink handler done-call timeout (shared by all
+// enabled versions). 0 uses the default (60s); on timeout the protocol layer
+// synthesizes Outcome{Released} for the in-flight batch.
+func WithSinkDeadline(d time.Duration) ServerOption {
+	return func(sc *ServerConfig) error {
+		if d < 0 {
+			return core.NewError(core.ErrCodeConfig, "sink deadline must not be negative")
+		}
+		sc.SinkDeadline = d
+		return nil
+	}
+}
+
+// WithZstdDict 配置 zstd_dict 能力的服务端静态字典（所有启用版本共享）。
+// 配置后：各版本把 zstd_dict 加入协商能力集；客户端协商成功即在 HELLO_ACK 后
+// 收到 DICT 帧，并对 > 512B 的 batch 选用字典压缩。dictID 必须非 0；字典尺寸
+// 上限 core.MaxZstdDictBytes（1MB）。字典是 raw content dictionary——任意高冗余
+// 语料字节即可，无需 zstd --train 训练格式。清除传 nil。
+func WithZstdDict(dictID uint32, dict []byte) ServerOption {
+	return func(sc *ServerConfig) error {
+		if len(dict) == 0 {
+			if dictID != 0 {
+				return core.NewError(core.ErrCodeConfig, "zstd dict must not be empty")
+			}
+			sc.ZstdDict = nil
+			sc.ZstdDictID = 0
+			return nil
+		}
+		if dictID == 0 {
+			return core.NewError(core.ErrCodeConfig, "zstd dict id must be non-zero")
+		}
+		if len(dict) > core.MaxZstdDictBytes {
+			return core.NewError(core.ErrCodeConfig, fmt.Sprintf("zstd dict %d bytes exceeds max %d", len(dict), core.MaxZstdDictBytes))
+		}
+		sc.ZstdDict = dict
+		sc.ZstdDictID = dictID
 		return nil
 	}
 }
@@ -294,10 +433,11 @@ func WithMetrics(metrics core.Metrics) ServerOption {
 	}
 }
 
-// WithRedirectChecker sets the HA redirect checker. After a client authenticates,
-// the server calls the checker; if it returns ok=true (this replica is a follower,
-// not the leader) the server sends a TypeRedirect frame and closes the connection,
-// steering the client to the elected leader. Nil (default) disables redirect.
+// WithRedirectChecker sets the HA redirect checker. After a client completes
+// the handshake, the server calls the checker; if it returns ok=true (this
+// replica is a follower, not the leader) the server sends a REDIRECT frame and
+// closes the connection, steering the client to the elected leader. Nil
+// (default) disables redirect.
 func WithRedirectChecker(checker core.RedirectChecker) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.RedirectChecker = checker
@@ -306,7 +446,7 @@ func WithRedirectChecker(checker core.RedirectChecker) ServerOption {
 }
 
 // WithOnSession sets the session lifecycle callback. The server fires
-// SessionConnected right after AUTH_OK (before any BATCH), and
+// SessionConnected right after the handshake completes (before any BATCH), and
 // SessionDisconnected when the connection ends (only for connections that
 // authenticated successfully). Nil (default) disables lifecycle observation.
 // The callback runs on the connection goroutine; it must be non-blocking.

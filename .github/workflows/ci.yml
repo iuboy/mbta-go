@@ -111,11 +111,33 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Install protoc-gen-go
-        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+        # 版本必须 pin：插件把自身版本写进生成文件头（"protoc-gen-go vX.Y.Z"），
+        # @latest 会随上游发版漂移，导致未改动 proto 时 diff 校验也失败（不可复现构建）。
+        # 升级插件时须同步重新生成全部 corepb/*.pb.go。
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
       - name: buf generate
         run: buf generate
       - name: Check generated code is up to date
         run: git diff --exit-code corepb/
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Generate TLS certificates
+        run: bash test/data/certificates/gen_certs.sh
+      - name: Generate SM2 certificates
+        # 证书 gitignored，须在跑集成测试前生成（gen_certs.go 基于源码路径定位输出目录）。
+        run: go run test/data/ntls/gen_certs.go
+      - name: Run integration tests
+        # test/（黑盒 facade 集成/性能）+ v1/ntls e2e 均挂 integration tag，
+        # 不带 tag 的 go test ./... 对它们只报 no test files（零回归保护）。
+        run: go test -race -count=1 -tags=integration ./test/ ./v1/ ./ntls/
 
   vuln:
     name: Vulnerability scan

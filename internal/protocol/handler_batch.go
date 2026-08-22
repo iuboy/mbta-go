@@ -1,396 +1,373 @@
 package protocol
 
+// handler_batch.go：BATCH/DGRAM 处理（根治版：SettleGrant 令牌流程）。
+//
+// RESULT 发送权/终态环/额度回收三件事由 grant 原子持有——本文件任何路径都不
+// 直接构造终态 RESULT（历史双发 ×3 与 sem-full 漏偿的结构性根治）。
+// 共享校验管线 decodeAndValidate 消除 BATCH/DGRAM 双清单手抄漂移。
+//
+// BATCH 路径（校验次序 = r3 §18-B5 裁决）：
+// 帧层 MaxFrameBytes（binding）→ 准入占位+额度 → AD/解密 → 解压上限 → max_batch_bytes。
+
 import (
 	"context"
-	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
-	corepb "github.com/iuboy/mbta-go/corepb"
-
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
-// processBatch 处理 reliable BATCH：envelope → 校验 → 路由 → ACK。
-func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
-	env, err := core.DecodeEnvelope(payload)
-	if err != nil {
-		slog.Debug("invalid envelope", "error", err)
-		h.sendError(ctx, core.ErrCodeDecodeFailed, "invalid_envelope", false)
-		return
-	}
-
-	if h.expiresAt.Load() > 0 && time.Now().Unix() > h.expiresAt.Load() {
-		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeSessionExpired, "session TTL exceeded, please reconnect", false)
-		return
-	}
-
-	// Open envelope（强制 HMAC 校验 + 解密 + 解压）。
-	// keys 经 atomic 读取，避免与 handleAuth 颁发新 keys 竞态（0-RTT）。
-	// Open 内部在解密前执行 VerifyMAC（core spec §5.1），HMAC 失败立即返回错误，
-	// 杜绝调用方遗漏 VerifyMAC 的安全绕过。
-	keys := h.keys.Load()
-	var hmacKey, aeadKey []byte
-	if keys != nil {
-		hmacKey = keys.HMACKey()
-		aeadKey = keys.AEADKey()
-	}
-
-	// 先执行 HMAC 校验（Open 内部在解密前 VerifyMAC），再做算法一致性复核。
-	// 在 HMAC 之前执行 verifyEnvelopeAlgo 会导致未认证方可通过注入帧探测服务端
-	// 协商算法集（defense-in-depth 仅在认证后有意义）。
-	batchPayload, err := core.Open(env, hmacKey, aeadKey)
-	if err != nil {
-		// 区分 HMAC 失败与解密失败用于 metrics。
-		if core.CodeOf(err) == core.ErrCodeHMACMismatch.Code {
-			slog.Debug("envelope HMAC verification failed", "error", err)
-			h.config.Metrics.HMACFailures().Inc()
-			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeHMACMismatch, "HMAC verification failed", false)
-		} else {
-			slog.Debug("envelope open failed", "error", err)
-			h.config.Metrics.DecryptFailures().Inc()
-			h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeOpenError, "envelope could not be opened", true)
+// sender 是 grant 的 RESULT 发送函数（handler 注入，锁外执行）。
+func (h *CoreHandler) sender(ctx context.Context) func(*core.Result) {
+	return func(r *core.Result) {
+		p, err := core.Encode(r)
+		if err != nil {
+			return
 		}
-		return
+		if err := SendControlFrame(ctx, h.tr, core.TypeResult, p); err != nil {
+			slog.Debug("write result failed", "error", err)
+		}
 	}
-	// 算法一致性复核：在 HMAC 认证通过后执行（defense-in-depth 仅在认证后有意义），
-	// 确保已认证的 envelope wire 字段与权威协商结果一致。
-	if h.verifyEnvelopeAlgo(env) {
-		return
-	}
-	if len(batchPayload) > maxBatchBytes {
-		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeBatchTooLarge,
-			fmt.Sprintf("batch payload %d bytes exceeds limit %d", len(batchPayload), maxBatchBytes), false)
-		return
-	}
+}
 
-	var batchMsg corepb.BatchMessage
-	if err := core.Decode(batchPayload, &batchMsg); err != nil {
-		slog.Debug("batch decode failed", "error", err)
-		h.sendNack(ctx, env.GetSeq(), env.GetChunkId(), core.ErrCodeInvalidBatch, "batch message could not be decoded", false)
+// maybeScheduleFlush 懒 arm：首个 Settle 后安排一次 100ms 定时 flush，
+// 替代常驻 100ms ticker（万连接下省 10k/s 定时器唤醒）。CAS 保证同一时刻
+// 至多一个 pending flush。
+func (h *CoreHandler) maybeScheduleFlush() {
+	if h.flushArmed.CompareAndSwap(false, true) {
+		time.AfterFunc(creditFlushInterval, func() {
+			h.flushArmed.Store(false)
+			h.flushPending()
+		})
+	}
+}
+
+// flushPending 取出攒批回收量并下发 CREDIT（发放=移回 outstanding+通知客户端）。
+func (h *CoreHandler) flushPending() {
+	b, y := h.credit.TakeRecovered()
+	if b <= 0 && y <= 0 {
 		return
 	}
-	if err := core.ValidateBatch(&batchMsg); err != nil {
-		slog.Debug("batch validation failed", "error", err)
-		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeBatchValidation, "batch failed validation", false)
+	c := &core.Credit{Batches: uint64(b), Bytes: uint64(y)}
+	p, err := core.Encode(c)
+	if err != nil {
 		return
 	}
-	// batch 级 W3C trace 上下文校验（capability w3c_trace_context，spec §6.2.2）。
-	// 客户端发送前已校验，此处 defense-in-depth：拒绝绕过 SDK 直接构造的非法 trace。
-	if tc := batchMsg.GetTraceContext(); tc != nil {
+	if err := SendControlFrame(context.Background(), h.tr, core.TypeCredit, p); err != nil {
+		slog.Debug("write credit failed", "error", err)
+	}
+}
+
+// rejectAtCapacity 是 batchSem 满的 grant 化直拒：占位 → 扣额度 → Settle(released)。
+// 客户端已为该 seq 扣除额度——Settle 的回收保证守恒闭环（终态环同时记录，
+// 客户端同 seq 重试得到幂等回执而非重新投递）。
+func (h *CoreHandler) rejectAtCapacity(ctx context.Context, payload []byte) {
+	var env core.Envelope
+	if core.Decode(payload, &env) != nil {
+		return // 无法定夺 seq：静默丢弃（客户端重发兜底）
+	}
+	seq := env.GetSeq()
+	ar := h.credit.Admit(seq)
+	switch ar.Decision {
+	case core.AdmitAccept:
+		send := h.sender(ctx)
+		if cerr := ar.Grant.Consume(int64(len(payload))); cerr != nil {
+			h.abort(ctx, core.CodeWindowExceeded, "credit exhausted")
+			return
+		}
+		ar.Grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_RELEASED,
+			core.CodeServerDraining, 1000, int64(len(payload)))
+		h.maybeScheduleFlush()
+	case core.AdmitDuplicate, core.AdmitTerminalHit, core.AdmitBelowUnknown:
+		// 常规回执路径已覆盖；capacity 直拒不重复处理。
+	default:
+		h.abort(ctx, core.CodeWindowExceeded, "invalid seq")
+	}
+}
+
+// releaseStuck 回收 AddedAt 早于 age 的在途项（reaper + Handle 收尾）。
+// ForceSettle 与 grant.Settle 共享防双回收守卫（terminal 环已命中即跳过额度）。
+func (h *CoreHandler) releaseStuck(ctx context.Context, code uint32, age time.Duration) {
+	cutoff := time.Now().Add(-age)
+	send := h.sender(ctx)
+	for {
+		seq, slot, ok := h.credit.OldestBefore(cutoff)
+		if !ok {
+			break
+		}
+		slog.Warn("releasing stuck inflight", "seq", seq, "code", core.CodeName(code))
+		h.credit.ForceSettle(send, seq, corepb.ResultLevel_RESULT_LEVEL_RELEASED, code, 1000, slot.Bytes)
+	}
+	h.maybeScheduleFlush()
+}
+
+// decodeAndValidate 是 BATCH/DGRAM 共享的解码校验管线（单一清单，消除双路径
+// 手抄漂移：DGRAM 此前缺 TTL/events 上限且尺寸检查次序在解码后）。
+// 返回错误码 0=通过；否则调用方按各自语义处置（BATCH=Settle(REJECTED)，DGRAM=静默丢）。
+// decodeAndValidate 接受调用方已解码的 Envelope（processBatch 需先拿 seq 做准入
+// 占位——占位先于解密是设计次序；此处不重复解析）。
+func (h *CoreHandler) decodeAndValidate(env *core.Envelope, frameType uint8) (*core.Batch, []byte, uint32) {
+	keys := h.keys.Load()
+	if keys == nil {
+		return nil, nil, core.CodeInternal // 未握手（防御；binding 保证 Ready 前不投递）
+	}
+	if exp := h.expiresAt.Load(); exp > 0 && time.Now().Unix() > exp {
+		return nil, nil, core.CodeServerDraining // 会话过期：客户端应重连
+	}
+	batchWire, err := core.OpenEnvelope(frameType, h.getSessionID(), keys, h.config.Zdict, env)
+	if err != nil {
+		h.metrics.DecryptFailures().Inc()
+		return nil, nil, core.CodeEnvelopeOpenFail
+	}
+	if int64(len(batchWire)) > int64(h.config.Policy.MaxBatchBytes) {
+		return nil, nil, core.CodeBatchTooLarge
+	}
+	var batch core.Batch
+	if err := core.Decode(batchWire, &batch); err != nil {
+		return nil, nil, core.CodeBatchInvalid
+	}
+	if batch.GetSeq() != env.GetSeq() {
+		return nil, nil, core.CodeBatchInvalid
+	}
+	if int(batch.GetEventsCount()) > maxBatchEvents {
+		return nil, nil, core.CodeBatchInvalid
+	}
+	if tc := batch.GetTrace(); tc != nil {
 		if err := core.ValidateBatchTraceContext(tc); err != nil {
-			slog.Debug("batch trace_context invalid", "error", err)
-			h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeBatchTraceContext, "invalid batch trace context", false)
-			return
+			return nil, nil, core.CodeBatchInvalid
 		}
 	}
-
-	// chunk_id dedup key（ULID 文本）。
-	chunkIDText := chunkIDText(batchMsg.GetChunkId())
-	batchEvents, signalBatchPtr := h.resolveBatchEvents(ctx, &batchMsg)
-	if batchEvents < 0 {
-		return // 已发 NACK
-	}
-	batchBytes := int64(len(batchPayload))
-
-	// 服务端流控强制。
-	if !h.window.CanSend(h.inflight, batchEvents, batchBytes) {
-		h.sendThrottle(ctx, core.ErrCodeWindowExceeded, "server flow-control window exceeded")
-		return
-	}
-	// 前置背压检查：sink 已 critical 时直接 THROTTLE，不进入 route，避免慢/恶意 sink
-	// 阻塞 handler goroutine（DoS 防护）。ReplayProcessing 重试路径不经过此处（它在
-	// replay 检查后 fallthrough），故被限流 batch 的重投不受影响。
-	if h.config.Sink != nil && h.config.Sink.OnPressure(h.getAgentID()) == core.PressureCritical {
-		h.sendThrottle(ctx, core.ErrCodeQueuePressure, "sink critical pressure, retry later")
-		return
-	}
-	h.inflight.Add(batchEvents, batchBytes)
-
-	// Replay 去重。
-	if existing := h.replay.SeenOrAdd(h.getAgentID(), chunkIDText); existing != nil {
-		h.config.Metrics.ReplayCacheHits().Inc()
-		// ReplayProcessing 表示此前被限流（applyRouteResult 将 entry 重置为 Processing 以允许
-		// 客户端重试）。此时不能短路返回 ACK——否则 batch 永远不会被路由到 sink，造成静默
-		// 数据丢失。必须 fallthrough 到 routeAndACK 重新处理。
-		if existing.Status == core.ReplayProcessing {
-			h.replay.Update(h.getAgentID(), chunkIDText, core.ReplayAccepted)
-			h.routeAndACK(ctx, h.getAgentID(), chunkIDText, &batchMsg, signalBatchPtr, batchEvents, batchBytes)
-			return
-		}
-		h.inflight.Remove(batchEvents, batchBytes)
-		ackMode := corepb.AckMode_ACK_MODE_ACCEPTED
-		if existing.Status == core.ReplayDurable {
-			ackMode = corepb.AckMode_ACK_MODE_DURABLE
-		}
-		h.sendAck(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), batchEvents, ackMode)
-		return
-	}
-
-	h.replay.Update(h.getAgentID(), chunkIDText, core.ReplayAccepted)
-	h.routeAndACK(ctx, h.getAgentID(), chunkIDText, &batchMsg, signalBatchPtr, batchEvents, batchBytes)
+	return &batch, batchWire, 0
 }
 
-// processDatagram 处理 unreliable DATAGRAM：at-most-once，无 ACK/spool（core spec §11.4）。
+// processBatch 处理可靠 BATCH。
+func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
+	var env core.Envelope
+	if err := core.Decode(payload, &env); err != nil {
+		slog.Debug("invalid envelope", "error", err)
+		return
+	}
+	seq := env.GetSeq()
+	// 准入（占位式：Accept 即占位，并发同 seq 得 Duplicate）。
+	ar := h.credit.Admit(seq)
+	var grant *core.SettleGrant
+	switch ar.Decision {
+	case core.AdmitAccept:
+		grant = ar.Grant
+	case core.AdmitViolation:
+		h.abort(ctx, core.CodeWindowExceeded, "invalid seq")
+		return
+	case core.AdmitTerminalHit:
+		h.sendResult(ctx, &core.Result{RefSeq: seq,
+			Level: corepb.ResultLevel(ar.Terminal.Level), Code: ar.Terminal.Code})
+		return
+	case core.AdmitBelowUnknown:
+		// 终态环外旧 seq：宁重发不吞数据。
+		h.sendResult(ctx, &core.Result{RefSeq: seq, Level: corepb.ResultLevel_RESULT_LEVEL_RELEASED, Code: core.CodeInternal})
+		return
+	case core.AdmitDuplicate:
+		h.sendResult(ctx, &core.Result{RefSeq: seq, Level: corepb.ResultLevel_RESULT_LEVEL_ACCEPTED,
+			Correlation: ar.DupSlot.Correlation})
+		return
+	}
+	send := h.sender(ctx)
+
+	frameBytes := int64(len(payload))
+	if cerr := grant.Consume(frameBytes); cerr != nil {
+		h.abort(ctx, core.CodeWindowExceeded, "credit exhausted")
+		return
+	}
+
+	// 共享解码校验管线（Envelope 已在准入阶段解码，不重复解析）。
+	batch, batchWire, code := h.decodeAndValidate(&env, core.TypeBatch)
+	if code != 0 {
+		if code == core.CodeInternal {
+			grant.Release() // 未定夺内容：占位释放，无 wire 动作
+			return
+		}
+		if code == core.CodeServerDraining {
+			h.abort(ctx, code, "session expired")
+			return
+		}
+		slog.Debug("batch rejected", "seq", seq, "code", core.CodeName(code))
+		grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_REJECTED, code, 0, frameBytes)
+		h.maybeScheduleFlush()
+		return
+	}
+	grant.Backfill(batch.GetCorrelation())
+
+	h.deliver(ctx, grant, batch, batchWire, frameBytes)
+}
+
+// deliver 投递到 sink 并完成 RESULT 生命周期。
+// 两个分支统一为 enqueue-then-settle：入队成功才发终态 accepted——
+// 「先 ACK 后入队、队列满静默丢数据」在顺序上不可再发生。
+func (h *CoreHandler) deliver(ctx context.Context, grant *core.SettleGrant, batch *core.Batch, batchWire []byte, frameBytes int64) {
+	send := h.sender(ctx)
+
+	if h.config.SinkHandler == nil {
+		grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_ACCEPTED, 0, 0, frameBytes)
+		h.maybeScheduleFlush()
+		return
+	}
+
+	durable := h.config.Policy.AckMode == corepb.AckMode_ACK_MODE_DURABLE
+	if !h.enqueueSink(ctx, grant, batch, batchWire, frameBytes, durable) {
+		// 队列满/收尾：released（客户端以新 seq 重投）。
+		grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_RELEASED, core.CodeServerDraining, 1000, frameBytes)
+		h.maybeScheduleFlush()
+		return
+	}
+	if durable {
+		grant.Accept(send) // 中间态：额度保留，done 回调驱动 Settle(durable/released)
+		return
+	}
+	// accepted_only：入队成功，accepted 即终态。
+	grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_ACCEPTED, 0, 0, frameBytes)
+	h.maybeScheduleFlush()
+}
+
+// sendResult 仅供幂等回执路径（TerminalHit/Duplicate/BelowUnknown——不触碰
+// 终态与额度的只读应答）。终态 RESULT 一律经 grant。
+func (h *CoreHandler) sendResult(ctx context.Context, r *core.Result) {
+	p, err := core.Encode(r)
+	if err != nil {
+		return
+	}
+	if err := SendControlFrame(ctx, h.tr, core.TypeResult, p); err != nil {
+		slog.Debug("write result failed", "error", err)
+	}
+}
+
+// processDatagram 处理不可靠 DGRAM（at-most-once；豁免 credit，令牌桶+并发槽）。
 func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
-	env, err := core.DecodeEnvelope(payload)
-	if err != nil {
-		slog.Debug("datagram decode envelope failed", "error", err)
-		return // 静默丢弃
+	if !h.dgramAllow(int64(len(payload))) {
+		return // 速率超限：静默丢弃（at-most-once 语义允许）
 	}
-	// session 过期检查：与 processBatch 一致，过期会话的 datagram 不应再被处理。
-	if h.expiresAt.Load() > 0 && time.Now().Unix() > h.expiresAt.Load() {
-		slog.Debug("datagram rejected: session expired", "session", string(h.getSessionID()))
+	var denv core.Envelope
+	if core.Decode(payload, &denv) != nil {
 		return
 	}
-	keys := h.keys.Load()
-	var hmacKey, aeadKey []byte
-	if keys != nil {
-		hmacKey = keys.HMACKey()
-		aeadKey = keys.AEADKey()
+	batch, batchWire, code := h.decodeAndValidate(&denv, core.TypeDgram)
+	if code != 0 {
+		return // DGRAM 失败一律静默丢弃
 	}
-	batchPayload, err := core.Open(env, hmacKey, aeadKey)
-	if err != nil {
-		// 区分 HMAC 失败与解密失败用于 metrics（与 processBatch 对齐），
-		// 避免 HMAC 篡改攻击信号被掩盖为解密失败。
-		if core.CodeOf(err) == core.ErrCodeHMACMismatch.Code {
-			slog.Debug("datagram HMAC verification failed", "error", err)
-			h.config.Metrics.HMACFailures().Inc()
-		} else {
-			slog.Debug("datagram open failed", "error", err)
-			h.config.Metrics.DecryptFailures().Inc()
-		}
-		return
-	}
-	var batchMsg corepb.DatagramMessage
-	if err := core.Decode(batchPayload, &batchMsg); err != nil {
-		slog.Debug("datagram decode message failed", "error", err)
-		return
-	}
-	// 不可靠投递：尽力路由，无 ACK。
-	if h.config.Sink != nil {
-		if rawSink, ok := h.config.Sink.(core.RawEventSink); ok {
-			slog.Debug("datagram delivering to raw sink", "events", batchMsg.GetEventsCount())
-			_, _ = rawSink.OnRawBatch(ctx, h.getAgentID(), int(batchMsg.GetEventsCount()), batchMsg.GetBatch())
-		} else {
-			slog.Debug("datagram sink is not RawEventSink")
-		}
+	if h.config.SinkHandler != nil {
+		ev := h.makeEvent(batch, batchWire)
+		h.callHandler(ctx, ev, func(core.Outcome) {}) // at-most-once：done 无 wire 语义
 	}
 }
 
-// enqueueSinkTask 投递 task 到 sinkQueue。成功返回 true；队列满则发 THROTTLE +
-// 重置 replay 为 Processing（让客户端重试），返回 false（调用方应 return 不发 ACK）。
-func (h *CoreHandler) enqueueSinkTask(task sinkTask, ctx context.Context, agentID, chunkID string) bool {
-	select {
-	case h.sinkQueue <- task:
+// dgramAllow 令牌桶（Policy.DatagramRateBytes；0 = 不限，仅并发槽防护）。
+func (h *CoreHandler) dgramAllow(n int64) bool {
+	if h.dgramRate <= 0 {
 		return true
-	default:
-		slog.Warn("sink queue full, throttling for retry", "queue_cap", cap(h.sinkQueue))
-		h.replay.Update(agentID, chunkID, core.ReplayProcessing)
-		h.sendThrottle(ctx, core.ErrCodeQueuePressure, "sink queue full, retry later")
-		return false
 	}
-}
-
-// routeSinkSync 同步投递到 sink（Durable/Raw sink 未实现 AsyncDurableSink，或异步被
-// 禁用的普通 EventSink）。按 sink 实际类型选 RawEventSink / DurableEventSink / 普通
-// EventSink 三条路径之一，*ackMode 由 Durable 路径的 RouteResult 决定。
-// 返回 true 表示已发 THROTTLE（applyRouteResult 的 throttle 分支），调用方应 return 不发 ACK。
-func (h *CoreHandler) routeSinkSync(ctx context.Context, agentID, chunkID string, batchMsg *corepb.BatchMessage, signalBatch *core.SignalBatch, batchEvents int, ackMode *corepb.AckMode) bool {
-	if rawSink, ok := h.config.Sink.(core.RawEventSink); ok && signalBatch == nil {
-		// RawEventSink：跳过解码投原始字节，需 RouteResult 决定 ACK 模式。
-		result, err := rawSink.OnRawBatch(ctx, h.getAgentID(), batchEvents, batchMsg.GetBatch())
-		if err != nil {
-			slog.Warn("raw routing failed", "error", err)
-		} else if h.applyRouteResult(ctx, result, agentID, chunkID, ackMode) {
-			return true
-		}
-	} else if durable, ok := h.config.Sink.(core.DurableEventSink); ok {
-		// DurableEventSink：完整解码投递，需 RouteResult 决定 ACK 模式。
-		result, err := durable.OnSignalBatchWithResult(ctx, h.getAgentID(), signalBatch)
-		if err != nil {
-			slog.Warn("durable routing failed", "error", err)
-		} else if h.applyRouteResult(ctx, result, agentID, chunkID, ackMode) {
-			return true
-		}
+	h.dgramBucketMu.Lock()
+	defer h.dgramBucketMu.Unlock()
+	now := time.Now()
+	if h.dgramLast.IsZero() {
+		h.dgramLast = now
+		h.dgramAvail = h.dgramRate
 	} else {
-		// 普通 EventSink（异步被禁用，SinkQueueSize<0 测试场景）：同步调用。
-		if err := h.config.Sink.OnSignalBatch(ctx, h.getAgentID(), signalBatch); err != nil {
-			slog.Warn("event routing failed", "error", err)
+		elapsed := now.Sub(h.dgramLast).Seconds()
+		h.dgramAvail += int64(elapsed * float64(h.dgramRate))
+		if h.dgramAvail > h.dgramRate {
+			h.dgramAvail = h.dgramRate
 		}
-		pressure := h.config.Sink.OnPressure(h.getAgentID())
-		h.applyPressure(ctx, pressure)
+		h.dgramLast = now
 	}
-	return false
-}
-
-// resolveBatchEvents 解析事件数（RawEventSink 快速路径 vs 完整解码）。batchEvents<0 表示已发 NACK。
-func (h *CoreHandler) resolveBatchEvents(ctx context.Context, batchMsg *corepb.BatchMessage) (int, *core.SignalBatch) {
-	rawSink, _ := h.config.Sink.(core.RawEventSink)
-	if rawSink != nil && batchMsg.GetEventsCount() > 0 {
-		ec := int(batchMsg.GetEventsCount())
-		if ec > maxBatchEvents {
-			h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeTooManyEvents,
-				fmt.Sprintf("event count %d exceeds limit %d", ec, maxBatchEvents), false)
-			return -1, nil
-		}
-		return ec, nil
-	}
-	sb, ok := h.decodeSignalBatch(ctx, batchMsg)
-	if !ok {
-		return -1, nil
-	}
-	return len(sb.Signals), sb
-}
-
-func (h *CoreHandler) decodeSignalBatch(ctx context.Context, batchMsg *corepb.BatchMessage) (*core.SignalBatch, bool) {
-	// 内联 codecForUnmarshal：优先协商 codec，回退 Policy.DefaultCodec。
-	codec := h.config.Policy.DefaultCodec
-	if n := h.negotiated.Load(); n != nil {
-		codec = n.Codec
-	}
-	sb, err := core.UnmarshalSignalBatchCodec(codec, batchMsg.GetBatch())
-	if err != nil {
-		slog.Debug("signal batch decode failed", "error", err)
-		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeInvalidSignalBatch, "signal batch could not be decoded", false)
-		return nil, false
-	}
-	if err := sb.Validate(); err != nil {
-		slog.Debug("signal validation failed", "error", err)
-		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeSignalValidation, "signal batch failed validation", false)
-		return nil, false
-	}
-	if len(sb.Signals) > maxBatchEvents {
-		h.sendNack(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), core.ErrCodeTooManyEvents,
-			fmt.Sprintf("event count %d exceeds limit %d", len(sb.Signals), maxBatchEvents), false)
-		return nil, false
-	}
-	return sb, true
-}
-
-// verifyEnvelopeAlgo 强制 envelope 使用协商算法（Compression + Codec + CipherSuite）。
-// 任一不一致即拒绝——防止客户端单方面降级或注入未协商算法（defense-in-depth，
-// 即使 HMAC 通过也不允许 wire 字段与权威协商结果不符）。返回 true 表示已发 NACK，调用方中止。
-func (h *CoreHandler) verifyEnvelopeAlgo(env *core.SecureEnvelope) bool {
-	n := h.negotiated.Load()
-	if n == nil {
-		// negotiated 未设置 = 握手未完成或 0-RTT 降级路径。fail-closed：拒绝而非静默放行，
-		// 防止未认证的 envelope 在无算法一致性校验下被处理。
-		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeAlgoMismatch,
-			"negotiation result unavailable", false)
-		return true
-	}
-	if env.Compression != n.Compression {
-		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeAlgoMismatch,
-			"compression not negotiated", false)
-		return true
-	}
-	if env.Codec != n.Codec {
-		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeAlgoMismatch,
-			"codec not negotiated", false)
-		return true
-	}
-	if env.CipherSuite != n.CipherSuite {
-		h.sendNack(context.Background(), env.GetSeq(), env.GetChunkId(), core.ErrCodeEnvelopeAlgoMismatch,
-			"cipher suite not negotiated", false)
+	if h.dgramAvail >= n {
+		h.dgramAvail -= n
 		return true
 	}
 	return false
 }
 
-// routeAndACK 路由 batch 到 sink 并发送 ACK（core spec §11）。
-func (h *CoreHandler) routeAndACK(ctx context.Context, agentID, chunkID string, batchMsg *corepb.BatchMessage, signalBatch *core.SignalBatch, batchEvents int, batchBytes int64) {
-	defer h.inflight.Remove(batchEvents, batchBytes)
-
-	// 旁路通知 batch 级 trace 上下文（不改变路由/ACK 逻辑）。仅当 sink 实现
-	// BatchTraceSink 且该 batch 携带 TraceContext 时触发；现有 sink 实现零影响。
-	if tc := batchMsg.GetTraceContext(); tc != nil {
-		if ts, ok := h.config.Sink.(core.BatchTraceSink); ok {
-			ts.OnBatchTraceContext(ctx, agentID, tc) // *corepb.TraceContext 即 *core.TraceContext（类型别名）
-		}
+// abort 发送 ABORT 并拆除（协议违规/写失败）。
+func (h *CoreHandler) abort(ctx context.Context, code uint32, detail string) {
+	a := &core.AbortMsg{Code: code, Detail: detail}
+	p, err := core.Encode(a)
+	if err == nil {
+		_ = SendControlFrame(ctx, h.tr, core.TypeAbort, p)
 	}
-
-	ackMode := corepb.AckMode_ACK_MODE_ACCEPTED
-
-	if h.config.Sink != nil {
-		_, asyncDurable := h.config.Sink.(core.AsyncDurableSink) // 内联原 asyncDurableEnabled()
-		switch {
-		case h.sinkQueue != nil && asyncDurable:
-			// AsyncDurableSink（异步）：投递队列立即发 ACK accepted，worker 调
-			// OnSignalBatchAsync；sink 持久化后回调 notifier 发 durable 升级帧。
-			if !h.enqueueSinkTask(sinkTask{
-				agentID: agentID, batch: signalBatch, asyncDurable: true,
-				seq: batchMsg.GetSeq(), chunkID: batchMsg.GetChunkId(),
-				eventsCount: batchEvents, notifier: h.durableNotifier,
-			}, ctx, agentID, chunkID) {
-				return
-			}
-		case h.sinkQueue != nil:
-			// 普通 EventSink（异步 fire-and-forget）：投递到有界队列立即返回 ACK accepted，
-			// 协议层不等 sink 处理（解耦吞吐）。队列满 → 发 THROTTLE + 重置 replay 为 Processing
-			// （与 applyRouteResult 的 Throttle 分支对称），让客户端重试时重新投递。
-			if !h.enqueueSinkTask(sinkTask{agentID: agentID, batch: signalBatch}, ctx, agentID, chunkID) {
-				return
-			}
-			pressure := h.config.Sink.OnPressure(h.getAgentID())
-			h.applyPressure(ctx, pressure)
-		default:
-			// 同步路径（Durable/Raw sink 未实现 AsyncDurableSink，或异步被禁用的普通 EventSink）。
-			// 返回 true 表示已 THROTTLE，调用方应 return 不发 ACK。
-			if h.routeSinkSync(ctx, agentID, chunkID, batchMsg, signalBatch, batchEvents, &ackMode) {
-				return
-			}
-		}
-	} // 闭合 if h.config.Sink != nil
-
-	// BatchesAcked 由 sendAck 内部统一计数，避免正常路径与 replay 路径(第 107 行)重复或遗漏。
-	h.sendAck(ctx, batchMsg.GetSeq(), batchMsg.GetChunkId(), batchEvents, ackMode)
+	_ = h.tr.Close()
 }
 
-func (h *CoreHandler) applyRouteResult(ctx context.Context, result *core.RouteResult, agentID, chunkID string, ackMode *corepb.AckMode) bool {
-	if result == nil {
-		return false
+// makeDone 构造 sink 的 done 回调：驱动 grant 的终态 Settle（单次生效；
+// grant 已终态（reaper/超时抢先）后安全丢弃）。
+func (h *CoreHandler) makeDone(grant *core.SettleGrant, durable bool) func(core.Outcome) {
+	var once sync.Once
+	return func(o core.Outcome) {
+		once.Do(func() {
+			if !durable {
+				return // accepted_only：done 无 wire 效果（终态已在 deliver 完成）
+			}
+			send := h.sender(context.Background())
+			switch o.Level {
+			case core.OutcomeDurable, core.OutcomeAccepted:
+				grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_DURABLE, 0, 0, 0)
+			case core.OutcomeReleased, core.OutcomeRejected:
+				code := o.Code
+				if code == 0 {
+					code = core.CodeInternal
+				}
+				lvl := corepb.ResultLevel_RESULT_LEVEL_RELEASED
+				retry := uint32(1000)
+				if o.Level == core.OutcomeRejected {
+					lvl = corepb.ResultLevel_RESULT_LEVEL_REJECTED
+					retry = 0
+				}
+				grant.Settle(send, lvl, code, retry, 0)
+			}
+			h.maybeScheduleFlush()
+		})
 	}
-	switch result.Status {
-	case core.ACKStatusDurable:
-		*ackMode = corepb.AckMode_ACK_MODE_DURABLE
-		h.replay.Update(agentID, chunkID, core.ReplayDurable)
-	case core.ACKStatusThrottle:
-		// 重置 replay entry 为 Processing，允许客户端重试时重新投递（否则 replay 仍为 Accepted，
-		// 客户端重试会收到 ACK_ACCEPTED 但 batch 从未真正处理，造成静默数据丢失）。
-		h.replay.Update(agentID, chunkID, core.ReplayProcessing)
-		h.sendThrottle(ctx, core.ErrCodeQueuePressure, "queue pressure critical, retry later")
-		return true
-	default:
-		*ackMode = corepb.AckMode_ACK_MODE_ACCEPTED
-	}
-	if result.Pressure != "" {
-		h.applyPressure(ctx, result.Pressure)
-	}
-	return false
 }
 
-// applyPressure 在 pressure 变化时更新窗口并下发 WINDOW（core spec §9.2：取值变化时才发送，
-// 避免同值重复）。锁内只做"比较-更新-window.Update"原子序列；锁外调 sendWindowUpdate，
-// 避免反压下 goroutine 在网络写上串行化。
-func (h *CoreHandler) applyPressure(ctx context.Context, pressure core.PressureState) {
-	if pressure == "" {
-		return
+// makeEvent 构造 BatchEvent（按 SinkOptions 供给 Raw/Decoded）。
+// raw 是解密后的 batch 消息编码（Batch wire）。
+func (h *CoreHandler) makeEvent(batch *core.Batch, raw []byte) core.BatchEvent {
+	ev := core.BatchEvent{
+		Agent: h.getAgentID(),
+		Meta: core.BatchMeta{
+			Seq:         batch.GetSeq(),
+			Correlation: batch.GetCorrelation(),
+			EventsCount: int(batch.GetEventsCount()),
+			ReceivedAt:  time.Now(),
+			Trace:       batch.GetTrace(),
+		},
 	}
-	h.pressureMu.Lock()
-	// 内联 loadLastPressure：atomic.Value load + 类型断言 + 默认值。
-	lastPressure := core.PressureNormal
-	if v := h.lastPressure.Load(); v != nil {
-		lastPressure = v.(core.PressureState)
+	if h.config.SinkOpts.Raw {
+		ev.Raw = raw
+	} else {
+		// batch 形参已由 decodeAndValidate 解出，直接取 payload 不重复解析。
+		if sb, err := h.decodeSignalBatch(batch.GetPayload()); err == nil {
+			ev.Decoded = sb
+		}
 	}
-	if pressure == lastPressure {
-		h.pressureMu.Unlock()
-		return
+	return ev
+}
+
+// decodeSignalBatch 按协商 codec 解码 SignalBatch。
+func (h *CoreHandler) decodeSignalBatch(raw []byte) (*core.SignalBatch, error) {
+	codec := corepb.Codec_CODEC_PROTO
+	if c, ok := h.codec.Load().(corepb.Codec); ok {
+		codec = c
 	}
-	h.lastPressure.Store(pressure)
-	b, e, by := pressureToWindow(pressure)
-	h.window.Update(b, e, by)
-	h.pressureMu.Unlock()
-	// 锁外发送：sendWindowUpdate 幂等（取值已 Store 到 lastPressure，重复发也只是对端多收一份 WINDOW）。
-	h.sendWindowUpdate(ctx, b, e, by, string(pressure))
+	return core.UnmarshalSignalBatchCodec(codec, raw)
+}
+
+// callHandler 调用 sink handler（panic 防护：合成 released 走 grant）。
+func (h *CoreHandler) callHandler(ctx context.Context, ev core.BatchEvent, done func(core.Outcome)) {
+	defer func() {
+		if r := recover(); r != nil {
+			h.metrics.SinkFailures().Inc()
+			slog.Warn("sink handler panicked", "seq", ev.Meta.Seq, "panic", r)
+			done(core.Outcome{Level: core.OutcomeReleased, Code: core.CodeInternal})
+		}
+	}()
+	h.config.SinkHandler(ctx, ev, done)
 }

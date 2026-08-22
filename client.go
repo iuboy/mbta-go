@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/iuboy/mbta-go/core"
 	ntls "github.com/iuboy/mbta-go/ntls"
@@ -23,24 +24,27 @@ type Client struct {
 	mu     sync.RWMutex
 }
 
-// ACKHandler is called when the server acknowledges a batch.
-type ACKHandler func(chunkID, ackMode string)
+// ResultHandler is called when the server sends a RESULT terminal for a batch:
+// accepted / durable / rejected / released. seq 与 SendBatch 返回值对应；
+// rejected 时 code 为错误码注册表数字，correlation 透传发送选项携带的关联标识。
+type ResultHandler func(seq uint64, level string, code uint32, correlation string)
 
-// RedirectHandler is called when the server sends a TypeRedirect frame
+// RedirectHandler is called when the server sends a REDIRECT frame
 // (S→C cluster redirect to the HA leader). The payload is application-defined
 // (e.g. JSON {leaderAddr, leaderId}).
 //
-// ctx 带超时（redirectHandlerTimeout），handler 应在内部 IO/锁操作中检查 ctx.Done()
+// ctx 带 30 秒超时，handler 应在内部 IO/锁操作中检查 ctx.Done()
 // 并及时退出，否则超时后 goroutine 泄漏（Go runtime 无法杀死阻塞的 goroutine）。
 type RedirectHandler func(ctx context.Context, payload []byte)
 
 // versionedClient wraps version-specific clients with a common interface.
 type versionedClient interface {
 	Connect(ctx context.Context) error
-	SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error)
+	SendBatch(ctx context.Context, batch *core.SignalBatch, opts ...core.SendOption) (uint64, error)
+	SendDatagram(ctx context.Context, batch *core.SignalBatch, opts ...core.SendOption) (uint64, error)
 	Close() error
 	State() string
-	SetACKHandler(handler ACKHandler)
+	SetResultHandler(handler ResultHandler)
 	SetRedirectHandler(handler RedirectHandler)
 }
 
@@ -51,14 +55,20 @@ type ClientConfig struct {
 	Version ProtocolVersion
 
 	// Connection settings
-	Server   string
-	AgentID  string
-	Hostname string
-	Token    string
+	Server  string
+	AgentID string
+	Token   string // 认证 token（不上 wire，仅参与 token_proof HMAC）
 
-	// Agent 元数据（写入 HELLO，供服务端 OnSession 回调读取；空则不发/回退默认）。
-	OS           string // agent 操作系统（runtime.GOOS）
-	AgentVersion string // agent 构建版本（空则回退 mbta-go 内置默认）
+	// Meta 写入 HELLO.meta（hostname/os/agent_version 等，供服务端 OnSession 读取，可选）。
+	Meta map[string]string
+
+	// Capabilities 是客户端能力（与服务端 policy 协商取交集；未知能力 fail-fast）。
+	Capabilities []string
+
+	// DrainTimeout 限制 Close 时等待未终态 batch 的最长时间（可选）。0=用各版本
+	// 默认（30s）。缩短可减小「发完即 Close」的等待窗口；未终态的 batch 会丢
+	// （调用方负责重发）。
+	DrainTimeout time.Duration
 
 	// Version-specific configurations
 	V1Creds   *v1.ClientCredentials
@@ -122,7 +132,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 func Dial(ctx context.Context, server, agentID, token string, version ProtocolVersion, opts ...ClientOption) (*Client, error) {
 	allOpts := append([]ClientOption{
 		WithServer(server),
-		WithAgent(agentID, "", token),
+		WithAgent(agentID, token),
 		WithVersion(version),
 	}, opts...)
 
@@ -149,7 +159,7 @@ func (c *Client) initClient() (versionedClient, error) {
 	case VersionNTLS:
 		return c.initNTLSClient()
 	default:
-		return nil, core.NewError(core.ErrCodeVersion, fmt.Sprintf("unsupported version: %s", c.cfg.Version))
+		return nil, core.NewError(core.ErrCodeConfig, fmt.Sprintf("unsupported version: %s", c.cfg.Version))
 	}
 }
 
@@ -173,17 +183,33 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// SendBatch 通过活动连接发送 batch；opts 携带 per-call 选项（如 WithTraceContext），不传则与旧行为一致。
+// SendBatch 通过活动连接发送 batch，返回协议分配的 seq（供 ResultHandler 对账）。
+// opts 携带 per-call 选项（如 WithTraceContext），不传则与旧行为一致。
 // RLock 保护防止与 Close 竞态（Close 的 Lock 等待 RLock 释放，保证串行化）。
-func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
+func (c *Client) SendBatch(ctx context.Context, batch *core.SignalBatch, opts ...core.SendOption) (uint64, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	if c.client == nil {
-		return "", core.NewError(core.ErrCodeSession, "not connected (call Connect first)")
+		return 0, core.NewError(core.ErrCodeSession, "not connected (call Connect first)")
 	}
 
-	return c.client.SendBatch(ctx, batch, tag, source, opts...)
+	return c.client.SendBatch(ctx, batch, opts...)
+}
+
+// SendDatagram 以不可靠通道发送 batch（at-most-once，豁免 credit），返回分配的 seq。
+// 需协商 datagram 能力且传输支持（QUIC DATAGRAM，两侧启用扩展）；任一不满足时
+// 降级为可靠 SendBatch 路径（消耗 credit、有 RESULT 反馈）——调用方无需感知 binding
+// 差异。RLock 保护同 SendBatch。
+func (c *Client) SendDatagram(ctx context.Context, batch *core.SignalBatch, opts ...core.SendOption) (uint64, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.client == nil {
+		return 0, core.NewError(core.ErrCodeSession, "not connected (call Connect first)")
+	}
+
+	return c.client.SendDatagram(ctx, batch, opts...)
 }
 
 // Close closes the client and releases all resources.
@@ -210,27 +236,28 @@ func (c *Client) State() string {
 	defer c.mu.RUnlock()
 
 	if c.client == nil {
-		return core.StateDisconnected.String()
+		return core.StateIdle.String()
 	}
 	return c.client.State()
 }
 
-// SetACKHandler registers a callback for ACK notifications from the server.
-// The handler will be called with (chunkID, ackMode) when the server acknowledges a batch.
+// SetResultHandler registers a callback for RESULT notifications from the server.
+// The handler will be called with (seq, level, code, correlation) when the server
+// reports a terminal outcome for a batch.
 //
-// 用 Lock（非 RLock）：SetACKHandler 修改 handler 状态，需防并发 Set（RLock 仅防与 Close 的并发）。
-func (c *Client) SetACKHandler(handler ACKHandler) {
+// 用 Lock（非 RLock）：SetResultHandler 修改 handler 状态，需防并发 Set（RLock 仅防与 Close 的并发）。
+func (c *Client) SetResultHandler(handler ResultHandler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.client != nil {
-		c.client.SetACKHandler(handler)
+		c.client.SetResultHandler(handler)
 	}
 }
 
-// SetRedirectHandler registers a callback for TypeRedirect notifications
+// SetRedirectHandler registers a callback for REDIRECT notifications
 // (S→C cluster redirect to the HA leader). The handler receives the raw frame
-// payload for the application to decode.语义同 SetACKHandler，用 Lock 保护。
+// payload for the application to decode.语义同 SetResultHandler，用 Lock 保护。
 func (c *Client) SetRedirectHandler(handler RedirectHandler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -252,6 +279,11 @@ func (c *Client) initV1Client() (versionedClient, error) {
 	if c.cfg.V1Creds == nil {
 		return nil, core.NewError(core.ErrCodeCredential, "v1 credentials not provided")
 	}
+	// profile 由版本映射推导（v1=intl）；版本与 profile 正交，显式需求走 v1 包直连。
+	profile, err := ProfileFor(c.cfg.Version)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := v1.ClientConfig{
 		Transport: v1.QUICClientConfig{
@@ -259,11 +291,12 @@ func (c *Client) initV1Client() (versionedClient, error) {
 			Credentials: c.cfg.V1Creds,
 		},
 		AgentID:      c.cfg.AgentID,
-		Hostname:     c.cfg.Hostname,
 		Token:        c.cfg.Token,
-		OS:           c.cfg.OS,
-		AgentVersion: c.cfg.AgentVersion,
+		Meta:         c.cfg.Meta,
+		Capabilities: c.cfg.Capabilities,
+		Profile:      profile,
 		Metrics:      c.cfg.Metrics,
+		DrainTimeout: c.cfg.DrainTimeout,
 	}
 
 	client, err := v1.NewClient(cfg)
@@ -280,15 +313,17 @@ func (c *Client) initNTLSClient() (versionedClient, error) {
 	if c.cfg.NTLSCreds == nil {
 		return nil, core.NewError(core.ErrCodeCredential, "ntls credentials not provided")
 	}
+	profile := NTLSProfileFor(c.cfg.NTLSCreds.TLSMode)
 	cfg := ntls.ClientConfig{
 		Server:       c.cfg.Server,
 		Credentials:  c.cfg.NTLSCreds,
 		AgentID:      c.cfg.AgentID,
-		Hostname:     c.cfg.Hostname,
 		Token:        c.cfg.Token,
-		OS:           c.cfg.OS,
-		AgentVersion: c.cfg.AgentVersion,
+		Meta:         c.cfg.Meta,
+		Capabilities: c.cfg.Capabilities,
+		Profile:      profile,
 		Metrics:      c.cfg.Metrics,
+		DrainTimeout: c.cfg.DrainTimeout,
 	}
 	client, err := ntls.NewClient(cfg)
 	if err != nil {
@@ -304,12 +339,17 @@ type v1ClientWrapper struct {
 }
 
 func (w *v1ClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
-func (w *v1ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
-	return w.client.SendBatch(ctx, batch, tag, source, opts...)
+func (w *v1ClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, opts ...core.SendOption) (uint64, error) {
+	return w.client.SendBatch(ctx, batch, opts...)
 }
-func (w *v1ClientWrapper) Close() error                     { return w.client.Close() }
-func (w *v1ClientWrapper) State() string                    { return w.client.State().String() }
-func (w *v1ClientWrapper) SetACKHandler(handler ACKHandler) { w.client.SetACKHandler(handler) }
+func (w *v1ClientWrapper) SendDatagram(ctx context.Context, batch *core.SignalBatch, opts ...core.SendOption) (uint64, error) {
+	return w.client.SendDatagram(ctx, batch, opts...)
+}
+func (w *v1ClientWrapper) Close() error  { return w.client.Close() }
+func (w *v1ClientWrapper) State() string { return w.client.State().String() }
+func (w *v1ClientWrapper) SetResultHandler(handler ResultHandler) {
+	w.client.SetResultHandler(handler)
+}
 func (w *v1ClientWrapper) SetRedirectHandler(handler RedirectHandler) {
 	w.client.SetRedirectHandler(handler)
 }
@@ -319,12 +359,17 @@ type ntlsClientWrapper struct {
 }
 
 func (w *ntlsClientWrapper) Connect(ctx context.Context) error { return w.client.Connect(ctx) }
-func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, tag, source string, opts ...core.SendOption) (string, error) {
-	return w.client.SendBatch(ctx, batch, tag, source, opts...)
+func (w *ntlsClientWrapper) SendBatch(ctx context.Context, batch *core.SignalBatch, opts ...core.SendOption) (uint64, error) {
+	return w.client.SendBatch(ctx, batch, opts...)
 }
-func (w *ntlsClientWrapper) Close() error                     { return w.client.Close() }
-func (w *ntlsClientWrapper) State() string                    { return w.client.State().String() }
-func (w *ntlsClientWrapper) SetACKHandler(handler ACKHandler) { w.client.SetACKHandler(handler) }
+func (w *ntlsClientWrapper) SendDatagram(ctx context.Context, batch *core.SignalBatch, opts ...core.SendOption) (uint64, error) {
+	return w.client.SendDatagram(ctx, batch, opts...)
+}
+func (w *ntlsClientWrapper) Close() error  { return w.client.Close() }
+func (w *ntlsClientWrapper) State() string { return w.client.State().String() }
+func (w *ntlsClientWrapper) SetResultHandler(handler ResultHandler) {
+	w.client.SetResultHandler(handler)
+}
 func (w *ntlsClientWrapper) SetRedirectHandler(handler RedirectHandler) {
 	w.client.SetRedirectHandler(handler)
 }
@@ -348,22 +393,30 @@ func WithServer(server string) ClientOption {
 	}
 }
 
-// WithAgent sets the agent identification.
-func WithAgent(agentID, hostname, token string) ClientOption {
+// WithAgent sets the agent identification（agentID + token）。
+// 旧签名的 hostname 参数并入 WithAgentMeta 的通用元数据面（HELLO.meta map）。
+func WithAgent(agentID, token string) ClientOption {
 	return func(cc *ClientConfig) error {
 		cc.AgentID = agentID
-		cc.Hostname = hostname
 		cc.Token = token
 		return nil
 	}
 }
 
-// WithAgentMeta sets optional agent metadata (os, version) sent in HELLO. Empty
-// values are ignored (os omitted, version falls back to mbta-go default).
-func WithAgentMeta(os, agentVersion string) ClientOption {
+// WithAgentMeta sets the HELLO metadata map (hostname/os/agent_version 等).
+// 整表替换（非合并）：调用方对 map 拥有完整控制权，避免部分更新的歧义。
+func WithAgentMeta(meta map[string]string) ClientOption {
 	return func(cc *ClientConfig) error {
-		cc.OS = os
-		cc.AgentVersion = agentVersion
+		cc.Meta = meta
+		return nil
+	}
+}
+
+// WithCapabilities sets the client capabilities（与服务端 policy 协商取交集；
+// 未知能力在 NewClient 构造期 fail-fast）。
+func WithCapabilities(caps []string) ClientOption {
+	return func(cc *ClientConfig) error {
+		cc.Capabilities = caps
 		return nil
 	}
 }
@@ -390,6 +443,18 @@ func WithNTLSCredentials(cfg ntls.ClientCredentials) ClientOption {
 func WithClientMetrics(metrics core.Metrics) ClientOption {
 	return func(cc *ClientConfig) error {
 		cc.Metrics = metrics
+		return nil
+	}
+}
+
+// WithDrainTimeout 设置 Close 时等待未终态 batch 的最长时间（可选，0=默认 30s）。
+// 缩短可减小「发完即 Close」的等待窗口；未终态的 batch 会丢（调用方负责重发）。
+func WithDrainTimeout(d time.Duration) ClientOption {
+	return func(cc *ClientConfig) error {
+		if d < 0 {
+			return core.NewError(core.ErrCodeConfig, "drain timeout must not be negative")
+		}
+		cc.DrainTimeout = d
 		return nil
 	}
 }

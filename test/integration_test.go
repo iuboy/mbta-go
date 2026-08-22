@@ -1,7 +1,8 @@
 //go:build integration
 
 // Package mbta_test 提供黑盒集成测试：以外部消费者视角通过 facade 包
-// (github.com/iuboy/mbta-go) 验证完整协议链路，模拟真实用户用法。
+// (github.com/iuboy/mbta-go) 验证 r3 协议完整链路（QUIC/TLCP 传输 → 1-RTT 握手 →
+// BATCH envelope → RESULT/CREDIT → CLOSE drain），模拟真实用户用法。
 // 不依赖 internal/ 包。默认不运行（integration tag），需：
 //
 //	go test -tags integration ./test/
@@ -12,7 +13,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +20,7 @@ import (
 
 	mbtago "github.com/iuboy/mbta-go"
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 	ntls "github.com/iuboy/mbta-go/ntls"
 	v1 "github.com/iuboy/mbta-go/v1"
 )
@@ -38,19 +39,18 @@ func randHex(n int) string {
 func randAgentID() string { return "agent-" + randHex(8) }
 func randToken() string   { return "tok-" + randHex(16) }
 
-// countingSink 统计收到的 batch 数与 payload（EventSink 最小实现）。
-type countingSink struct {
+// batchRecorder 记录 sink 收到的 batch 数（r3 注册式 sink 面的最小实现）。
+type batchRecorder struct {
 	count atomic.Int64
 }
 
-func (s *countingSink) OnSignalBatch(_ context.Context, _ string, _ *core.SignalBatch) error {
+// handler 满足 core.BatchHandler：不调 done（accepted_only 模式下 done 无 wire 效果）。
+func (s *batchRecorder) handler(_ context.Context, _ core.BatchEvent, _ func(core.Outcome)) {
 	s.count.Add(1)
-	return nil
 }
-func (s *countingSink) OnPressure(_ string) core.PressureState { return core.PressureNormal }
 
-// waitCount 轮询直到 sink.count >= want 或超时，返回是否达成。
-func waitCount(s *countingSink, want int64, timeout time.Duration) bool {
+// waitCount 轮询直到 count >= want 或超时，返回是否达成。
+func (s *batchRecorder) waitCount(want int64, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if s.count.Load() >= want {
@@ -59,6 +59,76 @@ func waitCount(s *countingSink, want int64, timeout time.Duration) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return s.count.Load() >= want
+}
+
+// waitCond 轮询直到 cond 为真或超时。
+func waitCond(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return cond()
+}
+
+// resultCollector 收集 RESULT 回调（seq → 最新 level）+ 总回调计数。
+// seen 仅适用于单客户端（seq 是连接级空间）；多客户端共享 collector 时用 count。
+type resultCollector struct {
+	mu    sync.Mutex
+	seen  map[uint64]string // seq → level
+	count atomic.Int64      // 总回调数（多客户端 seq 空间重叠，不能用 len(seen)）
+}
+
+func newResultCollector() *resultCollector {
+	return &resultCollector{seen: map[uint64]string{}}
+}
+
+func (c *resultCollector) handler(seq uint64, level string, _ uint32, _ string) {
+	c.count.Add(1)
+	c.mu.Lock()
+	c.seen[seq] = level
+	c.mu.Unlock()
+}
+
+// waitLevel 轮询直到 seq 出现且 level 匹配（durable 场景中间态 accepted 会被
+// 后续回调覆盖，最终以终态为准）。
+func (c *resultCollector) waitLevel(t *testing.T, seq uint64, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		c.mu.Lock()
+		got, ok := c.seen[seq]
+		c.mu.Unlock()
+		if ok {
+			if got != want {
+				t.Fatalf("seq %d result level = %s, want %s", seq, got, want)
+			}
+			return
+		}
+		if !deadline.After(time.Now()) {
+			t.Fatalf("timeout waiting for RESULT seq=%d level=%s", seq, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitCount 轮询直到回调覆盖的 seq 数达到 want。
+func (c *resultCollector) waitCount(want int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		n := len(c.seen)
+		c.mu.Unlock()
+		if n >= want {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.seen) >= want
 }
 
 // waitAddr 轮询直到 server 完成监听（Addr 非 ""），或超时 fatal。
@@ -75,11 +145,43 @@ func waitAddr(tb testing.TB, srv *mbtago.Server) string {
 	return ""
 }
 
-// startV1Server 构造并启动一个 v1 QUIC server（:0 随机端口，默认 Policy），
-// 返回 server、监听地址、cancel（测试结束调 cancel + Close）。
-func startV1Server(t *testing.T, sink core.EventSink, extraOpts ...mbtago.ServerOption) (*mbtago.Server, context.CancelFunc) {
+// startServer 构造并启动 facade server（:0 随机端口）。Start 错误经 channel 传播，
+// 由 waitServerExit 在测试收尾断言（不吞启动失败）。facade Addr()：v1 启用时返回
+// v1 地址；ntls-only server 返回 ntls 地址。
+func startServer(t *testing.T, opts ...mbtago.ServerOption) *mbtago.Server {
 	t.Helper()
-	opts := []mbtago.ServerOption{
+	srv, err := mbtago.NewServer(opts...)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	startErr := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { startErr <- srv.Start(ctx) }()
+	waitAddr(t, srv)
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Close()
+		waitServerExit(t, startErr)
+	})
+	return srv
+}
+
+// waitServerExit 等待 Start 返回并断言 nil（ctx 取消下的正常收场）。
+func waitServerExit(t *testing.T, ch <-chan error) {
+	t.Helper()
+	select {
+	case err := <-ch:
+		if err != nil {
+			t.Errorf("server Start returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("server Start did not return after cancel")
+	}
+}
+
+// v1ServerOpts 组装 v1 QUIC server 的公共配置（证书在 test/data/certificates/）。
+func v1ServerOpts(tok, agentID string) []mbtago.ServerOption {
+	return []mbtago.ServerOption{
 		mbtago.WithV1(v1.QUICServerConfig{
 			Address: "127.0.0.1:0",
 			Credentials: &v1.ServerCredentials{
@@ -87,50 +189,8 @@ func startV1Server(t *testing.T, sink core.EventSink, extraOpts ...mbtago.Server
 				KeyFile:  "data/certificates/server.key",
 			},
 		}),
-		mbtago.WithEventSink(sink),
-		mbtago.WithAuth(core.NewStaticTokenValidator(map[string]string{})),
-	}
-	opts = append(opts, extraOpts...)
-	srv, err := mbtago.NewServer(opts...)
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = srv.Start(ctx) }()
-	waitAddr(t, srv)
-	t.Cleanup(func() {
-		cancel()
-		_ = srv.Close()
-	})
-	return srv, cancel
-}
-
-// startNTLSServer 构造并启动一个 ntls TLCP server（:0，双 SM2 证书）。
-func startNTLSServer(t *testing.T, sink core.EventSink, tok, agentID string) *mbtago.Server {
-	t.Helper()
-	srv, err := mbtago.NewServer(
-		mbtago.WithoutV1(), // 仅 ntls，避免默认 v1 因无证书启动失败
-		mbtago.WithNTLS(ntls.ServerConfig{
-			Address:      "127.0.0.1:0",
-			SignCertFile: "data/ntls/sm2_sign_cert.pem",
-			SignKeyFile:  "data/ntls/sm2_sign_key.pem",
-			EncCertFile:  "data/ntls/sm2_enc_cert.pem",
-			EncKeyFile:   "data/ntls/sm2_enc_key.pem",
-		}),
-		mbtago.WithEventSink(sink),
 		mbtago.WithAuth(core.NewStaticTokenValidator(map[string]string{tok: agentID})),
-	)
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = srv.Start(ctx) }()
-	waitAddr(t, srv)
-	t.Cleanup(func() {
-		cancel()
-		_ = srv.Close()
-	})
-	return srv
 }
 
 // newV1Client 构造一个连接 addr 的 v1 客户端（InsecureSkipVerify，测试环境）。
@@ -138,8 +198,10 @@ func newV1Client(t *testing.T, addr, agentID, token string) *mbtago.Client {
 	t.Helper()
 	c, err := mbtago.NewClient(
 		mbtago.WithServer(addr),
-		mbtago.WithAgent(agentID, "test-host", token),
+		mbtago.WithAgent(agentID, token),
+		mbtago.WithVersion(mbtago.Version1),
 		mbtago.WithV1Credentials(v1.ClientCredentials{InsecureSkipVerify: true}),
+		mbtago.WithDrainTimeout(5*time.Second),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -148,16 +210,14 @@ func newV1Client(t *testing.T, addr, agentID, token string) *mbtago.Client {
 }
 
 // smallBatch 构造一个含 n 个 signal 的小 batch（body 为合法 UTF-8 的 hex 串）。
-// 注意：proto string 字段要求合法 UTF-8，随机字节会被 marshal 拒绝，故用 hex。
 func smallBatch(n int, bodySize int) *core.SignalBatch {
 	signals := make([]*core.SignalRecord, n)
 	for i := range signals {
 		signals[i] = &core.SignalRecord{
-			SignalType:     "log",
+			SignalType:     core.SignalTypeLog,
 			TimeUnixMs:     time.Now().UnixMilli(),
 			SeverityNumber: 9,
-			// hex 编码保证合法 UTF-8（ASCII 子集）；bodySize 指原始字节数，hex 翻倍。
-			Body: randHex(bodySize / 2),
+			Body:           randHex(bodySize / 2), // hex 保证合法 UTF-8（ASCII 子集）
 		}
 	}
 	return &core.SignalBatch{Signals: signals}
@@ -165,39 +225,98 @@ func smallBatch(n int, bodySize int) *core.SignalBatch {
 
 // --- 集成测试 ---
 
-// TestIntegration_V1_Quic_SendBatch 验证 facade v1 QUIC 完整链路。
-// 关键：不配 Policy（验证默认 Policy 注入生效——之前的回归修复点）。
-func TestIntegration_V1_Quic_SendBatch(t *testing.T) {
-	sink := &countingSink{}
+// TestIntegration_V1_Quic_AcceptedResult 验证 facade v1 QUIC 完整链路：
+// connect → send → RESULT(accepted) 回调 → sink 收到 → close。
+// 关键：不配 Policy（验证默认策略注入生效——历史回归点）。
+func TestIntegration_V1_Quic_AcceptedResult(t *testing.T) {
+	sink := &batchRecorder{}
 	tok, agentID := randToken(), randAgentID()
-	// 覆盖默认空 Auth：注入真实 token。
-	srv, _ := startV1Server(t, sink, mbtago.WithAuth(
-		core.NewStaticTokenValidator(map[string]string{tok: agentID})))
+	srv := startServer(t, append(v1ServerOpts(tok, agentID),
+		mbtago.WithSink(core.SinkOptions{}, sink.handler))...)
 
 	client := newV1Client(t, srv.Addr(), agentID, tok)
+	results := newResultCollector()
+	client.SetResultHandler(results.handler)
 	if err := client.Connect(context.Background()); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer client.Close()
 
-	sb := smallBatch(1, 64)
-	if _, err := client.SendBatch(context.Background(), sb, "tag", "source"); err != nil {
+	seq, err := client.SendBatch(context.Background(), smallBatch(1, 64))
+	if err != nil {
 		t.Fatalf("SendBatch: %v", err)
 	}
-	if !waitCount(sink, 1, 3*time.Second) {
+	if seq != 1 {
+		t.Errorf("first batch seq = %d, want 1（连接级计数器从 1 起）", seq)
+	}
+	results.waitLevel(t, seq, corepb.ResultLevel_RESULT_LEVEL_ACCEPTED.String(), 5*time.Second)
+	if !sink.waitCount(1, 5*time.Second) {
 		t.Fatalf("sink count = %d, want 1", sink.count.Load())
+	}
+	if st := client.State(); st != core.StateReady.String() {
+		t.Errorf("client state after send = %s, want READY", st)
 	}
 }
 
-// TestIntegration_NTLS_TLCP_SendBatch 验证 facade ntls（TLCP 双 SM2）完整链路。
-func TestIntegration_NTLS_TLCP_SendBatch(t *testing.T) {
-	sink := &countingSink{}
+// TestIntegration_V1_DurableResult 验证 durable ack_mode 全链路：accepted（中间态）
+// → handler done(Durable) → RESULT(durable)。
+func TestIntegration_V1_DurableResult(t *testing.T) {
 	tok, agentID := randToken(), randAgentID()
-	srv := startNTLSServer(t, sink, tok, agentID)
+	var durable atomic.Int64
+	handler := func(_ context.Context, _ core.BatchEvent, done func(core.Outcome)) {
+		done(core.Outcome{Level: core.OutcomeDurable})
+		durable.Add(1)
+	}
+	srv := startServer(t, append(v1ServerOpts(tok, agentID),
+		mbtago.WithPolicy(core.ServerPolicy{
+			Profile:              corepb.Profile_PROFILE_INTL,
+			AckMode:              corepb.AckMode_ACK_MODE_DURABLE,
+			InitialCreditBatches: 16,
+			InitialCreditBytes:   4 << 20,
+			MaxFrameBytes:        core.MaxFrameBytes,
+			MaxBatchBytes:        8 << 20,
+		}),
+		mbtago.WithSink(core.SinkOptions{Durable: true}, handler))...)
+
+	client := newV1Client(t, srv.Addr(), agentID, tok)
+	results := newResultCollector()
+	client.SetResultHandler(results.handler)
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer client.Close()
+
+	seq, err := client.SendBatch(context.Background(), smallBatch(1, 32))
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	// 两段确认：先 accepted（中间态），done 后 durable（终态）。
+	results.waitLevel(t, seq, corepb.ResultLevel_RESULT_LEVEL_DURABLE.String(), 5*time.Second)
+	if durable.Load() != 1 {
+		t.Errorf("sink handler invocations = %d, want 1", durable.Load())
+	}
+}
+
+// TestIntegration_NTLS_TLCP_GM 验证 ntls（TLCP 双 SM2 证书）+ gm profile 完整链路。
+func TestIntegration_NTLS_TLCP_GM(t *testing.T) {
+	sink := &batchRecorder{}
+	tok, agentID := randToken(), randAgentID()
+	srv := startServer(t,
+		mbtago.WithoutV1(), // 仅 ntls，避免默认 v1 因无证书启动失败
+		mbtago.WithNTLS(ntls.ServerConfig{
+			Address:      "127.0.0.1:0",
+			SignCertFile: "data/ntls/sm2_sign_cert.pem",
+			SignKeyFile:  "data/ntls/sm2_sign_key.pem",
+			EncCertFile:  "data/ntls/sm2_enc_cert.pem",
+			EncKeyFile:   "data/ntls/sm2_enc_key.pem",
+		}),
+		mbtago.WithAuth(core.NewStaticTokenValidator(map[string]string{tok: agentID})),
+		mbtago.WithSink(core.SinkOptions{}, sink.handler),
+	)
 
 	client, err := mbtago.NewClient(
 		mbtago.WithServer(srv.Addr()),
-		mbtago.WithAgent(agentID, "test-host", tok),
+		mbtago.WithAgent(agentID, tok),
 		mbtago.WithVersion(mbtago.VersionNTLS),
 		mbtago.WithNTLSCredentials(ntls.ClientCredentials{
 			SignCertFile: "data/ntls/sm2_sign_cert.pem",
@@ -206,44 +325,54 @@ func TestIntegration_NTLS_TLCP_SendBatch(t *testing.T) {
 			EncKeyFile:   "data/ntls/sm2_enc_key.pem",
 			CAFile:       "data/ntls/sm2_ca.pem",
 		}),
+		mbtago.WithDrainTimeout(5*time.Second),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+	results := newResultCollector()
+	client.SetResultHandler(results.handler)
 	if err := client.Connect(context.Background()); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer client.Close()
 
-	sb := smallBatch(1, 64)
-	if _, err := client.SendBatch(context.Background(), sb, "tag", "source"); err != nil {
+	seq, err := client.SendBatch(context.Background(), smallBatch(2, 32))
+	if err != nil {
 		t.Fatalf("SendBatch: %v", err)
 	}
-	if !waitCount(sink, 1, 3*time.Second) {
+	results.waitLevel(t, seq, corepb.ResultLevel_RESULT_LEVEL_ACCEPTED.String(), 5*time.Second)
+	if !sink.waitCount(1, 5*time.Second) {
 		t.Fatalf("sink count = %d, want 1", sink.count.Load())
 	}
 }
 
-// TestIntegration_Concurrent_MultiClient 验证多客户端并发：N 个 client 连同一 server，
-// 各发 M 个 batch，sink 应收到 N*M。模拟多 agent 真实场景。
-//
-// 注意：SendBatch 返回成功仅表示发出，服务端投递到 sink 是异步的。故所有客户端
-// 发完后需先等 sink 收齐（waitCount），再统一 Close——否则过早 Close 会触发服务端
-// drain 超时强关，丢弃仍在处理流水线中的 batch。
+// TestIntegration_Concurrent_MultiClient 验证多客户端并发：N 个 client 连同一
+// server，各发 M 个 batch。断言：sink 收到 N*M；每 client 的 seq 从 1 单调递增；
+// 全部 batch 收到 accepted RESULT。
 func TestIntegration_Concurrent_MultiClient(t *testing.T) {
 	const (
 		nClients = 8
 		nBatches = 10
 	)
-	sink := &countingSink{}
+	sink := &batchRecorder{}
 	tok, agentID := randToken(), randAgentID()
-	srv, _ := startV1Server(t, sink, mbtago.WithAuth(
-		core.NewStaticTokenValidator(map[string]string{tok: agentID})))
+	srv := startServer(t, append(v1ServerOpts(tok, agentID),
+		mbtago.WithPolicy(core.ServerPolicy{
+			Profile:              corepb.Profile_PROFILE_INTL,
+			AckMode:              corepb.AckMode_ACK_MODE_ACCEPTED_ONLY,
+			InitialCreditBatches: 64,
+			InitialCreditBytes:   8 << 20,
+			MaxFrameBytes:        core.MaxFrameBytes,
+			MaxBatchBytes:        8 << 20,
+		}),
+		mbtago.WithSink(core.SinkOptions{}, sink.handler))...)
 
-	// 先建立全部连接（收集到 slice，便于发完后统一关闭）。
 	clients := make([]*mbtago.Client, nClients)
+	results := newResultCollector()
 	for i := range clients {
 		c := newV1Client(t, srv.Addr(), agentID, tok)
+		c.SetResultHandler(results.handler)
 		if err := c.Connect(context.Background()); err != nil {
 			t.Fatalf("client %d Connect: %v", i, err)
 		}
@@ -255,15 +384,20 @@ func TestIntegration_Concurrent_MultiClient(t *testing.T) {
 		}
 	}()
 
-	// 并发发送：每个 client 在自己的 goroutine 里发 nBatches 个 batch。
+	// 并发发送：每 client 发 nBatches 个 batch，seq 必须为 1..nBatches（连接级计数器）。
 	var wg sync.WaitGroup
 	for i, c := range clients {
 		wg.Add(1)
 		go func(idx int, cl *mbtago.Client) {
 			defer wg.Done()
-			for j := 0; j < nBatches; j++ {
-				if _, err := cl.SendBatch(context.Background(), smallBatch(1, 32), "tag", "source"); err != nil {
+			for j := 1; j <= nBatches; j++ {
+				seq, err := cl.SendBatch(context.Background(), smallBatch(1, 32))
+				if err != nil {
 					t.Errorf("client %d batch %d: %v", idx, j, err)
+					return
+				}
+				if seq != uint64(j) {
+					t.Errorf("client %d batch %d: seq = %d, want %d", idx, j, seq, j)
 					return
 				}
 			}
@@ -271,88 +405,77 @@ func TestIntegration_Concurrent_MultiClient(t *testing.T) {
 	}
 	wg.Wait()
 
-	// 发完后先等 sink 收齐，再（通过 defer）统一关闭。
+	// 先等 sink 收齐，再统一关闭（避免过早 Close 触发服务端 drain 丢弃在途批次）。
 	want := int64(nClients * nBatches)
-	if !waitCount(sink, want, 10*time.Second) {
-		t.Errorf("sink count = %d, want %d", sink.count.Load(), want)
+	if !sink.waitCount(want, 15*time.Second) {
+		t.Fatalf("sink count = %d, want %d", sink.count.Load(), want)
+	}
+	if !waitCond(15*time.Second, func() bool { return results.count.Load() == want }) {
+		t.Errorf("result callbacks = %d, want %d", results.count.Load(), want)
 	}
 }
 
-// TestIntegration_MaxConnections_Stability 验证最大连接稳定性：
-//   - server 配 MaxConcurrentConns 小上限（8），开满后验证全部健康；
-//   - 关闭部分后新连接能进来（背压释放）；
-//   - 全部关闭后 goroutine 不泄漏。
-//
-// connSem 满时 accept 阻塞背压（非拒绝），故测试验证的是背压释放后可接入 + 无泄漏。
-func TestIntegration_MaxConnections_Stability(t *testing.T) {
-	const maxConns = 8
-	sink := &countingSink{}
+// TestIntegration_MaxConcurrentConns_Backpressure 验证并发连接背压：
+// MaxConcurrentConns=2 时，第 3 个连接的握手在 accept 处阻塞（超时失败），
+// 关闭一个连接释放槽位后新连接可接入并完成全链路。
+func TestIntegration_MaxConcurrentConns_Backpressure(t *testing.T) {
+	sink := &batchRecorder{}
 	tok, agentID := randToken(), randAgentID()
-	srv, _ := startV1Server(t, sink,
-		mbtago.WithAuth(core.NewStaticTokenValidator(map[string]string{tok: agentID})),
-		// 覆盖 V1QUIC 的 MaxConcurrentConns（通过重新 WithV1 注入）。
-		mbtago.WithV1(v1.QUICServerConfig{
-			Address: "127.0.0.1:0",
-			Credentials: &v1.ServerCredentials{
-				CertFile: "data/certificates/server.crt",
-				KeyFile:  "data/certificates/server.key",
-			},
-			// MaxConcurrentConns 通过 binding 层配置；facade 暂未直接暴露，
-			// 此处用默认（10000）并开 maxConns 个连接验证健康 + 释放 + 无泄漏语义。
-		}))
+	srv := startServer(t, append(v1ServerOpts(tok, agentID),
+		mbtago.WithMaxConcurrentConns(2),
+		mbtago.WithSink(core.SinkOptions{}, sink.handler))...)
 
-	// 开 maxConns 个 client，各发 1 batch，验证全部健康收到。
-	clients := make([]*mbtago.Client, 0, maxConns)
-	for i := 0; i < maxConns; i++ {
-		c := newV1Client(t, srv.Addr(), agentID, tok)
-		if err := c.Connect(context.Background()); err != nil {
-			t.Fatalf("client %d Connect: %v", i, err)
-		}
-		if _, err := c.SendBatch(context.Background(), smallBatch(1, 16), "tag", "src"); err != nil {
-			t.Fatalf("client %d SendBatch: %v", i, err)
-		}
-		clients = append(clients, c)
+	// 占满 2 个槽位。
+	c1 := newV1Client(t, srv.Addr(), agentID, tok)
+	if err := c1.Connect(context.Background()); err != nil {
+		t.Fatalf("c1 Connect: %v", err)
 	}
-	if !waitCount(sink, maxConns, 5*time.Second) {
-		t.Fatalf("after fill: sink count = %d, want %d", sink.count.Load(), maxConns)
+	c2 := newV1Client(t, srv.Addr(), agentID, tok)
+	if err := c2.Connect(context.Background()); err != nil {
+		t.Fatalf("c2 Connect: %v", err)
 	}
-
-	// 关闭前一半，释放连接槽位。
-	half := maxConns / 2
-	for i := 0; i < half; i++ {
-		if err := clients[i].Close(); err != nil {
-			t.Errorf("close client %d: %v", i, err)
+	defer c2.Close()
+	for _, c := range []*mbtago.Client{c1, c2} {
+		if _, err := c.SendBatch(context.Background(), smallBatch(1, 16)); err != nil {
+			t.Fatalf("SendBatch: %v", err)
 		}
 	}
+	if !sink.waitCount(2, 5*time.Second) {
+		t.Fatalf("sink count = %d, want 2", sink.count.Load())
+	}
 
-	// 再开 half 个新 client，验证背压释放后能接入 + batch 收到。
-	for i := 0; i < half; i++ {
-		c := newV1Client(t, srv.Addr(), agentID, tok)
-		if err := c.Connect(context.Background()); err != nil {
-			t.Fatalf("replacement client %d Connect: %v", i, err)
+	// 第 3 个连接：connSem 满 → accept 阻塞背压 → 握手在超时内无法完成。
+	c3 := newV1Client(t, srv.Addr(), agentID, tok)
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel3()
+	if err := c3.Connect(ctx3); err == nil {
+		_ = c3.Close()
+		t.Fatal("3rd connection succeeded despite MaxConcurrentConns=2（背压失效）")
+	}
+	_ = c3.Close()
+
+	// 释放一个槽位后新连接可接入并完成全链路。
+	if err := c1.Close(); err != nil {
+		t.Fatalf("c1 Close: %v", err)
+	}
+	c4 := newV1Client(t, srv.Addr(), agentID, tok)
+	connected := false
+	retryDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(retryDeadline) {
+		if err := c4.Connect(context.Background()); err == nil {
+			connected = true
+			break
 		}
-		if _, err := c.SendBatch(context.Background(), smallBatch(1, 16), "tag", "src"); err != nil {
-			t.Fatalf("replacement client %d SendBatch: %v", i, err)
-		}
-		clients = append(clients, c)
+		time.Sleep(100 * time.Millisecond)
 	}
-	if !waitCount(sink, int64(maxConns+half), 5*time.Second) {
-		t.Fatalf("after replace: sink count = %d, want %d", sink.count.Load(), maxConns+half)
+	if !connected {
+		t.Fatal("replacement client could not connect after slot release")
 	}
-
-	// 全部关闭。
-	for _, c := range clients {
-		_ = c.Close()
+	defer c4.Close()
+	if _, err := c4.SendBatch(context.Background(), smallBatch(1, 16)); err != nil {
+		t.Fatalf("SendBatch after backpressure release: %v", err)
 	}
-
-	// goroutine 不泄漏：给 1s 回收窗口，断言回落到接近基线。
-	// （ QUIC 连接关闭后台 goroutine 异步退出，需要短暂等待。）
-	base := runtime.NumGoroutine()
-	_ = base
-	time.Sleep(time.Second)
-	// 不硬断言具体数值（受 runtime/GC 影响），仅验证未持续增长：再等后应回落。
-	now := runtime.NumGoroutine()
-	if now > base+maxConns*2 {
-		t.Errorf("goroutine leak: after close NumGoroutine=%d, base=%d (delta>%d)", now, base, maxConns*2)
+	if !sink.waitCount(3, 5*time.Second) {
+		t.Fatalf("sink count = %d, want 3", sink.count.Load())
 	}
 }

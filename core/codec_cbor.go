@@ -40,7 +40,7 @@ func (cborCodec) Codec() corepb.Codec { return corepb.Codec_CODEC_CBOR }
 func (cborCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 	out, err := cborEncMode.Marshal(sb)
 	if err != nil {
-		return nil, WrapError(ErrCodeValidation, "marshal signal batch (cbor)", err)
+		return nil, WrapError(ErrCodeBatchInvalid, "marshal signal batch (cbor)", err)
 	}
 	return out, nil
 }
@@ -48,7 +48,7 @@ func (cborCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 func (cborCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	var sb SignalBatch
 	if err := cbor.Unmarshal(data, &sb); err != nil {
-		return nil, WrapError(ErrCodeValidation, "unmarshal signal batch (cbor)", err)
+		return nil, WrapError(ErrCodeBatchInvalid, "unmarshal signal batch (cbor)", err)
 	}
 	return &sb, nil
 }

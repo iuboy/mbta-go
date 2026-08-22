@@ -1,60 +1,55 @@
 package binding
 
+// server.go：binding 层服务端外壳（accept 循环 + handleConn + 泛型 Server）。
+
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
-	corepb "github.com/iuboy/mbta-go/corepb"
 	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
-// HandlerConfig 是 binding 层共享的 handler 配置，各 binding 从自己的 ServerConfig 构造。
+// DefaultMaxConcurrentConns 是并发连接上限默认值。
+const DefaultMaxConcurrentConns = 10000
+
+// HandlerConfig 是 binding 层共享的 handler 配置。
 type HandlerConfig struct {
-	Auth            core.TokenValidator
-	Policy          core.Policy
-	Sink            core.EventSink
-	Metrics         core.Metrics
-	ServerID        string
-	RedirectChecker core.RedirectChecker
-	OnSession       core.OnSession
-	// SessionStore 可选：0-RTT 会话票据存储（single-use ticket 重放防护）。
-	// nil 则禁用 0-RTT resumption（不颁发/不验证 session ticket）。
-	SessionStore *core.SessionStore
+	Auth              core.TokenValidator
+	Policy            core.ServerPolicy
+	Metrics           core.Metrics
+	ServerID          string
+	RedirectChecker   core.RedirectChecker
+	OnSession         core.OnSession
+	SinkOpts          core.SinkOptions
+	SinkHandler       core.BatchHandler
+	SinkDeadline      time.Duration
+	SinkQueueSize     int
+	SinkQueueMaxBytes int64
+	Epochs            *protocol.EpochAllocator
 }
 
-// ResolveHandlerConfig 就地校验并填充 HandlerConfig 的公共字段：
-// 应用 Policy 默认值（按 binding 语境的 defaultCipherSuite）、校验 Auth/Sink 非空、
-// Policy.Validate、ServerID 默认值。返回解析后的 Policy 供调用方回填到自己的 ServerConfig。
-func ResolveHandlerConfig(hcfg *HandlerConfig, defaultCipherSuite corepb.CipherSuite) (core.Policy, error) {
-	if hcfg.Policy.IsZeroPolicy() {
-		hcfg.Policy = core.DefaultPolicy(defaultCipherSuite)
-	}
+// ResolveHandlerConfig 校验并填充公共字段。
+func ResolveHandlerConfig(hcfg *HandlerConfig) error {
 	if hcfg.Auth == nil {
-		return hcfg.Policy, core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
+		return core.NewError(core.ErrCodeConfig, "Auth (TokenValidator) is required")
 	}
-	if hcfg.Sink == nil {
-		return hcfg.Policy, core.NewError(core.ErrCodeConfig, "Sink (EventSink) is required")
+	if hcfg.SinkHandler == nil {
+		return core.NewError(core.ErrCodeConfig, "SinkHandler is required")
 	}
 	if err := hcfg.Policy.Validate(); err != nil {
-		return hcfg.Policy, core.WrapError(core.ErrCodeConfig, "Policy", err)
+		return core.WrapError(core.ErrCodeConfig, "Policy", err)
 	}
 	if hcfg.ServerID == "" {
 		hcfg.ServerID = core.NewChunkID().String()
 	}
-	return hcfg.Policy, nil
+	return nil
 }
 
-// AcceptLoop 是泛型 accept 循环骨架，消除 v1/ntls 的 ~50 行重复。
-//
-// 类型参数 C 是 binding 特有的连接类型（v1.*Conn / net.Conn）。
-// 调用方提供：
-//   - accept: 从 listener 取下一连接（ctx 取消时返回 error）
-//   - newTransport: 把连接包装成 protocol.Transport
-//   - closeConn: transport 构造失败时关闭连接（v1 用 CloseWithError，ntls 用 Close）
-//
-// connSem 由调用方持有，用于并发连接上限控制。
+// AcceptLoop 是泛型 accept 循环骨架。
 func AcceptLoop[C any](
 	ctx context.Context,
 	connSem chan struct{},
@@ -63,7 +58,6 @@ func AcceptLoop[C any](
 	closeConn func(C),
 	hcfg HandlerConfig,
 ) error {
-	// accept 错误指数退避（5ms→1s），防止 listener 持久错误（EMFILE 等）导致 CPU 空转。
 	var backoff time.Duration
 	for {
 		select {
@@ -77,6 +71,10 @@ func AcceptLoop[C any](
 			if ctx.Err() != nil {
 				return nil //nolint:nilerr // ctx 取消属优雅关闭
 			}
+			if errors.Is(err, net.ErrClosed) {
+				slog.Debug("listener closed, accept loop exiting")
+				return nil //nolint:nilerr // listener 关闭属正常停止路径
+			}
 			slog.Warn("accept error", "error", err)
 			backoff = nextBackoff(backoff)
 			if !sleepCtx(ctx, backoff) {
@@ -84,29 +82,22 @@ func AcceptLoop[C any](
 			}
 			continue
 		}
-		backoff = 0 // accept 成功，重置退避
+		backoff = 0
 		go handleConn(ctx, conn, connSem, newTransport, closeConn, hcfg)
 	}
 }
 
-// nextBackoff 计算下一次 accept 退避（指数 5ms→1s）。
-// 用整数比较替代 math.Min 的 float 转换，避免精度与开销问题。
 func nextBackoff(prev time.Duration) time.Duration {
 	if prev == 0 {
 		return 5 * time.Millisecond
 	}
 	next := prev * 2
-	if next > time.Second || next <= 0 { // <=0 兼容溢出回绕
+	if next > time.Second || next <= 0 {
 		return time.Second
 	}
 	return next
 }
 
-// sleepCtx 睡眠 d 或直到 ctx 取消；ctx 取消返回 false。
-//
-// 用 time.NewTimer + Stop 替代 time.After：后者在 ctx 先触发时，未到期的 timer
-// 仍驻留堆中直到到期才被 GC（Go stdlib 文档明示）。accept loop 回退热路径若频繁
-// ctx 取消（如 rolling restart），会积累大量无法回收的 timer。
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -118,8 +109,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// handleConn 处理单个连接的完整生命周期（transport 建立 → 协议处理），
-// 含 panic recover 防 single 连接崩溃整个服务。提取自 AcceptLoop 降低认知复杂度。
+// handleConn 处理单连接生命周期。
 func handleConn[C any](
 	ctx context.Context,
 	conn C,
@@ -129,7 +119,6 @@ func handleConn[C any](
 	hcfg HandlerConfig,
 ) {
 	defer func() { <-connSem }()
-	// recover 防止单个连接的 panic 崩溃整个服务进程。
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("handler panic recovered", "panic", r)
@@ -146,7 +135,6 @@ func handleConn[C any](
 		}
 		return
 	}
-	// 防御：newTransport 回调可能返回 (nil, nil)，若直接传给 NewCoreHandler 会 panic。
 	if tr == nil {
 		slog.Error("transport setup returned nil transport")
 		if closeConn != nil {
@@ -154,28 +142,28 @@ func handleConn[C any](
 		}
 		return
 	}
-	// 确保 Handle 返回后（正常或异常）都关闭 transport：
-	// quicTransport.Close/tcpTransport.Close 均幂等，内部已关闭底层 conn，
-	// 因此此处无需再调 closeConn（避免 double-close）。
 	defer func() {
 		if err := tr.Close(); err != nil {
 			slog.Debug("transport close after handle", "error", err)
 		}
 	}()
 	h := protocol.NewCoreHandler(tr, protocol.HandlerConfig{
-		Auth:            hcfg.Auth,
-		Policy:          hcfg.Policy,
-		Sink:            hcfg.Sink,
-		Metrics:         hcfg.Metrics,
-		ServerID:        hcfg.ServerID,
-		RedirectChecker: hcfg.RedirectChecker,
-		OnSession:       hcfg.OnSession,
-		SessionStore:    hcfg.SessionStore,
+		Auth:              hcfg.Auth,
+		Policy:            hcfg.Policy,
+		Metrics:           hcfg.Metrics,
+		ServerID:          hcfg.ServerID,
+		RedirectChecker:   hcfg.RedirectChecker,
+		OnSession:         hcfg.OnSession,
+		Epochs:            hcfg.Epochs,
+		SinkOpts:          hcfg.SinkOpts,
+		SinkHandler:       hcfg.SinkHandler,
+		SinkDeadline:      hcfg.SinkDeadline,
+		SinkQueueSize:     hcfg.SinkQueueSize,
+		SinkQueueMaxBytes: hcfg.SinkQueueMaxBytes,
 	})
 	if err := h.Handle(ctx); err != nil {
-		// redirected 是正常 HA 流程（follower 把客户端导向 leader），非 handler 错误，降级为 Debug 日志。
-		if core.CodeOf(err) == core.ErrCodeRedirected.Code {
-			slog.Debug("connection redirected to leader")
+		if core.CodeNumOf(err) == core.CodeProtocolError || core.CodeNumOf(err) == core.CodeServerDraining {
+			slog.Debug("connection ended")
 		} else {
 			slog.Error("handler error", "error", err)
 		}

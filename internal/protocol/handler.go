@@ -1,223 +1,171 @@
 package protocol
 
+// handler.go：服务端协议核心（r3）。1-RTT 握手、RESULT/CREDIT、服务端 reaper、
+// 集合制去重准入、credit 守恒（模型 B）、sink 契约。
+
 import (
 	"context"
-	"fmt"
 	"log/slog"
+	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
-// 常量（core spec §9.5 limits；与 v1/handler 对齐）。
+// 常量（继承 v1 防御值 + r3 裁决默认值，docs/v2-design.md §18-H5）。
 const (
-	maxConcurrentQuicDataFrames       = 64
-	maxConcurrentTCPBatches           = 8
-	maxAuthAttempts                   = 3
-	heartbeatIntervalSec              = 30
-	maxFramePayloadBytes              = 16 * 1024 * 1024
-	maxBatchBytes                     = 8 * 1024 * 1024
-	maxEventBytes                     = 256 * 1024
-	maxBatchEvents                    = 10000
-	windowMaxBatches                  = 100
-	windowMaxEvents                   = 10000
-	windowMaxBytes              int64 = 16 * 1024 * 1024
-	throttleRetryMs                   = 1000
-	challengeNonceLen                 = 16
-	// maxDrainTimeout 限制客户端 close_timeout_ms 的上限，防恶意客户端发 MaxUint32
-	// 致 handler goroutine 阻塞 ~49 天（内存/goroutine DoS）。
+	maxConcurrentQuicDataFrames = 64
+	maxConcurrentTCPBatches     = 8
+	dgramConcurrencySlots       = 64
+
 	maxDrainTimeout = 30 * time.Second
-	// defaultSinkQueueSize 是普通 EventSink 异步投递队列的默认容量。
-	// 满 → 发 THROTTLE 让客户端重试，是 sink 处理跟不上时的精准背压信号。
-	defaultSinkQueueSize = 256
-	// defaultSinkWorkers 是异步投递 worker pool 的默认 worker 数。
-	// runtime.NumCPU() 在多数场景平衡吞吐与 goroutine 开销。
-	defaultSinkWorkers = 0 // 0 = 运行时按 runtime.NumCPU() 取
+	minDrainTimeout = 1 * time.Second
+
+	creditFlushInterval = 100 * time.Millisecond
+
+	maxBatchEvents   = 10000
+	stuckInflightAge = 60 * time.Second // 服务端 reaper 的 inflight 超时
+
+	defaultSinkQueueSize     = 256
+	defaultSinkQueueMaxBytes = int64(32 << 20)
 )
 
-// envelope 算法一致性复核失败的 wire NACK code 定义在 core.ErrCodeEnvelopeAlgoMismatch
-// （Code 字段 = "envelope_algo_mismatch"），不再在此重复定义。
-
-// HandlerConfig 是 CoreHandler 的配置（传输无关）。
-type HandlerConfig struct {
-	Auth            core.TokenValidator
-	Policy          core.Policy
-	Sink            core.EventSink
-	Metrics         core.Metrics // nil 时回退到 NoOpMetrics（见 NewCoreClient）
-	ServerID        string
-	SessionStore    *core.SessionStore   // 0-RTT resumption（可选，nil = 不支持 early_data）
-	RedirectChecker core.RedirectChecker // HA：AUTH_OK 后检查角色，非 leader 发 TypeRedirect（可选，nil=禁用）
-	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）：AUTH_OK 后 CONNECTED、连接断开 DISCONNECTED
-	// SinkQueueSize 是普通 EventSink 的异步投递队列容量（fire-and-forget）。
-	// 0 = 默认 256；负 = 禁用异步（同步阻塞调用，仅测试用）。满则发 THROTTLE 背压。
-	// 仅对普通 EventSink 生效（DurableEventSink/RawEventSink 仍同步，待阶段 3 改造）。
-	SinkQueueSize int
+// EpochAllocator 按 agent 单调分配连接纪元（服务端级共享；r2 审查裁决：
+// epoch 必须服务端分配，否则票据丢失后 agent 被围栏死锁）。
+type EpochAllocator struct {
+	mu     sync.Mutex
+	epochs map[string]uint64
 }
 
-// CoreHandler 是 server 端协议状态机核心，仅依赖 Transport 接口，
-// 不感知 quic.Stream/net.Conn（core spec §10.2）。
-// 吸收 v1/handler.go 与 ntls/handler.go 的全部共享协议逻辑。
+// Next 返回 agent 的下一个 epoch（从 1 起）。
+func (e *EpochAllocator) Next(agentID string) uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.epochs == nil {
+		e.epochs = make(map[string]uint64)
+	}
+	e.epochs[agentID]++
+	return e.epochs[agentID]
+}
+
+// HandlerConfig 是 CoreHandler 配置。
+type HandlerConfig struct {
+	Auth              core.TokenValidator
+	Policy            core.ServerPolicy
+	Metrics           core.Metrics
+	ServerID          string
+	RedirectChecker   core.RedirectChecker
+	OnSession         core.OnSession
+	Epochs            *EpochAllocator // nil = 每连接自增（测试）；生产共享一份
+	SinkOpts          core.SinkOptions
+	SinkHandler       core.BatchHandler // nil = 丢弃（仅握手测试）
+	SinkDeadline      time.Duration     // 0 = core.DefaultSinkDeadline
+	SinkQueueSize     int               // 0 = 256；负 = 同步调用（测试）
+	SinkQueueMaxBytes int64             // 0 = 32MB；负 = 不限
+	// Zdict 是 zstd_dict 字典 codec（构造期从 Policy 注册；nil=未配置）。
+	Zdict *core.ZstdDictCodec
+}
+
+// CoreHandler 是服务端协议状态机核心。
 type CoreHandler struct {
 	tr     Transport
 	config HandlerConfig
 
-	sm         *core.ServerMachine
-	negotiated atomic.Pointer[core.NegotiateResult] // controlLoop(handleHello) 写 / dataLoop(processBatch) 读，原子化避免数据竞争
-	keys       atomic.Pointer[core.SessionKeys]     // 0-RTT：controlLoop(handleAuth) 与 dataLoop(processBatch) 并发读写
-	replay     *core.ReplayCache
-	window     *core.Window
-	inflight   *core.Inflight
+	sm          *core.ServerMachine
+	metrics     core.Metrics
+	agentID     string
+	sessionID   []byte
+	handshakeMu sync.RWMutex
+	authed      atomic.Bool
+	expiresAt   atomic.Int64
 
-	// 握手字段：controlLoop（handleHello/handleAuth）写，dataLoop/processBatch（0-RTT）读。
-	// 用 handshakeMu 保护，避免 0-RTT 场景下 agentID/sessionID 的数据竞争。
-	agentID   string
-	sessionID []byte
-	// helloMeta 保存 HELLO 帧中除 agentID 外的身份字段，供 OnSession CONNECTED 回调读取。
-	// 与 agentID/sessionID 一样在 handleHello 中写入，handshakeMu 保护。
-	hostname         string
-	instanceID       string
-	agentVersion     string
-	os               string
-	challengeNonce   []byte
-	authAttempts     int
-	handshakeMu      sync.RWMutex
-	expiresAt        atomic.Int64
-	closeTimeout     time.Duration                    // 优雅关闭 drain 超时（从 CloseMessage.close_timeout_ms 协商，默认 5s）
-	resumptionMaster atomic.Pointer[core.SessionKeys] // 0-RTT：HELLO 携带有效票据时存 master，handleAuth 派生子钥后清空
-	authed           atomic.Bool                      // 是否已认证成功（到达 READY）；决定 DISCONNECTED 是否触发（必须与 CONNECTED 配对）
-	lastPressure     atomic.Value
-	pressureMu       sync.Mutex // 保护 lastPressure 的"比较-更新-下发"序列（§9.2 避免同值重复 WINDOW）
+	keys    atomic.Pointer[core.SessionKeys]
+	negCaps atomic.Value // []string selected capabilities
+	codec   atomic.Value // corepb.Codec
+
+	// credit 模型 B（服务端权威）。
+	credit        *core.CreditManager // 准入/去重/守恒单一真相（根治版：grant 令牌化）
+	flushArmed    atomic.Bool         // 懒 flush：首个 Settle 后 arm 一次 100ms 定时器（无常驻 tick
+	dgramTokens   chan struct{}       // datagram 并发槽
+	dgramBucketMu sync.Mutex
+	dgramRate     int64 // bytes/s；0 = 不限
+	dgramAvail    int64
+	dgramLast     time.Time
+
+	epoch uint64
 
 	dataOnce       sync.Once
-	dataWG         sync.WaitGroup     // 跟踪 data frame 处理 goroutine
-	batchSem       chan struct{}      // data frame 并发上限（QUIC=64 / TCP=8）
-	cancelDataLoop context.CancelFunc // 取消 dataLoop 派生 context，使 processBatch 尽快退出
+	dataWG         sync.WaitGroup
+	batchSem       chan struct{}
+	cancelDataLoop context.CancelFunc
 
-	// sinkQueue 是普通 EventSink 的异步投递队列（fire-and-forget）。
-	// 非 nil 时 routeAndACK 把 batch 投到此队列立即返回 ACK；nil 表示同步（Durable/Raw sink 或禁用异步）。
-	// worker（sinkWG）消费队列调 sink.OnSignalBatch。连接关闭时 close 队列等 worker 排空。
-	sinkQueue chan sinkTask
-	sinkWG    sync.WaitGroup
-	// sinkCtx 派生自 Handle 的 ctx，让 sinkWorker 调 OnSignalBatch 时尊重连接生命周期，
-	// 连接关闭后 sink 调用可被取消（防半开连接上 worker 永久阻塞）。
+	// sink 队列（继承 v1 加固：双限界/排空超时/panic 契约）。
+	sinkStart       sync.Once // 懒启动 sink worker（首个成功入队触发）
+	sinkQueue       chan sinkTask
+	sinkDone        chan struct{}
+	sinkWG          sync.WaitGroup
+	sinkQueuedBytes atomic.Int64
+	sinkMaxBytes    int64
+	sinkDeadline    time.Duration
+
+	closeTimeout time.Duration
+
 	sinkCtx context.Context
-	// durableNotifier 在 sink 实现 AsyncDurableSink 时初始化（initSinkQueue），
-	// 投递时注入 task，sink 持久化后回调发 durable 升级帧。nil 表示 sink 非异步 Durable。
-	durableNotifier core.DurableNotifier
 }
 
-// getAgentID / setAgentID —— handshakeMu 保护 agentID 的读写。
-func (h *CoreHandler) getAgentID() string {
-	h.handshakeMu.RLock()
-	defer h.handshakeMu.RUnlock()
-	return h.agentID
-}
-
-func (h *CoreHandler) setAgentID(id string) {
-	h.handshakeMu.Lock()
-	defer h.handshakeMu.Unlock()
-	h.agentID = id
-}
-
-// getSessionID 返回 sessionID 的拷贝；setSessionID 防御性拷贝写入（与 getter 对称）。
-func (h *CoreHandler) getSessionID() []byte {
-	h.handshakeMu.RLock()
-	defer h.handshakeMu.RUnlock()
-	cp := make([]byte, len(h.sessionID))
-	copy(cp, h.sessionID)
-	return cp
-}
-
-func (h *CoreHandler) setSessionID(id []byte) {
-	h.handshakeMu.Lock()
-	defer h.handshakeMu.Unlock()
-	h.sessionID = append(h.sessionID[:0], id...)
-}
-
-// setHelloMeta 保存 HELLO 帧的身份字段，供 AUTH_OK 后构造 SessionEvent 使用。
-func (h *CoreHandler) setHelloMeta(hostname, instanceID, agentVersion, os string) {
-	h.handshakeMu.Lock()
-	defer h.handshakeMu.Unlock()
-	h.hostname = hostname
-	h.instanceID = instanceID
-	h.agentVersion = agentVersion
-	h.os = os
-}
-
-func (h *CoreHandler) helloMeta() (hostname, instanceID, agentVersion, os string) {
-	h.handshakeMu.RLock()
-	defer h.handshakeMu.RUnlock()
-	return h.hostname, h.instanceID, h.agentVersion, h.os
-}
-
-// getChallengeNonce 返回拷贝；setChallengeNonce 防御性拷贝写入。
-func (h *CoreHandler) getChallengeNonce() []byte {
-	h.handshakeMu.RLock()
-	defer h.handshakeMu.RUnlock()
-	cp := make([]byte, len(h.challengeNonce))
-	copy(cp, h.challengeNonce)
-	return cp
-}
-
-func (h *CoreHandler) setChallengeNonce(nonce []byte) {
-	h.handshakeMu.Lock()
-	defer h.handshakeMu.Unlock()
-	h.challengeNonce = append(h.challengeNonce[:0], nonce...)
-}
-
-// NewCoreHandler 创建 handler。batchSem 容量按 Multiplexing 选（保留两套并发模型）。
+// NewCoreHandler 创建 handler。
 func NewCoreHandler(tr Transport, cfg HandlerConfig) *CoreHandler {
 	sem := maxConcurrentQuicDataFrames
 	if tr.Multiplexing() == MultiplexTCPSingleConn {
 		sem = maxConcurrentTCPBatches
 	}
-	// Metrics 为 nil 时回退到 NoOpMetrics，handler 无需逐处 nil 检查。
-	if cfg.Metrics == nil {
+	if isNilMetrics(cfg.Metrics) {
 		cfg.Metrics = core.NoOpMetrics{}
 	}
-	h := &CoreHandler{
-		tr:       tr,
-		config:   cfg,
-		sm:       core.NewServerMachine(),
-		replay:   core.NewReplayCache(),
-		window:   core.NewWindow(windowMaxBatches, windowMaxEvents, windowMaxBytes),
-		inflight: &core.Inflight{},
-		batchSem: make(chan struct{}, sem),
+	if cfg.Epochs == nil {
+		cfg.Epochs = &EpochAllocator{}
 	}
-	h.lastPressure.Store(core.PressureNormal)
-	h.replay.SetMetrics(cfg.Metrics)
-	// 普通 EventSink（非 Durable/Raw）启用异步投递队列：协议层 fire-and-forget，
-	// worker pool 异步调 OnSignalBatch。Durable/Raw sink 仍同步（需 RouteResult）。
-	// SinkQueueSize < 0 显式禁用异步（测试用）。
+	var zdict *core.ZstdDictCodec
+	if len(cfg.Policy.ZstdDict) > 0 && cfg.Policy.ZstdDictID != 0 {
+		zc, zerr := core.RegisterZstdDict(cfg.Policy.ZstdDictID, cfg.Policy.ZstdDict)
+		if zerr != nil {
+			slog.Error("zstd dict register failed; zstd_dict disabled", "error", zerr)
+		} else {
+			zdict = zc
+		}
+	}
+	cfg.Zdict = zdict
+	h := &CoreHandler{
+		tr:          tr,
+		config:      cfg,
+		sm:          core.NewServerMachine(),
+		metrics:     cfg.Metrics,
+		batchSem:    make(chan struct{}, sem),
+		credit:      core.NewCreditManager(int64(cfg.Policy.InitialCreditBatches), int64(cfg.Policy.InitialCreditBytes), 256),
+		dgramTokens: make(chan struct{}, dgramConcurrencySlots),
+		dgramRate:   cfg.Policy.DatagramRateBytes,
+	}
+	h.sinkDeadline = cfg.SinkDeadline
+	if h.sinkDeadline == 0 {
+		h.sinkDeadline = core.DefaultSinkDeadline
+	}
 	h.initSinkQueue()
 	return h
 }
 
-// Handle 运行连接生命周期：control loop → READY 后启动 data loop。
+// Handle 运行连接生命周期。
 func (h *CoreHandler) Handle(ctx context.Context) error {
-	// dataExited 标记所有 data goroutine 是否在 drain 超时前退出。
-	// cleanup 依据此标记决定是否零化 keys：仅在确认无 data goroutine 读 keys 时才清零，
-	// 否则保留 keys（由 GC 在连接生命周期结束后回收），避免 cleanup 把 keys 置 nil
-	// 后存活的 processBatch 跳过 HMAC 校验（安全绕过）。
-	dataExited := false
-	defer h.cleanup(&dataExited)
-	// 派生 sinkCtx：controlLoop ctx 取消时传播到 sinkWorker 的 OnSignalBatch 调用，
-	// 使半开连接上的 sink 调用可被取消。controlLoop 退出即取消。
 	sinkCtx, sinkCancel := context.WithCancel(ctx)
 	h.sinkCtx = sinkCtx
 	defer sinkCancel()
-	// 会话生命周期回调：连接结束时触发 DISCONNECTED。
-	// 仅当该连接此前认证成功（agentID 非空）才触发，避免对未通过 HELLO/AUTH 的连接
-	// 误报 DISCONNECTED（无配对的 CONNECTED）。与 CONNECTED 严格成对。
-	// 注意：DISCONNECTED 在 CONNECTED 之后、数据 drain 完成前后都可能；回调实现需容忍。
+
 	defer func() {
-		if h.config.OnSession == nil {
+		if h.config.OnSession == nil || !h.authed.Load() {
 			return
-		}
-		if !h.authed.Load() {
-			return // 未认证（或认证失败）的连接：没有配对的 CONNECTED，不报 DISCONNECTED
 		}
 		h.config.OnSession(core.SessionEvent{
 			Type:       core.SessionDisconnected,
@@ -226,19 +174,14 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 			RemoteAddr: h.tr.RemoteAddr(),
 		})
 	}()
-	// 进入 CONTROL_WAIT（server 状态机初始为 Accepted）。
-	if err := h.sm.Transition(core.ServerStateControlWait); err != nil {
-		return core.WrapError(core.ErrCodeSession, "transition to CONTROL_WAIT", err)
-	}
+
 	err := h.controlLoop(ctx)
-	// 等待所有 data frame 处理 goroutine 退出后再清密钥（避免与 processBatch 读 keys 竞态）。
-	// drain 超时：从 CloseMessage.close_timeout_ms 协商，默认 5s（core spec §9.6）。
+
+	// data drain（有界）。
 	drainTimeout := h.closeTimeout
 	if drainTimeout == 0 {
 		drainTimeout = 5 * time.Second
 	}
-	// 取消 dataLoop context，使仍在阻塞的 processBatch goroutine 尽快退出，
-	// 避免 cleanup 后读 nil keys（h.keys.Store(nil)）或永久泄漏。
 	if h.cancelDataLoop != nil {
 		h.cancelDataLoop()
 	}
@@ -246,124 +189,348 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 	go func() { h.dataWG.Wait(); close(done) }()
 	select {
 	case <-done:
-		dataExited = true
 	case <-time.After(drainTimeout):
-		// 超时：仍有 data goroutine 存活，cleanup 不会零化 keys，避免存活的
-		// processBatch 因 keys==nil 跳过 HMAC 校验（安全绕过）。keys 由 GC 回收。
-		slog.Warn("data frame goroutines did not exit within drain timeout; keeping keys to avoid HMAC bypass", "session", string(h.getSessionID()), "timeout", drainTimeout)
+		slog.Warn("data goroutines did not exit in drain timeout; abandoning", "session", string(h.getSessionID()))
 	}
-	// data goroutine 退出后关闭 sink 投递队列，等 worker 排空剩余 task。
-	// sinkQueue nil（Durable/Raw sink 或禁用异步）时跳过。
+
+	// 服务端排空：对放弃的 inflight 项发 released（禁止沉默——否则客户端白等满超时）。
+	h.releaseStuck(ctx, core.CodeServerDraining, 0)
+
+	// sink 排空（有界）：超时取消 sinkCtx 放弃等待（防卡死 sink 钉死 connSem 槽位）。
 	if h.sinkQueue != nil {
-		close(h.sinkQueue)
-		h.sinkWG.Wait()
+		close(h.sinkDone)
+		drained := make(chan struct{})
+		go func() { h.sinkWG.Wait(); close(drained) }()
+		select {
+		case <-drained:
+		case <-time.After(drainTimeout):
+			sinkCancel()
+			slog.Warn("sink workers did not drain; abandoning", "session", string(h.getSessionID()))
+		}
 	}
 	return err
 }
 
-// cleanup 零化会话密钥。仅当 dataExited 为 true（所有 data goroutine 已退出）时执行，
-// 避免与存活的 processBatch goroutine 竞态读 keys。
-func (h *CoreHandler) cleanup(dataExited *bool) {
-	if dataExited == nil || !*dataExited {
-		return
-	}
-	if k := h.keys.Load(); k != nil {
-		k.Zero()
-		h.keys.Store(nil)
-	}
-}
-
-// controlLoop 处理控制帧：HELLO/AUTH/PING/CLOSE。
+// controlLoop 处理控制帧。
 func (h *CoreHandler) controlLoop(ctx context.Context) error {
+	// 服务端 reaper：inflight 超时 → released + credit 回收。
+	reapStop := make(chan struct{})
+	defer close(reapStop)
+	go h.reaper(ctx, reapStop)
+
 	for {
 		f, err := h.tr.RecvControlFrame(ctx)
 		if err != nil {
-			return core.WrapError(core.ErrCodeProtocol, "read control frame", err)
+			return core.WrapError(core.ErrCodeProtocolError, "read control frame", err)
 		}
 		switch f.Header.Type {
 		case core.TypeHello:
-			if h.sm.State() == core.ServerStateReady {
-				h.sendError(ctx, core.ErrCodeUnsupportedMessage, "HELLO not allowed after auth", true)
-				continue
+			if h.sm.State() != core.ServerStateHandshaking {
+				h.sendNak(ctx, core.CodeBadHandshakeMessage, false, 0)
+				return core.NewError(core.ErrCodeBadHandshake, "HELLO after handshake")
 			}
 			if err := h.handleHello(ctx, f.Payload); err != nil {
 				return err
 			}
-		case core.TypeAuth:
 			if h.sm.State() == core.ServerStateReady {
-				h.sendError(ctx, core.ErrCodeUnsupportedMessage, "AUTH not allowed after auth", true)
-				continue
-			}
-			if err := h.handleAuth(ctx, f.Payload); err != nil {
-				return err
+				h.dataOnce.Do(func() {
+					dataCtx, cancel := context.WithCancel(ctx)
+					h.cancelDataLoop = cancel
+					h.dataWG.Add(1)
+					go func() {
+						defer h.dataWG.Done()
+						defer func() {
+							if r := recover(); r != nil {
+								slog.Warn("dataLoop panicked", "panic", r)
+							}
+						}()
+						h.dataLoop(dataCtx)
+					}()
+				})
 			}
 		case core.TypePing:
-			if h.sm.State() != core.ServerStateReady {
-				h.sendError(ctx, core.ErrCodeUnsupportedMessage, "PING not allowed before auth", true)
-				continue
-			}
 			h.handlePing(ctx, f.Payload)
 		case core.TypeClose:
 			h.handleClose(f.Payload)
 			return nil
+		case core.TypeAbort:
+			slog.Info("client aborted", "session", string(h.getSessionID()))
+			return nil
 		default:
-			h.sendError(ctx, core.ErrCodeUnsupportedMessage, fmt.Sprintf("unexpected control type 0x%02x", f.Header.Type), true)
-			return core.NewError(core.ErrCodeProtocol, fmt.Sprintf("unexpected control type 0x%02x", f.Header.Type))
-		}
-
-		// 仅 READY 后启动 data loop（exactly once）。
-		// 0-RTT 早数据快路径已移除：票据恢复仍须 challenge-response + 派生子钥，
-		// 不允许 AUTH 前处理 BATCH（消除未认证数据 + key 复用风险）。
-		if h.sm.State() == core.ServerStateReady {
-			h.dataOnce.Do(func() {
-				// 派生可取消 context：controlLoop 退出后 Handle 调 cancelDataLoop，
-				// 使阻塞在 sink 的 processBatch goroutine 收到取消信号尽快退出。
-				dataCtx, cancel := context.WithCancel(ctx)
-				h.cancelDataLoop = cancel
-				h.dataWG.Add(1)
-				go func() {
-					defer h.dataWG.Done()
-					defer func() {
-						if r := recover(); r != nil {
-							// dataLoop 是分发循环，panic 不应发生但防御以防杀进程。
-							slog.Warn("dataLoop panicked", "session", string(h.getSessionID()), "panic", r)
-						}
-					}()
-					h.dataLoop(dataCtx)
-				}()
-			})
+			// TCP binding 已按 type 高位分流、QUIC control stream 只承载 control 帧，
+			// 此分支正常不可达——纯防御。
+			slog.Debug("unexpected frame on control channel; skipping", "type", f.Header.Type)
 		}
 	}
 }
 
-// handleClose 处理 CLOSE 帧：解码 + clamp close_timeout 防恶意 DoS。提取自 controlLoop。
+// handleHello 执行 1-RTT 握手（r3 §5.1）：
+// 解码校验 → token_proof 验证 → eph/ECDH → 派生 → HELLO_ACK。
+func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
+	var hello core.Hello
+	if err := core.Decode(payload, &hello); err != nil {
+		h.sendNak(ctx, core.CodeBadHandshakeMessage, false, 0)
+		return core.WrapError(core.ErrCodeBadHandshake, "decode hello", err)
+	}
+	if err := core.ValidateHello(&hello); err != nil {
+		slog.Debug("HELLO validation failed", "error", err)
+		code := core.CodeBadHandshakeMessage
+		if core.CodeNumOf(err) == core.CodeUnsupportedProfile || core.CodeNumOf(err) == core.CodeHelloEphInvalid {
+			code = core.CodeNumOf(err)
+		}
+		h.sendNak(ctx, code, false, 0)
+		return err
+	}
+
+	// profile 与服务端策略一致性校验：profile 绑定整套密码组合（ECDH/KDF/AEAD），
+	// 服务端只按自己策略声明的 profile 派生密钥——客户端声明其他已注册 profile 时
+	// NAK（防算法不匹配导致密钥日程两侧发散）。
+	if hello.GetProfile() != h.config.Policy.Profile {
+		slog.Debug("profile mismatch", "client", core.ProfileName(hello.GetProfile()),
+			"policy", core.ProfileName(h.config.Policy.Profile))
+		h.sendNak(ctx, core.CodeUnsupportedProfile, false, 0)
+		return core.NewError(core.ErrCodeUnsupportedProfile,
+			"profile mismatch: client="+core.ProfileName(hello.GetProfile())+
+				" policy="+core.ProfileName(h.config.Policy.Profile))
+	}
+
+	// 能力协商。zstd_dict 守卫：未配置字典时从交集剔除（否则客户端会以为字典
+	// 可用而选 ZSTD_DICT 压缩，服务端却无字典可解——fail-closed 而非事后拒绝）。
+	selected := h.config.Policy.Negotiate(hello.GetCapabilities())
+	if len(h.config.Policy.ZstdDict) == 0 {
+		selected = slices.DeleteFunc(selected, func(c string) bool { return c == core.CapZstdDict })
+	}
+	h.negCaps.Store(selected)
+	h.codec.Store(core.CodecFor(selected))
+
+	// token_proof 验证（先于任何密钥派生——防仅持票据者注入）。
+	thHello, err := core.TranscriptHello(hello.GetProfile(), &hello)
+	if err != nil {
+		h.sendNak(ctx, core.CodeInternal, false, 0)
+		return err
+	}
+	if verr := core.VerifyTokenProof(h.config.Auth, hello.GetProfile(), hello.GetAgentId(), thHello, hello.GetTokenProof()); verr != nil {
+		slog.Warn("token proof verification failed", "agent", core.SanitizeForLog(hello.GetAgentId()))
+		h.sendNak(ctx, core.CodeAuthFailed, true, 1000) // 单一代码 + retryable + 退避提示
+		return nil                                      //nolint:nilerr // 握手失败不拆传输层（NAK 已回）
+	}
+
+	// ECDH + 密钥派生。
+	clientPub := hello.GetClientEph()
+	priv, _, gerr := core.GenerateEphemeral(hello.GetProfile())
+	if gerr != nil {
+		h.sendNak(ctx, core.CodeInternal, false, 0)
+		return gerr
+	}
+	zz, derr := core.DeriveZZ(hello.GetProfile(), priv, clientPub)
+	if derr != nil {
+		h.sendNak(ctx, core.CodeHelloEphInvalid, false, 0)
+		return derr
+	}
+	keys, kerr := core.DeriveSessionKeysWithCaps(hello.GetProfile(), zz, thHello, hello.GetTokenProof(), selected)
+	if kerr != nil {
+		h.sendNak(ctx, core.CodeInternal, false, 0)
+		return kerr
+	}
+	h.keys.Store(keys)
+
+	// 会话状态。
+	h.handshakeMu.Lock()
+	h.agentID = hello.GetAgentId()
+	h.sessionID = core.NewChunkID().Bytes()
+	h.handshakeMu.Unlock()
+	h.epoch = h.config.Epochs.Next(hello.GetAgentId())
+	h.expiresAt.Store(time.Now().Add(core.DefaultSessionTTL).Unix())
+
+	// 构造 HELLO_ACK（finished 覆盖全部服务端声明）。
+	ack := &core.HelloAck{
+		SessionId:            h.getSessionID(),
+		Epoch:                h.epoch,
+		AckMode:              h.config.Policy.AckMode,
+		SelectedCapabilities: selected,
+		Limits: &corepb.Limits{
+			MaxFrameBytes: h.config.Policy.MaxFrameBytes,
+			MaxBatchBytes: h.config.Policy.MaxBatchBytes,
+		},
+		Credits: &corepb.Credits{
+			Batches: h.config.Policy.InitialCreditBatches,
+			Bytes:   h.config.Policy.InitialCreditBytes,
+		},
+		ServerEph:  ephPub(priv),
+		ExpiryUnix: h.expiresAt.Load(),
+	}
+	thFull, terr := core.TranscriptFull(hello.GetProfile(), &hello, ack)
+	if terr != nil {
+		h.sendNak(ctx, core.CodeInternal, false, 0)
+		return terr
+	}
+	ack.Finished = core.FinishedMAC(keys, thFull)
+
+	ackPayload, aerr := core.Encode(ack)
+	if aerr != nil {
+		return core.WrapError(core.ErrCodeInternal, "marshal hello_ack", aerr)
+	}
+	if serr := SendControlFrame(ctx, h.tr, core.TypeHelloAck, ackPayload); serr != nil {
+		return core.WrapError(core.ErrCodeProtocolError, "write hello_ack", serr)
+	}
+
+	// zstd_dict：字典配置且协商选中 → HELLO_ACK 之后立即下发 DICT 帧（边界
+	// 声明见 maybeSendDict）。
+	if err := h.maybeSendDict(ctx, selected); err != nil {
+		return err
+	}
+
+	if terr := h.sm.Transition(core.ServerStateReady); terr != nil {
+		return core.WrapError(core.ErrCodeProtocolError, "transition READY", terr)
+	}
+	h.authed.Store(true)
+	if am, ok := h.tr.(AuthMarker); ok {
+		am.MarkAuthed()
+	}
+
+	slog.Info("handshake completed", "agent", core.SanitizeForLog(hello.GetAgentId()),
+		"session", string(h.getSessionID()), "epoch", h.epoch, "profile", core.ProfileName(hello.GetProfile()))
+
+	if h.config.OnSession != nil {
+		h.config.OnSession(core.SessionEvent{
+			Type:       core.SessionConnected,
+			AgentID:    hello.GetAgentId(),
+			SessionID:  string(h.getSessionID()),
+			RemoteAddr: h.tr.RemoteAddr(),
+		})
+	}
+
+	// HA 重定向：握手完成后任意时刻可发；发出后关闭连接。
+	if h.config.RedirectChecker != nil {
+		if info, redirect := h.config.RedirectChecker(ctx); redirect {
+			if core.ValidateHostPort(info.LeaderAddr) == nil {
+				rp, _ := core.Encode(&core.Redirect{LeaderAddr: info.LeaderAddr, LeaderId: info.LeaderID})
+				if serr := SendControlFrame(ctx, h.tr, core.TypeRedirect, rp); serr != nil {
+					slog.Warn("send redirect failed", "error", serr)
+				}
+				return core.NewError(core.ErrCodeProtocolError, "client redirected")
+			}
+			slog.Warn("redirect address invalid; ignoring", "addr", core.SanitizeForLog(info.LeaderAddr))
+		}
+	}
+	h.metrics.AuthSuccess().Inc()
+	return nil
+}
+
+// ephPub 返回临时公钥 wire 字节（持有者自身）。
+func ephPub(k *core.EphemeralKey) []byte {
+	pub, err := k.PubBytes()
+	if err != nil {
+		return nil
+	}
+	return pub
+}
+
+// maybeSendDict 在 zstd_dict 协商选中时下发 DICT 帧并注册服务端解压字典；
+// 未选中时为 no-op。边界声明，即 r3 裁决与 v2-design §15.2 的差异：字典内容
+// 不入 transcript——HELLO_ACK 的 finished 已签发后无法追加入链。字典经传输层
+// AEAD（TLS/TLCP）通道保护；字典被篡改最坏导致解压失败，属 fail-closed，
+// 无安全降级。
+func (h *CoreHandler) maybeSendDict(ctx context.Context, selected []string) error {
+	if !slices.Contains(selected, core.CapZstdDict) {
+		return nil
+	}
+	dict := h.config.Policy.ZstdDict
+	id := h.config.Policy.ZstdDictID
+	if len(dict) == 0 || id == 0 {
+		return nil // 防御：协商守卫已剔除，正常不可达
+	}
+	payload, err := core.Encode(&core.ZstdDict{DictId: id, Dict: dict})
+	if err != nil {
+		return core.WrapError(core.ErrCodeInternal, "encode dict", err)
+	}
+	if err := SendControlFrame(ctx, h.tr, core.TypeDict, payload); err != nil {
+		return core.WrapError(core.ErrCodeProtocolError, "write dict", err)
+	}
+	return nil
+}
+
+// isNilMetrics 拦截 typed-nil（nil 的 *core.MBTAMetrics 赋入接口）。
+func isNilMetrics(m core.Metrics) bool {
+	if m == nil {
+		return true
+	}
+	rv := reflect.ValueOf(m)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
+}
+
+func (h *CoreHandler) getAgentID() string {
+	h.handshakeMu.RLock()
+	defer h.handshakeMu.RUnlock()
+	return h.agentID
+}
+
+func (h *CoreHandler) getSessionID() []byte {
+	h.handshakeMu.RLock()
+	defer h.handshakeMu.RUnlock()
+	return h.sessionID
+}
+
+// handlePing 回 PONG（仅 TCP binding 客户端使用；QUIC 侧静默）。
+func (h *CoreHandler) handlePing(ctx context.Context, payload []byte) {
+	var ping core.PingMsg
+	if err := core.Decode(payload, &ping); err != nil {
+		return
+	}
+	pong := &core.PongMsg{TimeUnixMs: ping.GetTimeUnixMs(), Nonce: ping.GetNonce(), Status: "ok"}
+	p, err := core.Encode(pong)
+	if err != nil {
+		return
+	}
+	if err := SendControlFrame(ctx, h.tr, core.TypePong, p); err != nil {
+		slog.Debug("write pong failed", "error", err)
+	}
+}
+
+// handleClose 处理 CLOSE：clamp drain 超时 [1s, 30s]。
 func (h *CoreHandler) handleClose(payload []byte) {
-	var closeMsg core.CloseMessage
-	if derr := core.Decode(payload, &closeMsg); derr != nil {
-		slog.Warn("failed to decode close message", "session", string(h.getSessionID()), "error", derr)
+	var c core.CloseMsg
+	if derr := core.Decode(payload, &c); derr != nil {
+		slog.Warn("failed to decode close", "error", derr)
 	}
-	if closeMsg.GetCloseTimeoutMs() > 0 {
-		// 强制上限防止恶意客户端发 MaxUint32 导致 goroutine 长期占用资源（DoS）。
-		requested := time.Duration(closeMsg.GetCloseTimeoutMs()) * time.Millisecond
-		if requested > maxDrainTimeout {
-			requested = maxDrainTimeout
+	if t := c.GetDrainTimeoutMs(); t > 0 {
+		d := time.Duration(t) * time.Millisecond
+		if d > maxDrainTimeout {
+			d = maxDrainTimeout
 		}
-		h.closeTimeout = requested
+		if d < minDrainTimeout {
+			d = minDrainTimeout
+		}
+		h.closeTimeout = d
 	}
-	slog.Info("close received", "session", string(h.getSessionID()), "drain_timeout", h.closeTimeout)
+	// Ready→Draining：显式进入排空态（此后新 seq → released(server_draining)）。
+	if err := h.sm.Transition(core.ServerStateDraining); err != nil {
+		slog.Debug("draining transition skipped", "error", err)
+	}
 }
 
-// dataLoop 读 BATCH 帧并发处理（batchSem 限流）。
+// sendNak 发送握手拒绝（未认证维度单一代码；detail 不透传）。
+func (h *CoreHandler) sendNak(ctx context.Context, code uint32, retryable bool, retryMs uint32) {
+	na := &core.HelloNak{Code: code, Retryable: retryable, RetryHintMs: retryMs}
+	p, err := core.Encode(na)
+	if err != nil {
+		return
+	}
+	if err := SendControlFrame(ctx, h.tr, core.TypeHelloNak, p); err != nil {
+		slog.Debug("write hello_nak failed", "error", err)
+	}
+}
+
+// dataLoop 读数据帧并发处理（batchSem 限流；DGRAM 走并发槽 + 令牌桶）。
 func (h *CoreHandler) dataLoop(ctx context.Context) {
 	for {
 		f, err := h.tr.RecvDataFrame(ctx)
 		if err != nil {
-			slog.Debug("data frame stream ended", "session", string(h.getSessionID()), "error", err)
+			slog.Debug("data stream ended", "error", err)
 			return
 		}
 		switch f.Header.Type {
 		case core.TypeBatch:
-			// 并发处理，受 batchSem 限制。
 			select {
 			case h.batchSem <- struct{}{}:
 				h.dataWG.Add(1)
@@ -371,23 +538,55 @@ func (h *CoreHandler) dataLoop(ctx context.Context) {
 					defer func() { <-h.batchSem; h.dataWG.Done() }()
 					defer func() {
 						if r := recover(); r != nil {
-							// processBatch 调用 sink（用户实现）+ proto 解码，panic 不可控。
-							// recover 防止单连接 panic 杀死整个服务端进程；该 batch 丢弃。
-							slog.Warn("processBatch panicked, batch dropped",
-								"session", string(h.getSessionID()), "panic", r)
+							slog.Warn("processBatch panicked", "panic", r)
 						}
 					}()
 					h.processBatch(ctx, pf.Payload)
 				}(f)
 			default:
-				// 并发满，拒绝并要求退避。
-				h.sendThrottle(ctx, core.ErrCodeTooManyBatches, "max concurrent batches exceeded")
+				// 并发满：grant 化直拒——占位+扣额度+Settle(released) 原子完成，
+				// credit 守恒与终态环记录不可漏（历史缺陷：直发 RESULT 不经 terminal，
+				// 客户端额度单向泄漏）。
+				h.rejectAtCapacity(ctx, f.Payload)
 			}
-		case core.TypeDatagram:
-			// unreliable 通道：at-most-once，无 ACK/spool，HMAC 失败静默丢弃（core spec §11.4）。
-			h.processDatagram(ctx, f.Payload)
+		case core.TypeDgram:
+			select {
+			case h.dgramTokens <- struct{}{}:
+				h.dataWG.Add(1)
+				go func(pf core.Frame) {
+					defer func() { <-h.dgramTokens; h.dataWG.Done() }()
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Warn("processDatagram panicked", "panic", r)
+						}
+					}()
+					h.processDatagram(ctx, pf.Payload)
+				}(f)
+			default:
+				slog.Debug("datagram dropped: concurrency slots full")
+			}
 		default:
-			slog.Debug("unexpected frame on data channel", "type", f.Header.Type)
+			slog.Debug("unexpected data type; skipping", "type", f.Header.Type)
+		}
+	}
+}
+
+// reaper：服务端闭环。两职责：
+//   - inflight 超时回收（stuckInflightAge）→ released + 额度回收；
+//   - CREDIT 定时攒批发 放（creditFlushInterval）：低吞吐连接上回收量长期达不到
+//     阈值（初始窗/4）时，客户端额度被拖死——定时器兜底任何 >0 的回收量。
+//     同时消除"服务端阈值 > 客户端钳制"配置组合下的饿死路径。
+func (h *CoreHandler) reaper(ctx context.Context, stop <-chan struct{}) {
+	reap := time.NewTicker(core.DefaultReapInterval)
+	defer reap.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-reap.C:
+			h.releaseStuck(ctx, core.CodeInternal, stuckInflightAge)
 		}
 	}
 }

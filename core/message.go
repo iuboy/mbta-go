@@ -1,5 +1,8 @@
 package core
 
+// message.go：控制面消息类型别名 + 校验（r3）。
+// 数据模型（SignalBatch/TraceContext）沿用 signal.proto。
+
 import (
 	"fmt"
 
@@ -7,95 +10,28 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// 控制面/数据面消息类型 = corepb 生成类型（core spec §4 / §9.5）。
-//
-// 与旧 JSON struct 的差异：session_id / chunk_id / nonce / 密钥为原生 bytes（去 base64）；
-// chunk_id 为 ULID 16B。字段号发布后不可改（§1.4）。
 type (
-	HelloMessage      = corepb.HelloMessage
-	HelloAckMessage   = corepb.HelloAckMessage
-	AuthMessage       = corepb.AuthMessage
-	AuthOKMessage     = corepb.AuthOKMessage
-	AuthFailMessage   = corepb.AuthFailMessage
-	BatchMessage      = corepb.BatchMessage
-	DatagramMessage   = corepb.DatagramMessage
-	AckMessage        = corepb.AckMessage
-	NackMessage       = corepb.NackMessage
-	PartialAckMessage = corepb.PartialAckMessage
-	RejectedEvent     = corepb.RejectedEvent
-	WindowMessage     = corepb.WindowMessage
-	ThrottleMessage   = corepb.ThrottleMessage
-	PingMessage       = corepb.PingMessage
-	PongMessage       = corepb.PongMessage
-	CloseMessage      = corepb.CloseMessage
-	ErrorMessage      = corepb.ErrorMessage
+	Hello    = corepb.Hello
+	HelloAck = corepb.HelloAck
+	Limits   = corepb.Limits
+	HelloNak = corepb.HelloNak
+	Credits  = corepb.Credits
+	Envelope = corepb.Envelope
+	Batch    = corepb.Batch
+	Result   = corepb.Result
+	Credit   = corepb.Credit
+	CloseMsg = corepb.Close
+	AbortMsg = corepb.Abort
+	Redirect = corepb.Redirect
+	PingMsg  = corepb.Ping
+	PongMsg  = corepb.Pong
+	ZstdDict = corepb.ZstdDict
 
-	// AckMode 重导出，便于 core 包调用方引用。
-	AckMode = corepb.AckMode
+	Profile     = corepb.Profile
+	AckMode     = corepb.AckMode
+	ResultLevel = corepb.ResultLevel
+	Compression = corepb.Compression
 )
-
-// currentFrameVersion 是当前支持的唯一 wire 版本。
-// 新增版本时改为集合校验（目前仅 v1，无需 map）。
-const currentFrameVersion uint32 = 1
-
-// ValidateHello 校验 HELLO。agent_id 必填且须通过长度/控制字符校验；
-// frame_version 必须是已支持的版本。
-func ValidateHello(m *HelloMessage) error {
-	if m == nil || m.GetAgentId() == "" {
-		return NewError(ErrCodeValidation, "agent_id is required")
-	}
-	if err := validateAgentID(m.GetAgentId()); err != nil {
-		return err
-	}
-	// 校验 frame_version：0 或未知版本一律拒绝，避免降级攻击或后续编解码异常。
-	if m.GetFrameVersion() != currentFrameVersion {
-		return NewError(ErrCodeValidation, fmt.Sprintf("unsupported frame_version: %d", m.GetFrameVersion()))
-	}
-	return nil
-}
-
-// ValidateAuth 校验 AUTH。agent_id / session_id / auth_nonce 必填。
-// token 在非 tokenless 模式下必填——但 tokenless 模式（TokenResolver）允许客户端
-// 省略 token，由服务端通过 agent_id 反查。token 必填校验由调用方（handleAuth）
-// 在确认不支持 tokenless 后执行，而非在此处无条件拒绝。
-// agent_id 须通过长度/控制字符校验（日志注入防护）。
-func ValidateAuth(m *AuthMessage) error {
-	if m == nil {
-		return NewError(ErrCodeValidation, "nil auth message")
-	}
-	if m.GetAgentId() == "" {
-		return NewError(ErrCodeValidation, "agent_id is required")
-	}
-	if err := validateAgentID(m.GetAgentId()); err != nil {
-		return err
-	}
-	if len(m.GetSessionId()) == 0 {
-		return NewError(ErrCodeValidation, "session_id is required")
-	}
-	if len(m.GetAuthNonce()) == 0 {
-		return NewError(ErrCodeValidation, "auth_nonce is required")
-	}
-	// 注意：token 必填校验已移至 handleAuth，以支持 tokenless AUTH（TokenResolver）。
-	// handleAuth 在 resolveAuthToken 之后、若 token 仍为空则 failAuth。
-	return nil
-}
-
-// ValidateBatch 校验 BATCH。seq>=1，chunk_id（ULID 16B）必填，batch 非空。
-func ValidateBatch(m *BatchMessage) error {
-	if m == nil {
-		return NewError(ErrCodeValidation, "nil batch message")
-	}
-	if m.GetSeq() == 0 {
-		return NewError(ErrCodeValidation, "seq must be >= 1")
-	}
-	if len(m.GetChunkId()) != 16 {
-		return NewError(ErrCodeValidation, fmt.Sprintf("chunk_id must be exactly 16 bytes (ULID), got %d", len(m.GetChunkId())))
-	}
-	if len(m.GetBatch()) == 0 {
-		return NewError(ErrCodeValidation, "batch must not be empty")
-	}
-	return nil
-}
 
 // Encode proto 序列化消息。
 func Encode(m proto.Message) ([]byte, error) {
@@ -115,3 +51,98 @@ func Decode(data []byte, m proto.Message) error {
 	}
 	return nil
 }
+
+// EphemeralPubLen 返回 profile 临时公钥的 wire 长度（严格校验）。
+func EphemeralPubLen(p corepb.Profile) int {
+	switch p {
+	case corepb.Profile_PROFILE_INTL:
+		return 32 // X25519
+	case corepb.Profile_PROFILE_GM:
+		return 65 // SM2 非压缩 0x04‖X‖Y
+	default:
+		return -1
+	}
+}
+
+// ValidateHello 校验 HELLO。agent_id 必填且过长度/控制字符校验；
+// meta 各字段可选但一旦提供须过同强度校验（继承 v1 加固）；
+// eph 长度按 profile 严格校验；profile 必须已知。
+func ValidateHello(m *corepb.Hello) error {
+	if m == nil || m.GetAgentId() == "" {
+		return NewError(ErrCodeBadHandshake, "agent_id is required")
+	}
+	if err := validateAgentID(m.GetAgentId()); err != nil {
+		return err
+	}
+	for k, v := range m.GetMeta() {
+		if err := validateHelloMetaField("meta."+k, k); err != nil {
+			return err
+		}
+		if err := validateHelloMetaField("meta."+k, v); err != nil {
+			return err
+		}
+	}
+	if EphemeralPubLen(m.GetProfile()) < 0 {
+		return NewError(ErrCodeUnsupportedProfile, fmt.Sprintf("unsupported profile %v", m.GetProfile()))
+	}
+	if n := EphemeralPubLen(m.GetProfile()); len(m.GetClientEph()) != n {
+		return NewError(ErrCodeHelloEphInvalid, fmt.Sprintf("client_eph must be %d bytes, got %d", n, len(m.GetClientEph())))
+	}
+	if len(m.GetTokenProof()) == 0 {
+		return NewError(ErrCodeBadHandshake, "token_proof is required")
+	}
+	return nil
+}
+
+// ValidateHelloAck 校验 HELLO_ACK（客户端侧）。
+// 初始 credit 非正值 = 协议错误；ack_mode 零值拒绝；limits 非正值拒绝。
+func ValidateHelloAck(a *corepb.HelloAck) error {
+	if a == nil {
+		return NewError(ErrCodeBadHandshake, "nil hello_ack")
+	}
+	if a.GetAckMode() != corepb.AckMode_ACK_MODE_ACCEPTED_ONLY && a.GetAckMode() != corepb.AckMode_ACK_MODE_DURABLE {
+		return NewError(ErrCodeAckModeBad, fmt.Sprintf("invalid ack_mode %v", a.GetAckMode()))
+	}
+	if a.GetCredits().GetBatches() == 0 || a.GetCredits().GetBytes() == 0 {
+		return NewError(ErrCodeCreditInvalid, "initial credits must be positive")
+	}
+	if a.GetLimits().GetMaxFrameBytes() == 0 || a.GetLimits().GetMaxBatchBytes() == 0 {
+		return NewError(ErrCodeBadHandshake, "limits must be positive")
+	}
+	if len(a.GetFinished()) == 0 {
+		return NewError(ErrCodeBadHandshake, "finished mac is required")
+	}
+	if a.GetExpiryUnix() <= 0 {
+		return NewError(ErrCodeBadHandshake, "expiry_unix must be > 0")
+	}
+	return nil
+}
+
+// validateHelloMetaField 校验 HELLO meta 的键/值（长度 + 严格控制字符）。
+func validateHelloMetaField(name, val string) error {
+	if val == "" {
+		return nil
+	}
+	if len(val) > MaxAgentIDLen {
+		return NewError(ErrCodeBadHandshake, fmt.Sprintf("%s exceeds maximum length %d", name, MaxAgentIDLen))
+	}
+	if hasStrictControlChars(val) {
+		return NewError(ErrCodeBadHandshake, name+" contains control characters")
+	}
+	return nil
+}
+
+// ValidateResultLevel 校验 RESULT level 合法（非零枚举值）。
+func ValidateResultLevel(l corepb.ResultLevel) error {
+	switch l {
+	case corepb.ResultLevel_RESULT_LEVEL_ACCEPTED,
+		corepb.ResultLevel_RESULT_LEVEL_DURABLE,
+		corepb.ResultLevel_RESULT_LEVEL_REJECTED,
+		corepb.ResultLevel_RESULT_LEVEL_RELEASED:
+		return nil
+	default:
+		return NewError(ErrCodeResultLevelBad, fmt.Sprintf("invalid result level %v", l))
+	}
+}
+
+// MarshalSignalBatchCodec / UnmarshalSignalBatchCodec 保留在 codec*.go。

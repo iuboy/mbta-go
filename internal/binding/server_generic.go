@@ -122,7 +122,12 @@ func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
 		select {
 		case <-ctx.Done():
 		case <-done:
-			return
+			// Run 已返回，但 ctx.Done 同时就绪时 select 可能恰好选中 done（随机）。
+			// 此时若不关闭，Run 的 defer 已把状态回置 stopped，Close() 的 CAS 会失败
+			// 跳过关闭——listener fd 泄漏。ctx 已取消时仍需关闭。
+			if ctx.Err() == nil {
+				return
+			}
 		}
 		_ = spec.CloseListener(l)
 	}()

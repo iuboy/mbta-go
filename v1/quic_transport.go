@@ -22,7 +22,9 @@ import (
 type quicTransport struct {
 	conn       *Conn
 	controlStr *quic.Stream
-	controlMu  sync.Mutex // control stream 写串行化
+	maxFrame   uint64 // 帧上限（policy.MaxFrameBytes；0=默认 16MB）
+
+	controlMu sync.Mutex // control stream 写串行化
 
 	dataCh  chan core.Frame // 聚合 data stream 帧
 	dataErr chan error      // data accept 循环错误
@@ -32,32 +34,51 @@ type quicTransport struct {
 	wg      sync.WaitGroup // 追踪活跃的 readDataStream goroutine，保证 dataCh 关闭前全部退出
 }
 
+// firstStreamTimeout 是等待客户端打开第一个（control）stream 的上限。
+// 认证前连接未通过 challenge-response：QUIC 层握手完成后保持静默的对端（仅靠
+// 连接层保活）可无限占用 connSem 并发槽位（DoS）。此超时把认证前的钉死窗口
+// 收敛为有界。测试可缩短（包内 var）。
+var firstStreamTimeout = 30 * time.Second
+
 // newQuicTransport accept 第一个 stream 作为 control stream，启动 data accept 循环；失败时关闭底层 QUIC 连接。
-func newQuicTransport(conn *Conn) (*quicTransport, error) {
-	s, role, err := conn.AcceptStream(context.Background())
+//
+// ctx 用于约束首个 stream 的等待（见 firstStreamTimeout）：此前用 context.Background()
+// 完全无界，是未认证连接钉死槽位的根因。
+func newQuicTransport(ctx context.Context, conn *Conn, maxFrame uint64) (*quicTransport, error) {
+	firstStreamCtx, cancel := context.WithTimeout(ctx, firstStreamTimeout)
+	defer cancel()
+	s, role, err := conn.AcceptStream(firstStreamCtx)
 	if err != nil {
-		_ = conn.CloseWithError(0, "accept control stream failed")
+		_ = conn.Close()
 		return nil, core.WrapError(core.ErrCodeStream, "accept control stream", err)
 	}
 	if role != core.StreamRoleControl {
 		_ = s.Close()
-		_ = conn.CloseWithError(0, "first stream not control")
+		_ = conn.Close()
 		return nil, core.NewError(core.ErrCodeProtocol, "first stream must be control")
 	}
 	t := &quicTransport{
 		conn:       conn,
 		controlStr: s,
+		maxFrame:   maxFrame,
 		dataCh:     make(chan core.Frame, 64),
 		dataErr:    make(chan error, 1),
 		done:       make(chan struct{}),
 	}
-	go t.acceptDataStreams()
+	go t.acceptDataStreams(ctx)
+	if t.SupportsDatagram() {
+		t.wg.Add(1)
+		go func() { defer t.wg.Done(); t.receiveDatagrams() }()
+	}
 	return t, nil
 }
 
-func (t *quicTransport) acceptDataStreams() {
+// acceptDataStreams 聚合后续 data stream 的帧。ctx 为连接生命周期 context：
+// 取消时 AcceptStream 返回错误，走统一的关闭清理路径（避免 goroutine 滞留到
+// QUIC 空闲超时）。
+func (t *quicTransport) acceptDataStreams(ctx context.Context) {
 	for {
-		s, _, err := t.conn.AcceptStream(context.Background())
+		s, _, err := t.conn.AcceptStream(ctx)
 		if err != nil {
 			// 先发关闭信号，让所有 readDataStream 退出（避免向即将 close 的 dataCh 发送 panic）。
 			t.closeMu.Lock()
@@ -80,13 +101,33 @@ func (t *quicTransport) acceptDataStreams() {
 	}
 }
 
+// receiveDatagrams 把 QUIC DATAGRAM（RFC 9221）注入 data 通道：载荷是完整的
+// DGRAM 帧（TypeDgram + Envelope——type 高位域使协议层 RecvDataFrame 无差别消费，
+// 与 TCP binding 的单连接 demux 对称）。不可靠语义天然允许在通道关闭竞态下丢弃。
+func (t *quicTransport) receiveDatagrams() {
+	for {
+		data, err := t.conn.QC.ReceiveDatagram(context.Background())
+		if err != nil {
+			return // 连接关闭/扩展未启用：退出（无清理义务，dataCh 由 acceptDataStreams 管）
+		}
+		// DATAGRAM 载荷 = Envelope（帧类型由通道语义隐含为 TypeDgram）；
+		// 构造完整帧使协议层 dataLoop 的 type switch 命中 TypeDgram 分支。
+		f := core.Frame{Header: core.Header{Type: core.TypeDgram, Length: uint64(len(data))}, Payload: data}
+		select {
+		case t.dataCh <- f:
+		case <-t.done:
+			return
+		}
+	}
+}
+
 func (t *quicTransport) readDataStream(s *quic.Stream) {
 	defer func() {
 		s.Close()
 		t.wg.Done()
 	}()
 	for {
-		f, err := core.Read(s, core.DefaultLimits())
+		f, err := core.Read(s, t.limits())
 		if err != nil {
 			return
 		}
@@ -98,45 +139,34 @@ func (t *quicTransport) readDataStream(s *quic.Stream) {
 	}
 }
 
+// limits 返回帧上限（0=默认）。
+func (t *quicTransport) limits() core.FrameLimits {
+	if t.maxFrame == 0 {
+		return core.DefaultLimits()
+	}
+	return core.FrameLimits{MaxFrameBytes: t.maxFrame}
+}
+
 // RecvControlFrame 读 control stream 下一帧，受调用方 ctx 约束。
-// 通过 SetReadDeadline 让 ctx.Deadline()/取消中断阻塞读（模式对称于 writeFrameCtx 写路径）。
+// 委托 core.ReadFrameCtx：deadline 转换 + ctx.Done watcher（取消能立即唤醒阻塞读，
+// 此前入口一次性转换导致取消后最长滞留 DefaultReadTimeout=5 分钟，服务端停机时
+// handler goroutine 连同 connSem 槽位滞留）。
 func (t *quicTransport) RecvControlFrame(ctx context.Context) (core.Frame, error) {
 	if err := ctx.Err(); err != nil {
 		return core.Frame{}, err
 	}
-	// ctx 无 deadline 时设默认上限，避免对端静默断开时读永久阻塞（goroutine 泄漏）。
-	dl, ok := ctx.Deadline()
-	if !ok {
-		dl = time.Now().Add(core.DefaultReadTimeout)
-	}
-	if err := t.controlStr.SetReadDeadline(dl); err != nil {
-		return core.Frame{}, core.WrapError(core.ErrCodeStream, "set control read deadline", err)
-	}
-	defer func() { _ = t.controlStr.SetReadDeadline(time.Time{}) }()
-	// 二次检查 ctx 取消：缩小 ctx.Err() 与 SetReadDeadline 之间的 TOCTOU 窗口。
-	if err := ctx.Err(); err != nil {
-		return core.Frame{}, err
-	}
-	f, err := core.Read(t.controlStr, core.DefaultLimits())
-	if err != nil {
-		// ctx 取消与 SetReadDeadline 超时都会让 Read 返回错误；区分 ctx 取消以便上层处理。
-		if ctx.Err() != nil {
-			return core.Frame{}, ctx.Err()
-		}
-		return core.Frame{}, err
-	}
-	return f, nil
+	return core.ReadFrameCtxLimit(ctx, t.controlStr, t.limits())
 }
 
 // control stream 读超时统一用 core.DefaultReadTimeout。
 
 // RecvDataFrame 从聚合 data channel 读下一帧。
-// dataCh 关闭时阻塞读 dataErr 拿真实错误（cap=1 非阻塞发送可能丢错误，空则返回 io.EOF）。
+// dataCh 关闭时非阻塞读 dataErr 拿真实错误（cap=1 非阻塞发送可能丢错误，空则返回 io.EOF）。
 func (t *quicTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 	select {
 	case f, ok := <-t.dataCh:
 		if !ok {
-			// dataCh 关闭：读 dataErr 拿真实错误，空则返回 io.EOF。
+			// dataCh 关闭：非阻塞读 dataErr，空则 io.EOF。
 			select {
 			case e := <-t.dataErr:
 				if e != nil {
@@ -145,7 +175,6 @@ func (t *quicTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 			case <-ctx.Done():
 				return core.Frame{}, ctx.Err()
 			default:
-				return core.Frame{}, io.EOF
 			}
 			return core.Frame{}, io.EOF
 		}
@@ -155,8 +184,10 @@ func (t *quicTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 	}
 }
 
-// SendFrame 写帧（server 端走 control stream，ChannelID=0）。
+// SendFrame 写帧（server 端应答帧均为 control 域，走 control stream）。
 // 通过 SetWriteDeadline 实现 ctx 感知写（QUIC 流控背压下 Write 阻塞需可被 ctx 取消）。
+// 写失败（含部分写/短写）时拆除连接：流上残留半帧会让后续帧全部错位（流去同步），
+// 故障表现远离根因；CloseWithError 迫使读侧出错、Handle 返回、槽位释放。
 func (t *quicTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -171,7 +202,11 @@ func (t *quicTransport) SendFrame(ctx context.Context, f core.Frame) error {
 		return core.WrapError(core.ErrCodeStream, "set control write deadline", err)
 	}
 	defer func() { _ = t.controlStr.SetWriteDeadline(time.Time{}) }()
-	return core.Write(t.controlStr, f.Header.Version, f.Header.Type, f.Header.Flags, f.Header.ChannelID, f.Payload)
+	if err := core.Write(t.controlStr, f.Header.Type, 0, f.Payload); err != nil {
+		_ = t.conn.Close()
+		return err
+	}
+	return nil
 }
 
 // SupportsDatagram 报告是否支持 QUIC DATAGRAM（检查连接实际是否启用 datagram 扩展，不硬编码 true）。
@@ -222,5 +257,6 @@ func (t *quicTransport) Close() error {
 	}
 	t.closed = true
 	close(t.done) // 通知所有 readDataStream goroutine 退出，避免 goroutine 泄漏
-	return t.conn.CloseWithError(0, "done")
+	// error code 0 = "no error" 会误导对端；用 1（internal error）+ 明确 reason。
+	return t.conn.Close()
 }

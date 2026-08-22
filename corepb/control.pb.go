@@ -21,25 +21,74 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type Profile int32
+
+const (
+	Profile_PROFILE_UNSPECIFIED Profile = 0
+	Profile_PROFILE_INTL        Profile = 1 // X25519 + HKDF-SHA256 + AES-256-GCM
+	Profile_PROFILE_GM          Profile = 2 // SM2 + HKDF-SM3 + SM4-GCM
+)
+
+// Enum value maps for Profile.
+var (
+	Profile_name = map[int32]string{
+		0: "PROFILE_UNSPECIFIED",
+		1: "PROFILE_INTL",
+		2: "PROFILE_GM",
+	}
+	Profile_value = map[string]int32{
+		"PROFILE_UNSPECIFIED": 0,
+		"PROFILE_INTL":        1,
+		"PROFILE_GM":          2,
+	}
+)
+
+func (x Profile) Enum() *Profile {
+	p := new(Profile)
+	*p = x
+	return p
+}
+
+func (x Profile) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Profile) Descriptor() protoreflect.EnumDescriptor {
+	return file_control_proto_enumTypes[0].Descriptor()
+}
+
+func (Profile) Type() protoreflect.EnumType {
+	return &file_control_proto_enumTypes[0]
+}
+
+func (x Profile) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Profile.Descriptor instead.
+func (Profile) EnumDescriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{0}
+}
+
 type AckMode int32
 
 const (
-	AckMode_ACK_MODE_UNSPECIFIED AckMode = 0
-	AckMode_ACK_MODE_ACCEPTED    AckMode = 1 // 已接受，未持久化
-	AckMode_ACK_MODE_DURABLE     AckMode = 2 // 已持久化（durable_ack）
+	AckMode_ACK_MODE_ENUM_UNSPECIFIED AckMode = 0
+	AckMode_ACK_MODE_ACCEPTED_ONLY    AckMode = 1 // accepted 即终态
+	AckMode_ACK_MODE_DURABLE          AckMode = 2 // accepted 中间态，durable 终态
 )
 
 // Enum value maps for AckMode.
 var (
 	AckMode_name = map[int32]string{
-		0: "ACK_MODE_UNSPECIFIED",
-		1: "ACK_MODE_ACCEPTED",
+		0: "ACK_MODE_ENUM_UNSPECIFIED",
+		1: "ACK_MODE_ACCEPTED_ONLY",
 		2: "ACK_MODE_DURABLE",
 	}
 	AckMode_value = map[string]int32{
-		"ACK_MODE_UNSPECIFIED": 0,
-		"ACK_MODE_ACCEPTED":    1,
-		"ACK_MODE_DURABLE":     2,
+		"ACK_MODE_ENUM_UNSPECIFIED": 0,
+		"ACK_MODE_ACCEPTED_ONLY":    1,
+		"ACK_MODE_DURABLE":          2,
 	}
 )
 
@@ -54,11 +103,11 @@ func (x AckMode) String() string {
 }
 
 func (AckMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_control_proto_enumTypes[0].Descriptor()
+	return file_control_proto_enumTypes[1].Descriptor()
 }
 
 func (AckMode) Type() protoreflect.EnumType {
-	return &file_control_proto_enumTypes[0]
+	return &file_control_proto_enumTypes[1]
 }
 
 func (x AckMode) Number() protoreflect.EnumNumber {
@@ -67,41 +116,199 @@ func (x AckMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AckMode.Descriptor instead.
 func (AckMode) EnumDescriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{0}
+	return file_control_proto_rawDescGZIP(), []int{1}
 }
 
-type HelloMessage struct {
+type ResultLevel int32
+
+const (
+	ResultLevel_RESULT_LEVEL_UNSPECIFIED ResultLevel = 0
+	ResultLevel_RESULT_LEVEL_ACCEPTED    ResultLevel = 1 // 已入内存队列（durable 模式下非终态）
+	ResultLevel_RESULT_LEVEL_DURABLE     ResultLevel = 2 // 持久化完成（终态）
+	ResultLevel_RESULT_LEVEL_REJECTED    ResultLevel = 3 // 终态拒绝（内容非法/超限）
+	ResultLevel_RESULT_LEVEL_RELEASED    ResultLevel = 4 // 未处理可重投（携带 retry_hint；重投用新 seq）
+)
+
+// Enum value maps for ResultLevel.
+var (
+	ResultLevel_name = map[int32]string{
+		0: "RESULT_LEVEL_UNSPECIFIED",
+		1: "RESULT_LEVEL_ACCEPTED",
+		2: "RESULT_LEVEL_DURABLE",
+		3: "RESULT_LEVEL_REJECTED",
+		4: "RESULT_LEVEL_RELEASED",
+	}
+	ResultLevel_value = map[string]int32{
+		"RESULT_LEVEL_UNSPECIFIED": 0,
+		"RESULT_LEVEL_ACCEPTED":    1,
+		"RESULT_LEVEL_DURABLE":     2,
+		"RESULT_LEVEL_REJECTED":    3,
+		"RESULT_LEVEL_RELEASED":    4,
+	}
+)
+
+func (x ResultLevel) Enum() *ResultLevel {
+	p := new(ResultLevel)
+	*p = x
+	return p
+}
+
+func (x ResultLevel) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ResultLevel) Descriptor() protoreflect.EnumDescriptor {
+	return file_control_proto_enumTypes[2].Descriptor()
+}
+
+func (ResultLevel) Type() protoreflect.EnumType {
+	return &file_control_proto_enumTypes[2]
+}
+
+func (x ResultLevel) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ResultLevel.Descriptor instead.
+func (ResultLevel) EnumDescriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{2}
+}
+
+type Codec int32
+
+const (
+	Codec_CODEC_UNSPECIFIED Codec = 0
+	Codec_CODEC_PROTO       Codec = 1 // 默认
+	Codec_CODEC_CBOR        Codec = 2 // capability: cbor
+)
+
+// Enum value maps for Codec.
+var (
+	Codec_name = map[int32]string{
+		0: "CODEC_UNSPECIFIED",
+		1: "CODEC_PROTO",
+		2: "CODEC_CBOR",
+	}
+	Codec_value = map[string]int32{
+		"CODEC_UNSPECIFIED": 0,
+		"CODEC_PROTO":       1,
+		"CODEC_CBOR":        2,
+	}
+)
+
+func (x Codec) Enum() *Codec {
+	p := new(Codec)
+	*p = x
+	return p
+}
+
+func (x Codec) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Codec) Descriptor() protoreflect.EnumDescriptor {
+	return file_control_proto_enumTypes[3].Descriptor()
+}
+
+func (Codec) Type() protoreflect.EnumType {
+	return &file_control_proto_enumTypes[3]
+}
+
+func (x Codec) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Codec.Descriptor instead.
+func (Codec) EnumDescriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{3}
+}
+
+type Compression int32
+
+const (
+	Compression_COMPRESSION_UNSPECIFIED Compression = 0
+	Compression_COMPRESSION_NONE        Compression = 1
+	Compression_COMPRESSION_GZIP        Compression = 2
+	Compression_COMPRESSION_ZSTD        Compression = 3
+	Compression_COMPRESSION_LZ4         Compression = 4
+	// zstd + 服务端下发字典（capability: zstd_dict，DICT 帧提供"当前字典"；
+	// 字典标识由 DICT 帧 dict_id 携带，Envelope 不重复）。
+	Compression_COMPRESSION_ZSTD_DICT Compression = 5
+)
+
+// Enum value maps for Compression.
+var (
+	Compression_name = map[int32]string{
+		0: "COMPRESSION_UNSPECIFIED",
+		1: "COMPRESSION_NONE",
+		2: "COMPRESSION_GZIP",
+		3: "COMPRESSION_ZSTD",
+		4: "COMPRESSION_LZ4",
+		5: "COMPRESSION_ZSTD_DICT",
+	}
+	Compression_value = map[string]int32{
+		"COMPRESSION_UNSPECIFIED": 0,
+		"COMPRESSION_NONE":        1,
+		"COMPRESSION_GZIP":        2,
+		"COMPRESSION_ZSTD":        3,
+		"COMPRESSION_LZ4":         4,
+		"COMPRESSION_ZSTD_DICT":   5,
+	}
+)
+
+func (x Compression) Enum() *Compression {
+	p := new(Compression)
+	*p = x
+	return p
+}
+
+func (x Compression) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Compression) Descriptor() protoreflect.EnumDescriptor {
+	return file_control_proto_enumTypes[4].Descriptor()
+}
+
+func (Compression) Type() protoreflect.EnumType {
+	return &file_control_proto_enumTypes[4]
+}
+
+func (x Compression) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Compression.Descriptor instead.
+func (Compression) EnumDescriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{4}
+}
+
+type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	AgentId       string                 `protobuf:"bytes,1,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
-	Hostname      string                 `protobuf:"bytes,2,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	InstanceId    string                 `protobuf:"bytes,3,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
-	AgentVersion  string                 `protobuf:"bytes,4,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	FrameVersion  uint32                 `protobuf:"varint,5,opt,name=frame_version,json=frameVersion,proto3" json:"frame_version,omitempty"`
-	Capabilities  []string               `protobuf:"bytes,6,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
-	ResourceClass *string                `protobuf:"bytes,7,opt,name=resource_class,json=resourceClass,proto3,oneof" json:"resource_class,omitempty"` // embedded/constrained/standard/server（§9.5）
-	MemLimitKb    *uint64                `protobuf:"varint,8,opt,name=mem_limit_kb,json=memLimitKb,proto3,oneof" json:"mem_limit_kb,omitempty"`       // 受限场景触发服务端降级
-	ConnId        string                 `protobuf:"bytes,9,opt,name=conn_id,json=connId,proto3" json:"conn_id,omitempty"`
-	StartedAtUnix int64                  `protobuf:"varint,10,opt,name=started_at_unix,json=startedAtUnix,proto3" json:"started_at_unix,omitempty"`
-	SessionTicket []byte                 `protobuf:"bytes,11,opt,name=session_ticket,json=sessionTicket,proto3,oneof" json:"session_ticket,omitempty"` // r2 0-RTT：resumption ticket（上次 AUTH_OK 颁发）
-	Os            *string                `protobuf:"bytes,12,opt,name=os,proto3,oneof" json:"os,omitempty"`                                            // agent 操作系统（runtime.GOOS，如 linux/darwin/windows）
+	Profile       Profile                `protobuf:"varint,1,opt,name=profile,proto3,enum=mbta.v1.Profile" json:"profile,omitempty"`
+	AgentId       string                 `protobuf:"bytes,2,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	Meta          map[string]string      `protobuf:"bytes,3,rep,name=meta,proto3" json:"meta,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // hostname/os/version…；入链（transcript）按 deterministic 排序
+	Capabilities  []string               `protobuf:"bytes,4,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	ClientEph     []byte                 `protobuf:"bytes,5,opt,name=client_eph,json=clientEph,proto3" json:"client_eph,omitempty"`    // 临时公钥：intl X25519 32B / gm SM2 65B 非压缩
+	TokenProof    []byte                 `protobuf:"bytes,6,opt,name=token_proof,json=tokenProof,proto3" json:"token_proof,omitempty"` // HMAC(profileHash, key=token, msg=th_hello)；入链前置零
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *HelloMessage) Reset() {
-	*x = HelloMessage{}
+func (x *Hello) Reset() {
+	*x = Hello{}
 	mi := &file_control_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *HelloMessage) String() string {
+func (x *Hello) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*HelloMessage) ProtoMessage() {}
+func (*Hello) ProtoMessage() {}
 
-func (x *HelloMessage) ProtoReflect() protoreflect.Message {
+func (x *Hello) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -113,128 +320,75 @@ func (x *HelloMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use HelloMessage.ProtoReflect.Descriptor instead.
-func (*HelloMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Hello.ProtoReflect.Descriptor instead.
+func (*Hello) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *HelloMessage) GetAgentId() string {
+func (x *Hello) GetProfile() Profile {
+	if x != nil {
+		return x.Profile
+	}
+	return Profile_PROFILE_UNSPECIFIED
+}
+
+func (x *Hello) GetAgentId() string {
 	if x != nil {
 		return x.AgentId
 	}
 	return ""
 }
 
-func (x *HelloMessage) GetHostname() string {
+func (x *Hello) GetMeta() map[string]string {
 	if x != nil {
-		return x.Hostname
+		return x.Meta
 	}
-	return ""
+	return nil
 }
 
-func (x *HelloMessage) GetInstanceId() string {
-	if x != nil {
-		return x.InstanceId
-	}
-	return ""
-}
-
-func (x *HelloMessage) GetAgentVersion() string {
-	if x != nil {
-		return x.AgentVersion
-	}
-	return ""
-}
-
-func (x *HelloMessage) GetFrameVersion() uint32 {
-	if x != nil {
-		return x.FrameVersion
-	}
-	return 0
-}
-
-func (x *HelloMessage) GetCapabilities() []string {
+func (x *Hello) GetCapabilities() []string {
 	if x != nil {
 		return x.Capabilities
 	}
 	return nil
 }
 
-func (x *HelloMessage) GetResourceClass() string {
-	if x != nil && x.ResourceClass != nil {
-		return *x.ResourceClass
-	}
-	return ""
-}
-
-func (x *HelloMessage) GetMemLimitKb() uint64 {
-	if x != nil && x.MemLimitKb != nil {
-		return *x.MemLimitKb
-	}
-	return 0
-}
-
-func (x *HelloMessage) GetConnId() string {
+func (x *Hello) GetClientEph() []byte {
 	if x != nil {
-		return x.ConnId
-	}
-	return ""
-}
-
-func (x *HelloMessage) GetStartedAtUnix() int64 {
-	if x != nil {
-		return x.StartedAtUnix
-	}
-	return 0
-}
-
-func (x *HelloMessage) GetSessionTicket() []byte {
-	if x != nil {
-		return x.SessionTicket
+		return x.ClientEph
 	}
 	return nil
 }
 
-func (x *HelloMessage) GetOs() string {
-	if x != nil && x.Os != nil {
-		return *x.Os
+func (x *Hello) GetTokenProof() []byte {
+	if x != nil {
+		return x.TokenProof
 	}
-	return ""
+	return nil
 }
 
-type HelloAckMessage struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	SessionId            []byte                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	ServerId             string                 `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	SelectedCapabilities []string               `protobuf:"bytes,3,rep,name=selected_capabilities,json=selectedCapabilities,proto3" json:"selected_capabilities,omitempty"`
-	Codec                Codec                  `protobuf:"varint,4,opt,name=codec,proto3,enum=mbta.v1.Codec" json:"codec,omitempty"`
-	Compression          Compression            `protobuf:"varint,5,opt,name=compression,proto3,enum=mbta.v1.Compression" json:"compression,omitempty"`
-	CipherSuite          CipherSuite            `protobuf:"varint,6,opt,name=cipher_suite,json=cipherSuite,proto3,enum=mbta.v1.CipherSuite" json:"cipher_suite,omitempty"`
-	MaxFramePayloadBytes uint32                 `protobuf:"varint,7,opt,name=max_frame_payload_bytes,json=maxFramePayloadBytes,proto3" json:"max_frame_payload_bytes,omitempty"`
-	MaxBatchBytes        uint32                 `protobuf:"varint,8,opt,name=max_batch_bytes,json=maxBatchBytes,proto3" json:"max_batch_bytes,omitempty"`
-	MaxBatchEvents       uint32                 `protobuf:"varint,9,opt,name=max_batch_events,json=maxBatchEvents,proto3" json:"max_batch_events,omitempty"`
-	MaxEventBytes        uint32                 `protobuf:"varint,10,opt,name=max_event_bytes,json=maxEventBytes,proto3" json:"max_event_bytes,omitempty"`
-	InitialWindow        *WindowMessage         `protobuf:"bytes,11,opt,name=initial_window,json=initialWindow,proto3" json:"initial_window,omitempty"`
-	HeartbeatIntervalSec uint32                 `protobuf:"varint,12,opt,name=heartbeat_interval_sec,json=heartbeatIntervalSec,proto3" json:"heartbeat_interval_sec,omitempty"`
-	ChallengeNonce       []byte                 `protobuf:"bytes,13,opt,name=challenge_nonce,json=challengeNonce,proto3" json:"challenge_nonce,omitempty"` // 一次性挑战，供 AUTH 应答
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+type Limits struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MaxFrameBytes uint64                 `protobuf:"varint,1,opt,name=max_frame_bytes,json=maxFrameBytes,proto3" json:"max_frame_bytes,omitempty"` // Envelope wire 字节数上限（帧层）
+	MaxBatchBytes uint64                 `protobuf:"varint,2,opt,name=max_batch_bytes,json=maxBatchBytes,proto3" json:"max_batch_bytes,omitempty"` // 解压后 batch payload 上限
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
-func (x *HelloAckMessage) Reset() {
-	*x = HelloAckMessage{}
+func (x *Limits) Reset() {
+	*x = Limits{}
 	mi := &file_control_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *HelloAckMessage) String() string {
+func (x *Limits) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*HelloAckMessage) ProtoMessage() {}
+func (*Limits) ProtoMessage() {}
 
-func (x *HelloAckMessage) ProtoReflect() protoreflect.Message {
+func (x *Limits) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -246,127 +400,47 @@ func (x *HelloAckMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use HelloAckMessage.ProtoReflect.Descriptor instead.
-func (*HelloAckMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Limits.ProtoReflect.Descriptor instead.
+func (*Limits) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *HelloAckMessage) GetSessionId() []byte {
+func (x *Limits) GetMaxFrameBytes() uint64 {
 	if x != nil {
-		return x.SessionId
-	}
-	return nil
-}
-
-func (x *HelloAckMessage) GetServerId() string {
-	if x != nil {
-		return x.ServerId
-	}
-	return ""
-}
-
-func (x *HelloAckMessage) GetSelectedCapabilities() []string {
-	if x != nil {
-		return x.SelectedCapabilities
-	}
-	return nil
-}
-
-func (x *HelloAckMessage) GetCodec() Codec {
-	if x != nil {
-		return x.Codec
-	}
-	return Codec_CODEC_UNSPECIFIED
-}
-
-func (x *HelloAckMessage) GetCompression() Compression {
-	if x != nil {
-		return x.Compression
-	}
-	return Compression_COMPRESSION_UNSPECIFIED
-}
-
-func (x *HelloAckMessage) GetCipherSuite() CipherSuite {
-	if x != nil {
-		return x.CipherSuite
-	}
-	return CipherSuite_CIPHER_SUITE_UNSPECIFIED
-}
-
-func (x *HelloAckMessage) GetMaxFramePayloadBytes() uint32 {
-	if x != nil {
-		return x.MaxFramePayloadBytes
+		return x.MaxFrameBytes
 	}
 	return 0
 }
 
-func (x *HelloAckMessage) GetMaxBatchBytes() uint32 {
+func (x *Limits) GetMaxBatchBytes() uint64 {
 	if x != nil {
 		return x.MaxBatchBytes
 	}
 	return 0
 }
 
-func (x *HelloAckMessage) GetMaxBatchEvents() uint32 {
-	if x != nil {
-		return x.MaxBatchEvents
-	}
-	return 0
-}
-
-func (x *HelloAckMessage) GetMaxEventBytes() uint32 {
-	if x != nil {
-		return x.MaxEventBytes
-	}
-	return 0
-}
-
-func (x *HelloAckMessage) GetInitialWindow() *WindowMessage {
-	if x != nil {
-		return x.InitialWindow
-	}
-	return nil
-}
-
-func (x *HelloAckMessage) GetHeartbeatIntervalSec() uint32 {
-	if x != nil {
-		return x.HeartbeatIntervalSec
-	}
-	return 0
-}
-
-func (x *HelloAckMessage) GetChallengeNonce() []byte {
-	if x != nil {
-		return x.ChallengeNonce
-	}
-	return nil
-}
-
-type AuthMessage struct {
+type Credits struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
-	AgentId       string                 `protobuf:"bytes,2,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
-	SessionId     []byte                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	AuthNonce     []byte                 `protobuf:"bytes,4,opt,name=auth_nonce,json=authNonce,proto3" json:"auth_nonce,omitempty"`      // 基于 challenge_nonce 的应答
-	Sm2CertPem    []byte                 `protobuf:"bytes,5,opt,name=sm2_cert_pem,json=sm2CertPem,proto3" json:"sm2_cert_pem,omitempty"` // sm2_cert_auth 协商时
+	Batches       uint64                 `protobuf:"varint,1,opt,name=batches,proto3" json:"batches,omitempty"`
+	Bytes         uint64                 `protobuf:"varint,2,opt,name=bytes,proto3" json:"bytes,omitempty"` // 计量口径 = Envelope wire 字节
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AuthMessage) Reset() {
-	*x = AuthMessage{}
+func (x *Credits) Reset() {
+	*x = Credits{}
 	mi := &file_control_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AuthMessage) String() string {
+func (x *Credits) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AuthMessage) ProtoMessage() {}
+func (*Credits) ProtoMessage() {}
 
-func (x *AuthMessage) ProtoReflect() protoreflect.Message {
+func (x *Credits) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -378,74 +452,54 @@ func (x *AuthMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AuthMessage.ProtoReflect.Descriptor instead.
-func (*AuthMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Credits.ProtoReflect.Descriptor instead.
+func (*Credits) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *AuthMessage) GetToken() string {
+func (x *Credits) GetBatches() uint64 {
 	if x != nil {
-		return x.Token
+		return x.Batches
 	}
-	return ""
+	return 0
 }
 
-func (x *AuthMessage) GetAgentId() string {
+func (x *Credits) GetBytes() uint64 {
 	if x != nil {
-		return x.AgentId
+		return x.Bytes
 	}
-	return ""
+	return 0
 }
 
-func (x *AuthMessage) GetSessionId() []byte {
-	if x != nil {
-		return x.SessionId
-	}
-	return nil
+type HelloAck struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	SessionId            []byte                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // 16B
+	Epoch                uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`                         // 服务端按 agent 单调分配
+	AckMode              AckMode                `protobuf:"varint,3,opt,name=ack_mode,json=ackMode,proto3,enum=mbta.v1.AckMode" json:"ack_mode,omitempty"`
+	SelectedCapabilities []string               `protobuf:"bytes,4,rep,name=selected_capabilities,json=selectedCapabilities,proto3" json:"selected_capabilities,omitempty"`
+	Limits               *Limits                `protobuf:"bytes,5,opt,name=limits,proto3" json:"limits,omitempty"`
+	Credits              *Credits               `protobuf:"bytes,6,opt,name=credits,proto3" json:"credits,omitempty"`
+	ServerEph            []byte                 `protobuf:"bytes,7,opt,name=server_eph,json=serverEph,proto3" json:"server_eph,omitempty"`
+	Finished             []byte                 `protobuf:"bytes,8,opt,name=finished,proto3" json:"finished,omitempty"` // HMAC(handshake_key, th_full)；入链前置零
+	ExpiryUnix           int64                  `protobuf:"varint,9,opt,name=expiry_unix,json=expiryUnix,proto3" json:"expiry_unix,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
-func (x *AuthMessage) GetAuthNonce() []byte {
-	if x != nil {
-		return x.AuthNonce
-	}
-	return nil
-}
-
-func (x *AuthMessage) GetSm2CertPem() []byte {
-	if x != nil {
-		return x.Sm2CertPem
-	}
-	return nil
-}
-
-type AuthOKMessage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     []byte                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	KeyId         string                 `protobuf:"bytes,2,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
-	HmacKey       []byte                 `protobuf:"bytes,3,opt,name=hmac_key,json=hmacKey,proto3" json:"hmac_key,omitempty"`
-	AesKey        []byte                 `protobuf:"bytes,4,opt,name=aes_key,json=aesKey,proto3" json:"aes_key,omitempty"` // cipher_suite=intl 时
-	Sm4Key        []byte                 `protobuf:"bytes,5,opt,name=sm4_key,json=sm4Key,proto3" json:"sm4_key,omitempty"` // cipher_suite=gm 时
-	CipherSuite   CipherSuite            `protobuf:"varint,6,opt,name=cipher_suite,json=cipherSuite,proto3,enum=mbta.v1.CipherSuite" json:"cipher_suite,omitempty"`
-	ExpiresAtUnix int64                  `protobuf:"varint,7,opt,name=expires_at_unix,json=expiresAtUnix,proto3" json:"expires_at_unix,omitempty"`
-	SessionTicket []byte                 `protobuf:"bytes,8,opt,name=session_ticket,json=sessionTicket,proto3,oneof" json:"session_ticket,omitempty"` // r2 0-RTT：新 session ticket（client 保存用于下次 resumption）
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *AuthOKMessage) Reset() {
-	*x = AuthOKMessage{}
+func (x *HelloAck) Reset() {
+	*x = HelloAck{}
 	mi := &file_control_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AuthOKMessage) String() string {
+func (x *HelloAck) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AuthOKMessage) ProtoMessage() {}
+func (*HelloAck) ProtoMessage() {}
 
-func (x *AuthOKMessage) ProtoReflect() protoreflect.Message {
+func (x *HelloAck) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -457,91 +511,97 @@ func (x *AuthOKMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AuthOKMessage.ProtoReflect.Descriptor instead.
-func (*AuthOKMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use HelloAck.ProtoReflect.Descriptor instead.
+func (*HelloAck) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *AuthOKMessage) GetSessionId() []byte {
+func (x *HelloAck) GetSessionId() []byte {
 	if x != nil {
 		return x.SessionId
 	}
 	return nil
 }
 
-func (x *AuthOKMessage) GetKeyId() string {
+func (x *HelloAck) GetEpoch() uint64 {
 	if x != nil {
-		return x.KeyId
-	}
-	return ""
-}
-
-func (x *AuthOKMessage) GetHmacKey() []byte {
-	if x != nil {
-		return x.HmacKey
-	}
-	return nil
-}
-
-func (x *AuthOKMessage) GetAesKey() []byte {
-	if x != nil {
-		return x.AesKey
-	}
-	return nil
-}
-
-func (x *AuthOKMessage) GetSm4Key() []byte {
-	if x != nil {
-		return x.Sm4Key
-	}
-	return nil
-}
-
-func (x *AuthOKMessage) GetCipherSuite() CipherSuite {
-	if x != nil {
-		return x.CipherSuite
-	}
-	return CipherSuite_CIPHER_SUITE_UNSPECIFIED
-}
-
-func (x *AuthOKMessage) GetExpiresAtUnix() int64 {
-	if x != nil {
-		return x.ExpiresAtUnix
+		return x.Epoch
 	}
 	return 0
 }
 
-func (x *AuthOKMessage) GetSessionTicket() []byte {
+func (x *HelloAck) GetAckMode() AckMode {
 	if x != nil {
-		return x.SessionTicket
+		return x.AckMode
+	}
+	return AckMode_ACK_MODE_ENUM_UNSPECIFIED
+}
+
+func (x *HelloAck) GetSelectedCapabilities() []string {
+	if x != nil {
+		return x.SelectedCapabilities
 	}
 	return nil
 }
 
-type AuthFailMessage struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Code           string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
-	Reason         string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
-	Retryable      bool                   `protobuf:"varint,3,opt,name=retryable,proto3" json:"retryable,omitempty"`
-	ChallengeNonce []byte                 `protobuf:"bytes,4,opt,name=challenge_nonce,json=challengeNonce,proto3" json:"challenge_nonce,omitempty"` // retryable 时回传新挑战
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+func (x *HelloAck) GetLimits() *Limits {
+	if x != nil {
+		return x.Limits
+	}
+	return nil
 }
 
-func (x *AuthFailMessage) Reset() {
-	*x = AuthFailMessage{}
+func (x *HelloAck) GetCredits() *Credits {
+	if x != nil {
+		return x.Credits
+	}
+	return nil
+}
+
+func (x *HelloAck) GetServerEph() []byte {
+	if x != nil {
+		return x.ServerEph
+	}
+	return nil
+}
+
+func (x *HelloAck) GetFinished() []byte {
+	if x != nil {
+		return x.Finished
+	}
+	return nil
+}
+
+func (x *HelloAck) GetExpiryUnix() int64 {
+	if x != nil {
+		return x.ExpiryUnix
+	}
+	return 0
+}
+
+type HelloNak struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          uint32                 `protobuf:"varint,1,opt,name=code,proto3" json:"code,omitempty"` // 错误码注册表
+	Retryable     bool                   `protobuf:"varint,2,opt,name=retryable,proto3" json:"retryable,omitempty"`
+	RetryHintMs   uint32                 `protobuf:"varint,3,opt,name=retry_hint_ms,json=retryHintMs,proto3" json:"retry_hint_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HelloNak) Reset() {
+	*x = HelloNak{}
 	mi := &file_control_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AuthFailMessage) String() string {
+func (x *HelloNak) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AuthFailMessage) ProtoMessage() {}
+func (*HelloNak) ProtoMessage() {}
 
-func (x *AuthFailMessage) ProtoReflect() protoreflect.Message {
+func (x *HelloNak) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -553,66 +613,61 @@ func (x *AuthFailMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AuthFailMessage.ProtoReflect.Descriptor instead.
-func (*AuthFailMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use HelloNak.ProtoReflect.Descriptor instead.
+func (*HelloNak) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *AuthFailMessage) GetCode() string {
+func (x *HelloNak) GetCode() uint32 {
 	if x != nil {
 		return x.Code
 	}
-	return ""
+	return 0
 }
 
-func (x *AuthFailMessage) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-func (x *AuthFailMessage) GetRetryable() bool {
+func (x *HelloNak) GetRetryable() bool {
 	if x != nil {
 		return x.Retryable
 	}
 	return false
 }
 
-func (x *AuthFailMessage) GetChallengeNonce() []byte {
+func (x *HelloNak) GetRetryHintMs() uint32 {
 	if x != nil {
-		return x.ChallengeNonce
+		return x.RetryHintMs
 	}
-	return nil
+	return 0
 }
 
-type BatchMessage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	ChunkId       []byte                 `protobuf:"bytes,2,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"` // ULID 16B
-	Tag           string                 `protobuf:"bytes,3,opt,name=tag,proto3" json:"tag,omitempty"`
-	Source        string                 `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
-	EventsCount   int32                  `protobuf:"varint,5,opt,name=events_count,json=eventsCount,proto3" json:"events_count,omitempty"`   // 供 RawEventSink 快速路径
-	Batch         []byte                 `protobuf:"bytes,6,opt,name=batch,proto3" json:"batch,omitempty"`                                   // SignalBatch 编码字节
-	TraceContext  *TraceContext          `protobuf:"bytes,7,opt,name=trace_context,json=traceContext,proto3" json:"trace_context,omitempty"` // batch 级 W3C trace 上下文继承（capability w3c_trace_context）
+// Envelope 是 BATCH/DGRAM 帧的 payload（明文可见部分仅 key_epoch/seq/compression）。
+type Envelope struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	KeyEpoch    uint32                 `protobuf:"varint,1,opt,name=key_epoch,json=keyEpoch,proto3" json:"key_epoch,omitempty"` // 首版恒 0（rekey 预留）
+	Seq         uint64                 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`                           // 连接级唯一计数器（BATCH/DGRAM 共享），从 1 起
+	Compression Compression            `protobuf:"varint,3,opt,name=compression,proto3,enum=mbta.v1.Compression" json:"compression,omitempty"`
+	Ciphertext  []byte                 `protobuf:"bytes,4,opt,name=ciphertext,proto3" json:"ciphertext,omitempty"` // AEAD(Batch 编码)
+	// 外层 HMAC（capability: dual_integrity 协商启用时发送端填充）：
+	// HMAC(profileHash, key=DualMACKey, msg=AD‖ciphertext)。未启用时发送端 MUST
+	// 置空；接收端对"未启用却非空/启用却为空/校验失败"一律 envelope_open_failed。
+	Mac           []byte `protobuf:"bytes,5,opt,name=mac,proto3" json:"mac,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *BatchMessage) Reset() {
-	*x = BatchMessage{}
+func (x *Envelope) Reset() {
+	*x = Envelope{}
 	mi := &file_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *BatchMessage) String() string {
+func (x *Envelope) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*BatchMessage) ProtoMessage() {}
+func (*Envelope) ProtoMessage() {}
 
-func (x *BatchMessage) ProtoReflect() protoreflect.Message {
+func (x *Envelope) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -624,84 +679,71 @@ func (x *BatchMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use BatchMessage.ProtoReflect.Descriptor instead.
-func (*BatchMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Envelope.ProtoReflect.Descriptor instead.
+func (*Envelope) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *BatchMessage) GetSeq() uint64 {
+func (x *Envelope) GetKeyEpoch() uint32 {
+	if x != nil {
+		return x.KeyEpoch
+	}
+	return 0
+}
+
+func (x *Envelope) GetSeq() uint64 {
 	if x != nil {
 		return x.Seq
 	}
 	return 0
 }
 
-func (x *BatchMessage) GetChunkId() []byte {
+func (x *Envelope) GetCompression() Compression {
 	if x != nil {
-		return x.ChunkId
+		return x.Compression
+	}
+	return Compression_COMPRESSION_UNSPECIFIED
+}
+
+func (x *Envelope) GetCiphertext() []byte {
+	if x != nil {
+		return x.Ciphertext
 	}
 	return nil
 }
 
-func (x *BatchMessage) GetTag() string {
+func (x *Envelope) GetMac() []byte {
 	if x != nil {
-		return x.Tag
-	}
-	return ""
-}
-
-func (x *BatchMessage) GetSource() string {
-	if x != nil {
-		return x.Source
-	}
-	return ""
-}
-
-func (x *BatchMessage) GetEventsCount() int32 {
-	if x != nil {
-		return x.EventsCount
-	}
-	return 0
-}
-
-func (x *BatchMessage) GetBatch() []byte {
-	if x != nil {
-		return x.Batch
+		return x.Mac
 	}
 	return nil
 }
 
-func (x *BatchMessage) GetTraceContext() *TraceContext {
-	if x != nil {
-		return x.TraceContext
-	}
-	return nil
-}
-
-type DatagramMessage struct {
+type Batch struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	ChunkId       []byte                 `protobuf:"bytes,2,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"` // 可选，仅采样/关联
-	Batch         []byte                 `protobuf:"bytes,3,opt,name=batch,proto3" json:"batch,omitempty"`
-	EventsCount   int32                  `protobuf:"varint,4,opt,name=events_count,json=eventsCount,proto3" json:"events_count,omitempty"`
+	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`                                    // 必须与 Envelope.seq 一致（AD 绑定 Envelope.seq；不一致 = batch_invalid）
+	Correlation   string                 `protobuf:"bytes,2,opt,name=correlation,proto3" json:"correlation,omitempty"`                     // 可选对账句柄，RESULT 原样回显
+	Trace         *TraceContext          `protobuf:"bytes,3,opt,name=trace,proto3" json:"trace,omitempty"`                                 // 可选（trace_context 能力）
+	EventsCount   uint32                 `protobuf:"varint,4,opt,name=events_count,json=eventsCount,proto3" json:"events_count,omitempty"` // 事件数（Raw 快速路径不解码即知）
+	Payload       []byte                 `protobuf:"bytes,5,opt,name=payload,proto3" json:"payload,omitempty"`                             // SignalBatch 编码（proto 或 cbor）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *DatagramMessage) Reset() {
-	*x = DatagramMessage{}
+func (x *Batch) Reset() {
+	*x = Batch{}
 	mi := &file_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DatagramMessage) String() string {
+func (x *Batch) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DatagramMessage) ProtoMessage() {}
+func (*Batch) ProtoMessage() {}
 
-func (x *DatagramMessage) ProtoReflect() protoreflect.Message {
+func (x *Batch) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -713,64 +755,72 @@ func (x *DatagramMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DatagramMessage.ProtoReflect.Descriptor instead.
-func (*DatagramMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Batch.ProtoReflect.Descriptor instead.
+func (*Batch) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *DatagramMessage) GetSeq() uint64 {
+func (x *Batch) GetSeq() uint64 {
 	if x != nil {
 		return x.Seq
 	}
 	return 0
 }
 
-func (x *DatagramMessage) GetChunkId() []byte {
+func (x *Batch) GetCorrelation() string {
 	if x != nil {
-		return x.ChunkId
+		return x.Correlation
+	}
+	return ""
+}
+
+func (x *Batch) GetTrace() *TraceContext {
+	if x != nil {
+		return x.Trace
 	}
 	return nil
 }
 
-func (x *DatagramMessage) GetBatch() []byte {
-	if x != nil {
-		return x.Batch
-	}
-	return nil
-}
-
-func (x *DatagramMessage) GetEventsCount() int32 {
+func (x *Batch) GetEventsCount() uint32 {
 	if x != nil {
 		return x.EventsCount
 	}
 	return 0
 }
 
-type AckMessage struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Seq              uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	ChunkId          []byte                 `protobuf:"bytes,2,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
-	Count            int32                  `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
-	AckMode          AckMode                `protobuf:"varint,4,opt,name=ack_mode,json=ackMode,proto3,enum=mbta.v1.AckMode" json:"ack_mode,omitempty"`
-	ReceivedAtUnixMs int64                  `protobuf:"varint,5,opt,name=received_at_unix_ms,json=receivedAtUnixMs,proto3" json:"received_at_unix_ms,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+func (x *Batch) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
 }
 
-func (x *AckMessage) Reset() {
-	*x = AckMessage{}
+type Result struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RefSeq        uint64                 `protobuf:"varint,1,opt,name=ref_seq,json=refSeq,proto3" json:"ref_seq,omitempty"`
+	Level         ResultLevel            `protobuf:"varint,2,opt,name=level,proto3,enum=mbta.v1.ResultLevel" json:"level,omitempty"`
+	Code          uint32                 `protobuf:"varint,3,opt,name=code,proto3" json:"code,omitempty"`    // 错误码注册表（0=ok）
+	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"` // 仅日志；不对未认证方透传
+	RetryHintMs   uint32                 `protobuf:"varint,5,opt,name=retry_hint_ms,json=retryHintMs,proto3" json:"retry_hint_ms,omitempty"`
+	Correlation   string                 `protobuf:"bytes,6,opt,name=correlation,proto3" json:"correlation,omitempty"` // echo
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Result) Reset() {
+	*x = Result{}
 	mi := &file_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AckMessage) String() string {
+func (x *Result) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AckMessage) ProtoMessage() {}
+func (*Result) ProtoMessage() {}
 
-func (x *AckMessage) ProtoReflect() protoreflect.Message {
+func (x *Result) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -782,72 +832,75 @@ func (x *AckMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AckMessage.ProtoReflect.Descriptor instead.
-func (*AckMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Result.ProtoReflect.Descriptor instead.
+func (*Result) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *AckMessage) GetSeq() uint64 {
+func (x *Result) GetRefSeq() uint64 {
 	if x != nil {
-		return x.Seq
+		return x.RefSeq
 	}
 	return 0
 }
 
-func (x *AckMessage) GetChunkId() []byte {
+func (x *Result) GetLevel() ResultLevel {
 	if x != nil {
-		return x.ChunkId
+		return x.Level
 	}
-	return nil
+	return ResultLevel_RESULT_LEVEL_UNSPECIFIED
 }
 
-func (x *AckMessage) GetCount() int32 {
+func (x *Result) GetCode() uint32 {
 	if x != nil {
-		return x.Count
-	}
-	return 0
-}
-
-func (x *AckMessage) GetAckMode() AckMode {
-	if x != nil {
-		return x.AckMode
-	}
-	return AckMode_ACK_MODE_UNSPECIFIED
-}
-
-func (x *AckMessage) GetReceivedAtUnixMs() int64 {
-	if x != nil {
-		return x.ReceivedAtUnixMs
+		return x.Code
 	}
 	return 0
 }
 
-type NackMessage struct {
+func (x *Result) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
+}
+
+func (x *Result) GetRetryHintMs() uint32 {
+	if x != nil {
+		return x.RetryHintMs
+	}
+	return 0
+}
+
+func (x *Result) GetCorrelation() string {
+	if x != nil {
+		return x.Correlation
+	}
+	return ""
+}
+
+type Credit struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	ChunkId       []byte                 `protobuf:"bytes,2,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
-	Code          string                 `protobuf:"bytes,3,opt,name=code,proto3" json:"code,omitempty"`
-	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
-	Retryable     bool                   `protobuf:"varint,5,opt,name=retryable,proto3" json:"retryable,omitempty"`
-	RetryAfterMs  int32                  `protobuf:"varint,6,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
+	Batches       uint64                 `protobuf:"varint,1,opt,name=batches,proto3" json:"batches,omitempty"`
+	Bytes         uint64                 `protobuf:"varint,2,opt,name=bytes,proto3" json:"bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *NackMessage) Reset() {
-	*x = NackMessage{}
+func (x *Credit) Reset() {
+	*x = Credit{}
 	mi := &file_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *NackMessage) String() string {
+func (x *Credit) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*NackMessage) ProtoMessage() {}
+func (*Credit) ProtoMessage() {}
 
-func (x *NackMessage) ProtoReflect() protoreflect.Message {
+func (x *Credit) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -859,155 +912,99 @@ func (x *NackMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use NackMessage.ProtoReflect.Descriptor instead.
-func (*NackMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Credit.ProtoReflect.Descriptor instead.
+func (*Credit) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *NackMessage) GetSeq() uint64 {
+func (x *Credit) GetBatches() uint64 {
 	if x != nil {
-		return x.Seq
+		return x.Batches
 	}
 	return 0
 }
 
-func (x *NackMessage) GetChunkId() []byte {
+func (x *Credit) GetBytes() uint64 {
 	if x != nil {
-		return x.ChunkId
-	}
-	return nil
-}
-
-func (x *NackMessage) GetCode() string {
-	if x != nil {
-		return x.Code
-	}
-	return ""
-}
-
-func (x *NackMessage) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-func (x *NackMessage) GetRetryable() bool {
-	if x != nil {
-		return x.Retryable
-	}
-	return false
-}
-
-func (x *NackMessage) GetRetryAfterMs() int32 {
-	if x != nil {
-		return x.RetryAfterMs
+		return x.Bytes
 	}
 	return 0
 }
 
-type RejectedEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Index         uint32                 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
-	EventId       string                 `protobuf:"bytes,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	Code          string                 `protobuf:"bytes,3,opt,name=code,proto3" json:"code,omitempty"`
-	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
-	Retryable     bool                   `protobuf:"varint,5,opt,name=retryable,proto3" json:"retryable,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RejectedEvent) Reset() {
-	*x = RejectedEvent{}
-	mi := &file_control_proto_msgTypes[9]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RejectedEvent) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RejectedEvent) ProtoMessage() {}
-
-func (x *RejectedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[9]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RejectedEvent.ProtoReflect.Descriptor instead.
-func (*RejectedEvent) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *RejectedEvent) GetIndex() uint32 {
-	if x != nil {
-		return x.Index
-	}
-	return 0
-}
-
-func (x *RejectedEvent) GetEventId() string {
-	if x != nil {
-		return x.EventId
-	}
-	return ""
-}
-
-func (x *RejectedEvent) GetCode() string {
-	if x != nil {
-		return x.Code
-	}
-	return ""
-}
-
-func (x *RejectedEvent) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-func (x *RejectedEvent) GetRetryable() bool {
-	if x != nil {
-		return x.Retryable
-	}
-	return false
-}
-
-type PartialAckMessage struct {
+type Close struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
-	Seq            uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	ChunkId        []byte                 `protobuf:"bytes,2,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
-	AckMode        AckMode                `protobuf:"varint,3,opt,name=ack_mode,json=ackMode,proto3,enum=mbta.v1.AckMode" json:"ack_mode,omitempty"`
-	Accepted       []uint32               `protobuf:"varint,4,rep,packed,name=accepted,proto3" json:"accepted,omitempty"`
-	Rejected       []*RejectedEvent       `protobuf:"bytes,5,rep,name=rejected,proto3" json:"rejected,omitempty"`
-	RejectedBitmap []byte                 `protobuf:"bytes,6,opt,name=rejected_bitmap,json=rejectedBitmap,proto3,oneof" json:"rejected_bitmap,omitempty"` // 大 batch 紧凑表达（§4.1）
+	Reason         string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	DrainTimeoutMs uint32                 `protobuf:"varint,2,opt,name=drain_timeout_ms,json=drainTimeoutMs,proto3" json:"drain_timeout_ms,omitempty"` // 服务端 clamp [1000, 30000]
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
-func (x *PartialAckMessage) Reset() {
-	*x = PartialAckMessage{}
+func (x *Close) Reset() {
+	*x = Close{}
+	mi := &file_control_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Close) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Close) ProtoMessage() {}
+
+func (x *Close) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Close.ProtoReflect.Descriptor instead.
+func (*Close) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *Close) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *Close) GetDrainTimeoutMs() uint32 {
+	if x != nil {
+		return x.DrainTimeoutMs
+	}
+	return 0
+}
+
+type Abort struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          uint32                 `protobuf:"varint,1,opt,name=code,proto3" json:"code,omitempty"`
+	Detail        string                 `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Abort) Reset() {
+	*x = Abort{}
 	mi := &file_control_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *PartialAckMessage) String() string {
+func (x *Abort) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*PartialAckMessage) ProtoMessage() {}
+func (*Abort) ProtoMessage() {}
 
-func (x *PartialAckMessage) ProtoReflect() protoreflect.Message {
+func (x *Abort) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1019,203 +1016,152 @@ func (x *PartialAckMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use PartialAckMessage.ProtoReflect.Descriptor instead.
-func (*PartialAckMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Abort.ProtoReflect.Descriptor instead.
+func (*Abort) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{10}
 }
 
-func (x *PartialAckMessage) GetSeq() uint64 {
-	if x != nil {
-		return x.Seq
-	}
-	return 0
-}
-
-func (x *PartialAckMessage) GetChunkId() []byte {
-	if x != nil {
-		return x.ChunkId
-	}
-	return nil
-}
-
-func (x *PartialAckMessage) GetAckMode() AckMode {
-	if x != nil {
-		return x.AckMode
-	}
-	return AckMode_ACK_MODE_UNSPECIFIED
-}
-
-func (x *PartialAckMessage) GetAccepted() []uint32 {
-	if x != nil {
-		return x.Accepted
-	}
-	return nil
-}
-
-func (x *PartialAckMessage) GetRejected() []*RejectedEvent {
-	if x != nil {
-		return x.Rejected
-	}
-	return nil
-}
-
-func (x *PartialAckMessage) GetRejectedBitmap() []byte {
-	if x != nil {
-		return x.RejectedBitmap
-	}
-	return nil
-}
-
-type WindowMessage struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	MaxInflightBatches int32                  `protobuf:"varint,1,opt,name=max_inflight_batches,json=maxInflightBatches,proto3" json:"max_inflight_batches,omitempty"`
-	MaxInflightEvents  int32                  `protobuf:"varint,2,opt,name=max_inflight_events,json=maxInflightEvents,proto3" json:"max_inflight_events,omitempty"`
-	MaxInflightBytes   int64                  `protobuf:"varint,3,opt,name=max_inflight_bytes,json=maxInflightBytes,proto3" json:"max_inflight_bytes,omitempty"`
-	Reason             string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
-}
-
-func (x *WindowMessage) Reset() {
-	*x = WindowMessage{}
-	mi := &file_control_proto_msgTypes[11]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WindowMessage) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WindowMessage) ProtoMessage() {}
-
-func (x *WindowMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[11]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WindowMessage.ProtoReflect.Descriptor instead.
-func (*WindowMessage) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{11}
-}
-
-func (x *WindowMessage) GetMaxInflightBatches() int32 {
-	if x != nil {
-		return x.MaxInflightBatches
-	}
-	return 0
-}
-
-func (x *WindowMessage) GetMaxInflightEvents() int32 {
-	if x != nil {
-		return x.MaxInflightEvents
-	}
-	return 0
-}
-
-func (x *WindowMessage) GetMaxInflightBytes() int64 {
-	if x != nil {
-		return x.MaxInflightBytes
-	}
-	return 0
-}
-
-func (x *WindowMessage) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-type ThrottleMessage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RetryDelayMs  int32                  `protobuf:"varint,1,opt,name=retry_delay_ms,json=retryDelayMs,proto3" json:"retry_delay_ms,omitempty"`
-	Code          string                 `protobuf:"bytes,2,opt,name=code,proto3" json:"code,omitempty"`
-	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ThrottleMessage) Reset() {
-	*x = ThrottleMessage{}
-	mi := &file_control_proto_msgTypes[12]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ThrottleMessage) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ThrottleMessage) ProtoMessage() {}
-
-func (x *ThrottleMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[12]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ThrottleMessage.ProtoReflect.Descriptor instead.
-func (*ThrottleMessage) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{12}
-}
-
-func (x *ThrottleMessage) GetRetryDelayMs() int32 {
-	if x != nil {
-		return x.RetryDelayMs
-	}
-	return 0
-}
-
-func (x *ThrottleMessage) GetCode() string {
+func (x *Abort) GetCode() uint32 {
 	if x != nil {
 		return x.Code
 	}
-	return ""
+	return 0
 }
 
-func (x *ThrottleMessage) GetReason() string {
+func (x *Abort) GetDetail() string {
 	if x != nil {
-		return x.Reason
+		return x.Detail
 	}
 	return ""
 }
 
-type PingMessage struct {
+type Redirect struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	TimeUnixMs    int64                  `protobuf:"varint,1,opt,name=time_unix_ms,json=timeUnixMs,proto3" json:"time_unix_ms,omitempty"`
-	Nonce         string                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	LeaderAddr    string                 `protobuf:"bytes,1,opt,name=leader_addr,json=leaderAddr,proto3" json:"leader_addr,omitempty"` // 经 ValidateHostPort 校验
+	LeaderId      string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *PingMessage) Reset() {
-	*x = PingMessage{}
+func (x *Redirect) Reset() {
+	*x = Redirect{}
+	mi := &file_control_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Redirect) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Redirect) ProtoMessage() {}
+
+func (x *Redirect) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Redirect.ProtoReflect.Descriptor instead.
+func (*Redirect) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *Redirect) GetLeaderAddr() string {
+	if x != nil {
+		return x.LeaderAddr
+	}
+	return ""
+}
+
+func (x *Redirect) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+type Ping struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TimeUnixMs    int64                  `protobuf:"varint,1,opt,name=time_unix_ms,json=timeUnixMs,proto3" json:"time_unix_ms,omitempty"`
+	Nonce         []byte                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Ping) Reset() {
+	*x = Ping{}
+	mi := &file_control_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Ping) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Ping) ProtoMessage() {}
+
+func (x *Ping) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Ping.ProtoReflect.Descriptor instead.
+func (*Ping) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *Ping) GetTimeUnixMs() int64 {
+	if x != nil {
+		return x.TimeUnixMs
+	}
+	return 0
+}
+
+func (x *Ping) GetNonce() []byte {
+	if x != nil {
+		return x.Nonce
+	}
+	return nil
+}
+
+type Pong struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TimeUnixMs    int64                  `protobuf:"varint,1,opt,name=time_unix_ms,json=timeUnixMs,proto3" json:"time_unix_ms,omitempty"`
+	Nonce         []byte                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Pong) Reset() {
+	*x = Pong{}
 	mi := &file_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *PingMessage) String() string {
+func (x *Pong) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*PingMessage) ProtoMessage() {}
+func (*Pong) ProtoMessage() {}
 
-func (x *PingMessage) ProtoReflect() protoreflect.Message {
+func (x *Pong) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1227,171 +1173,61 @@ func (x *PingMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use PingMessage.ProtoReflect.Descriptor instead.
-func (*PingMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Pong.ProtoReflect.Descriptor instead.
+func (*Pong) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{13}
 }
 
-func (x *PingMessage) GetTimeUnixMs() int64 {
+func (x *Pong) GetTimeUnixMs() int64 {
 	if x != nil {
 		return x.TimeUnixMs
 	}
 	return 0
 }
 
-func (x *PingMessage) GetNonce() string {
+func (x *Pong) GetNonce() []byte {
 	if x != nil {
 		return x.Nonce
 	}
-	return ""
+	return nil
 }
 
-type PongMessage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TimeUnixMs    int64                  `protobuf:"varint,1,opt,name=time_unix_ms,json=timeUnixMs,proto3" json:"time_unix_ms,omitempty"`
-	Nonce         string                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
-	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"` // ok / degraded（可携带自省）
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PongMessage) Reset() {
-	*x = PongMessage{}
-	mi := &file_control_proto_msgTypes[14]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PongMessage) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PongMessage) ProtoMessage() {}
-
-func (x *PongMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[14]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PongMessage.ProtoReflect.Descriptor instead.
-func (*PongMessage) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{14}
-}
-
-func (x *PongMessage) GetTimeUnixMs() int64 {
-	if x != nil {
-		return x.TimeUnixMs
-	}
-	return 0
-}
-
-func (x *PongMessage) GetNonce() string {
-	if x != nil {
-		return x.Nonce
-	}
-	return ""
-}
-
-func (x *PongMessage) GetStatus() string {
+func (x *Pong) GetStatus() string {
 	if x != nil {
 		return x.Status
 	}
 	return ""
 }
 
-type CloseMessage struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Code           string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
-	Reason         string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
-	CloseTimeoutMs *uint32                `protobuf:"varint,3,opt,name=close_timeout_ms,json=closeTimeoutMs,proto3,oneof" json:"close_timeout_ms,omitempty"` // 优雅关闭 drain 超时（§9.6）
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *CloseMessage) Reset() {
-	*x = CloseMessage{}
-	mi := &file_control_proto_msgTypes[15]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CloseMessage) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CloseMessage) ProtoMessage() {}
-
-func (x *CloseMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[15]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CloseMessage.ProtoReflect.Descriptor instead.
-func (*CloseMessage) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{15}
-}
-
-func (x *CloseMessage) GetCode() string {
-	if x != nil {
-		return x.Code
-	}
-	return ""
-}
-
-func (x *CloseMessage) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-func (x *CloseMessage) GetCloseTimeoutMs() uint32 {
-	if x != nil && x.CloseTimeoutMs != nil {
-		return *x.CloseTimeoutMs
-	}
-	return 0
-}
-
-type ErrorMessage struct {
+// ZstdDict 是 DICT 帧（type 0x22，S→C）的载荷：服务端在 HELLO_ACK 之后立即下发，
+// 客户端存储后即可用 COMPRESSION_ZSTD_DICT 压缩发送。
+//
+// 边界声明（r3 裁决）：字典内容不入握手 transcript（HELLO_ACK 的 finished 已签发
+// 后无法追加入链）——字典经传输层 AEAD（TLS/TLCP）通道保护；字典被篡改最坏导致
+// 解压失败（fail-closed），不构成安全降级。
+type ZstdDict struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	NumCode       uint32                 `protobuf:"varint,1,opt,name=num_code,json=numCode,proto3" json:"num_code,omitempty"`
-	Code          string                 `protobuf:"bytes,2,opt,name=code,proto3" json:"code,omitempty"`
-	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
-	Fatal         bool                   `protobuf:"varint,4,opt,name=fatal,proto3" json:"fatal,omitempty"`
-	Retryable     bool                   `protobuf:"varint,5,opt,name=retryable,proto3" json:"retryable,omitempty"`
+	DictId        uint32                 `protobuf:"varint,1,opt,name=dict_id,json=dictId,proto3" json:"dict_id,omitempty"` // 字典标识（服务端配置；客户端不解释）
+	Dict          []byte                 `protobuf:"bytes,2,opt,name=dict,proto3" json:"dict,omitempty"`                    // 字典内容（zstd raw content dictionary）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ErrorMessage) Reset() {
-	*x = ErrorMessage{}
-	mi := &file_control_proto_msgTypes[16]
+func (x *ZstdDict) Reset() {
+	*x = ZstdDict{}
+	mi := &file_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ErrorMessage) String() string {
+func (x *ZstdDict) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ErrorMessage) ProtoMessage() {}
+func (*ZstdDict) ProtoMessage() {}
 
-func (x *ErrorMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[16]
+func (x *ZstdDict) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1402,186 +1238,138 @@ func (x *ErrorMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ErrorMessage.ProtoReflect.Descriptor instead.
-func (*ErrorMessage) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{16}
+// Deprecated: Use ZstdDict.ProtoReflect.Descriptor instead.
+func (*ZstdDict) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{14}
 }
 
-func (x *ErrorMessage) GetNumCode() uint32 {
+func (x *ZstdDict) GetDictId() uint32 {
 	if x != nil {
-		return x.NumCode
+		return x.DictId
 	}
 	return 0
 }
 
-func (x *ErrorMessage) GetCode() string {
+func (x *ZstdDict) GetDict() []byte {
 	if x != nil {
-		return x.Code
+		return x.Dict
 	}
-	return ""
-}
-
-func (x *ErrorMessage) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-func (x *ErrorMessage) GetFatal() bool {
-	if x != nil {
-		return x.Fatal
-	}
-	return false
-}
-
-func (x *ErrorMessage) GetRetryable() bool {
-	if x != nil {
-		return x.Retryable
-	}
-	return false
+	return nil
 }
 
 var File_control_proto protoreflect.FileDescriptor
 
 const file_control_proto_rawDesc = "" +
 	"\n" +
-	"\rcontrol.proto\x12\ambta.v1\x1a\x0eenvelope.proto\x1a\fsignal.proto\"\xe7\x03\n" +
-	"\fHelloMessage\x12\x19\n" +
-	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12\x1a\n" +
-	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x1f\n" +
-	"\vinstance_id\x18\x03 \x01(\tR\n" +
-	"instanceId\x12#\n" +
-	"\ragent_version\x18\x04 \x01(\tR\fagentVersion\x12#\n" +
-	"\rframe_version\x18\x05 \x01(\rR\fframeVersion\x12\"\n" +
-	"\fcapabilities\x18\x06 \x03(\tR\fcapabilities\x12*\n" +
-	"\x0eresource_class\x18\a \x01(\tH\x00R\rresourceClass\x88\x01\x01\x12%\n" +
-	"\fmem_limit_kb\x18\b \x01(\x04H\x01R\n" +
-	"memLimitKb\x88\x01\x01\x12\x17\n" +
-	"\aconn_id\x18\t \x01(\tR\x06connId\x12&\n" +
-	"\x0fstarted_at_unix\x18\n" +
-	" \x01(\x03R\rstartedAtUnix\x12*\n" +
-	"\x0esession_ticket\x18\v \x01(\fH\x02R\rsessionTicket\x88\x01\x01\x12\x13\n" +
-	"\x02os\x18\f \x01(\tH\x03R\x02os\x88\x01\x01B\x11\n" +
-	"\x0f_resource_classB\x0f\n" +
-	"\r_mem_limit_kbB\x11\n" +
-	"\x0f_session_ticketB\x05\n" +
-	"\x03_os\"\xe8\x04\n" +
-	"\x0fHelloAckMessage\x12\x1d\n" +
+	"\rcontrol.proto\x12\ambta.v1\x1a\fsignal.proto\"\x99\x02\n" +
+	"\x05Hello\x12*\n" +
+	"\aprofile\x18\x01 \x01(\x0e2\x10.mbta.v1.ProfileR\aprofile\x12\x19\n" +
+	"\bagent_id\x18\x02 \x01(\tR\aagentId\x12,\n" +
+	"\x04meta\x18\x03 \x03(\v2\x18.mbta.v1.Hello.MetaEntryR\x04meta\x12\"\n" +
+	"\fcapabilities\x18\x04 \x03(\tR\fcapabilities\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\fR\tsessionId\x12\x1b\n" +
-	"\tserver_id\x18\x02 \x01(\tR\bserverId\x123\n" +
-	"\x15selected_capabilities\x18\x03 \x03(\tR\x14selectedCapabilities\x12$\n" +
-	"\x05codec\x18\x04 \x01(\x0e2\x0e.mbta.v1.CodecR\x05codec\x126\n" +
-	"\vcompression\x18\x05 \x01(\x0e2\x14.mbta.v1.CompressionR\vcompression\x127\n" +
-	"\fcipher_suite\x18\x06 \x01(\x0e2\x14.mbta.v1.CipherSuiteR\vcipherSuite\x125\n" +
-	"\x17max_frame_payload_bytes\x18\a \x01(\rR\x14maxFramePayloadBytes\x12&\n" +
-	"\x0fmax_batch_bytes\x18\b \x01(\rR\rmaxBatchBytes\x12(\n" +
-	"\x10max_batch_events\x18\t \x01(\rR\x0emaxBatchEvents\x12&\n" +
-	"\x0fmax_event_bytes\x18\n" +
-	" \x01(\rR\rmaxEventBytes\x12=\n" +
-	"\x0einitial_window\x18\v \x01(\v2\x16.mbta.v1.WindowMessageR\rinitialWindow\x124\n" +
-	"\x16heartbeat_interval_sec\x18\f \x01(\rR\x14heartbeatIntervalSec\x12'\n" +
-	"\x0fchallenge_nonce\x18\r \x01(\fR\x0echallengeNonce\"\x9e\x01\n" +
-	"\vAuthMessage\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\x12\x19\n" +
-	"\bagent_id\x18\x02 \x01(\tR\aagentId\x12\x1d\n" +
+	"client_eph\x18\x05 \x01(\fR\tclientEph\x12\x1f\n" +
+	"\vtoken_proof\x18\x06 \x01(\fR\n" +
+	"tokenProof\x1a7\n" +
+	"\tMetaEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"X\n" +
+	"\x06Limits\x12&\n" +
+	"\x0fmax_frame_bytes\x18\x01 \x01(\x04R\rmaxFrameBytes\x12&\n" +
+	"\x0fmax_batch_bytes\x18\x02 \x01(\x04R\rmaxBatchBytes\"9\n" +
+	"\aCredits\x12\x18\n" +
+	"\abatches\x18\x01 \x01(\x04R\abatches\x12\x14\n" +
+	"\x05bytes\x18\x02 \x01(\x04R\x05bytes\"\xd2\x02\n" +
+	"\bHelloAck\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\fR\tsessionId\x12\x1d\n" +
+	"session_id\x18\x01 \x01(\fR\tsessionId\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\x12+\n" +
+	"\back_mode\x18\x03 \x01(\x0e2\x10.mbta.v1.AckModeR\aackMode\x123\n" +
+	"\x15selected_capabilities\x18\x04 \x03(\tR\x14selectedCapabilities\x12'\n" +
+	"\x06limits\x18\x05 \x01(\v2\x0f.mbta.v1.LimitsR\x06limits\x12*\n" +
+	"\acredits\x18\x06 \x01(\v2\x10.mbta.v1.CreditsR\acredits\x12\x1d\n" +
 	"\n" +
-	"auth_nonce\x18\x04 \x01(\fR\tauthNonce\x12 \n" +
-	"\fsm2_cert_pem\x18\x05 \x01(\fR\n" +
-	"sm2CertPem\"\xb2\x02\n" +
-	"\rAuthOKMessage\x12\x1d\n" +
+	"server_eph\x18\a \x01(\fR\tserverEph\x12\x1a\n" +
+	"\bfinished\x18\b \x01(\fR\bfinished\x12\x1f\n" +
+	"\vexpiry_unix\x18\t \x01(\x03R\n" +
+	"expiryUnix\"`\n" +
+	"\bHelloNak\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\rR\x04code\x12\x1c\n" +
+	"\tretryable\x18\x02 \x01(\bR\tretryable\x12\"\n" +
+	"\rretry_hint_ms\x18\x03 \x01(\rR\vretryHintMs\"\xa3\x01\n" +
+	"\bEnvelope\x12\x1b\n" +
+	"\tkey_epoch\x18\x01 \x01(\rR\bkeyEpoch\x12\x10\n" +
+	"\x03seq\x18\x02 \x01(\x04R\x03seq\x126\n" +
+	"\vcompression\x18\x03 \x01(\x0e2\x14.mbta.v1.CompressionR\vcompression\x12\x1e\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\fR\tsessionId\x12\x15\n" +
-	"\x06key_id\x18\x02 \x01(\tR\x05keyId\x12\x19\n" +
-	"\bhmac_key\x18\x03 \x01(\fR\ahmacKey\x12\x17\n" +
-	"\aaes_key\x18\x04 \x01(\fR\x06aesKey\x12\x17\n" +
-	"\asm4_key\x18\x05 \x01(\fR\x06sm4Key\x127\n" +
-	"\fcipher_suite\x18\x06 \x01(\x0e2\x14.mbta.v1.CipherSuiteR\vcipherSuite\x12&\n" +
-	"\x0fexpires_at_unix\x18\a \x01(\x03R\rexpiresAtUnix\x12*\n" +
-	"\x0esession_ticket\x18\b \x01(\fH\x00R\rsessionTicket\x88\x01\x01B\x11\n" +
-	"\x0f_session_ticket\"\x84\x01\n" +
-	"\x0fAuthFailMessage\x12\x12\n" +
-	"\x04code\x18\x01 \x01(\tR\x04code\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x03 \x01(\bR\tretryable\x12'\n" +
-	"\x0fchallenge_nonce\x18\x04 \x01(\fR\x0echallengeNonce\"\xda\x01\n" +
-	"\fBatchMessage\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
-	"\bchunk_id\x18\x02 \x01(\fR\achunkId\x12\x10\n" +
-	"\x03tag\x18\x03 \x01(\tR\x03tag\x12\x16\n" +
-	"\x06source\x18\x04 \x01(\tR\x06source\x12!\n" +
-	"\fevents_count\x18\x05 \x01(\x05R\veventsCount\x12\x14\n" +
-	"\x05batch\x18\x06 \x01(\fR\x05batch\x12:\n" +
-	"\rtrace_context\x18\a \x01(\v2\x15.mbta.v1.TraceContextR\ftraceContext\"w\n" +
-	"\x0fDatagramMessage\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
-	"\bchunk_id\x18\x02 \x01(\fR\achunkId\x12\x14\n" +
-	"\x05batch\x18\x03 \x01(\fR\x05batch\x12!\n" +
-	"\fevents_count\x18\x04 \x01(\x05R\veventsCount\"\xab\x01\n" +
-	"\n" +
-	"AckMessage\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
-	"\bchunk_id\x18\x02 \x01(\fR\achunkId\x12\x14\n" +
-	"\x05count\x18\x03 \x01(\x05R\x05count\x12+\n" +
-	"\back_mode\x18\x04 \x01(\x0e2\x10.mbta.v1.AckModeR\aackMode\x12-\n" +
-	"\x13received_at_unix_ms\x18\x05 \x01(\x03R\x10receivedAtUnixMs\"\xaa\x01\n" +
-	"\vNackMessage\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
-	"\bchunk_id\x18\x02 \x01(\fR\achunkId\x12\x12\n" +
-	"\x04code\x18\x03 \x01(\tR\x04code\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x05 \x01(\bR\tretryable\x12$\n" +
-	"\x0eretry_after_ms\x18\x06 \x01(\x05R\fretryAfterMs\"\x8a\x01\n" +
-	"\rRejectedEvent\x12\x14\n" +
-	"\x05index\x18\x01 \x01(\rR\x05index\x12\x19\n" +
-	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12\x12\n" +
-	"\x04code\x18\x03 \x01(\tR\x04code\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x05 \x01(\bR\tretryable\"\xff\x01\n" +
-	"\x11PartialAckMessage\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
-	"\bchunk_id\x18\x02 \x01(\fR\achunkId\x12+\n" +
-	"\back_mode\x18\x03 \x01(\x0e2\x10.mbta.v1.AckModeR\aackMode\x12\x1a\n" +
-	"\baccepted\x18\x04 \x03(\rR\baccepted\x122\n" +
-	"\brejected\x18\x05 \x03(\v2\x16.mbta.v1.RejectedEventR\brejected\x12,\n" +
-	"\x0frejected_bitmap\x18\x06 \x01(\fH\x00R\x0erejectedBitmap\x88\x01\x01B\x12\n" +
-	"\x10_rejected_bitmap\"\xb7\x01\n" +
-	"\rWindowMessage\x120\n" +
-	"\x14max_inflight_batches\x18\x01 \x01(\x05R\x12maxInflightBatches\x12.\n" +
-	"\x13max_inflight_events\x18\x02 \x01(\x05R\x11maxInflightEvents\x12,\n" +
-	"\x12max_inflight_bytes\x18\x03 \x01(\x03R\x10maxInflightBytes\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"c\n" +
-	"\x0fThrottleMessage\x12$\n" +
-	"\x0eretry_delay_ms\x18\x01 \x01(\x05R\fretryDelayMs\x12\x12\n" +
-	"\x04code\x18\x02 \x01(\tR\x04code\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"E\n" +
-	"\vPingMessage\x12 \n" +
+	"ciphertext\x18\x04 \x01(\fR\n" +
+	"ciphertext\x12\x10\n" +
+	"\x03mac\x18\x05 \x01(\fR\x03mac\"\xa5\x01\n" +
+	"\x05Batch\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12 \n" +
+	"\vcorrelation\x18\x02 \x01(\tR\vcorrelation\x12+\n" +
+	"\x05trace\x18\x03 \x01(\v2\x15.mbta.v1.TraceContextR\x05trace\x12!\n" +
+	"\fevents_count\x18\x04 \x01(\rR\veventsCount\x12\x18\n" +
+	"\apayload\x18\x05 \x01(\fR\apayload\"\xbf\x01\n" +
+	"\x06Result\x12\x17\n" +
+	"\aref_seq\x18\x01 \x01(\x04R\x06refSeq\x12*\n" +
+	"\x05level\x18\x02 \x01(\x0e2\x14.mbta.v1.ResultLevelR\x05level\x12\x12\n" +
+	"\x04code\x18\x03 \x01(\rR\x04code\x12\x16\n" +
+	"\x06detail\x18\x04 \x01(\tR\x06detail\x12\"\n" +
+	"\rretry_hint_ms\x18\x05 \x01(\rR\vretryHintMs\x12 \n" +
+	"\vcorrelation\x18\x06 \x01(\tR\vcorrelation\"8\n" +
+	"\x06Credit\x12\x18\n" +
+	"\abatches\x18\x01 \x01(\x04R\abatches\x12\x14\n" +
+	"\x05bytes\x18\x02 \x01(\x04R\x05bytes\"I\n" +
+	"\x05Close\x12\x16\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\x12(\n" +
+	"\x10drain_timeout_ms\x18\x02 \x01(\rR\x0edrainTimeoutMs\"3\n" +
+	"\x05Abort\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\rR\x04code\x12\x16\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail\"H\n" +
+	"\bRedirect\x12\x1f\n" +
+	"\vleader_addr\x18\x01 \x01(\tR\n" +
+	"leaderAddr\x12\x1b\n" +
+	"\tleader_id\x18\x02 \x01(\tR\bleaderId\">\n" +
+	"\x04Ping\x12 \n" +
 	"\ftime_unix_ms\x18\x01 \x01(\x03R\n" +
 	"timeUnixMs\x12\x14\n" +
-	"\x05nonce\x18\x02 \x01(\tR\x05nonce\"]\n" +
-	"\vPongMessage\x12 \n" +
+	"\x05nonce\x18\x02 \x01(\fR\x05nonce\"V\n" +
+	"\x04Pong\x12 \n" +
 	"\ftime_unix_ms\x18\x01 \x01(\x03R\n" +
 	"timeUnixMs\x12\x14\n" +
-	"\x05nonce\x18\x02 \x01(\tR\x05nonce\x12\x16\n" +
-	"\x06status\x18\x03 \x01(\tR\x06status\"~\n" +
-	"\fCloseMessage\x12\x12\n" +
-	"\x04code\x18\x01 \x01(\tR\x04code\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\x12-\n" +
-	"\x10close_timeout_ms\x18\x03 \x01(\rH\x00R\x0ecloseTimeoutMs\x88\x01\x01B\x13\n" +
-	"\x11_close_timeout_ms\"\x89\x01\n" +
-	"\fErrorMessage\x12\x19\n" +
-	"\bnum_code\x18\x01 \x01(\rR\anumCode\x12\x12\n" +
-	"\x04code\x18\x02 \x01(\tR\x04code\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x14\n" +
-	"\x05fatal\x18\x04 \x01(\bR\x05fatal\x12\x1c\n" +
-	"\tretryable\x18\x05 \x01(\bR\tretryable*P\n" +
-	"\aAckMode\x12\x18\n" +
-	"\x14ACK_MODE_UNSPECIFIED\x10\x00\x12\x15\n" +
-	"\x11ACK_MODE_ACCEPTED\x10\x01\x12\x14\n" +
-	"\x10ACK_MODE_DURABLE\x10\x02B&Z$github.com/iuboy/mbta-go/corepb;mbtab\x06proto3"
+	"\x05nonce\x18\x02 \x01(\fR\x05nonce\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\"7\n" +
+	"\bZstdDict\x12\x17\n" +
+	"\adict_id\x18\x01 \x01(\rR\x06dictId\x12\x12\n" +
+	"\x04dict\x18\x02 \x01(\fR\x04dict*D\n" +
+	"\aProfile\x12\x17\n" +
+	"\x13PROFILE_UNSPECIFIED\x10\x00\x12\x10\n" +
+	"\fPROFILE_INTL\x10\x01\x12\x0e\n" +
+	"\n" +
+	"PROFILE_GM\x10\x02*Z\n" +
+	"\aAckMode\x12\x1d\n" +
+	"\x19ACK_MODE_ENUM_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16ACK_MODE_ACCEPTED_ONLY\x10\x01\x12\x14\n" +
+	"\x10ACK_MODE_DURABLE\x10\x02*\x96\x01\n" +
+	"\vResultLevel\x12\x1c\n" +
+	"\x18RESULT_LEVEL_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15RESULT_LEVEL_ACCEPTED\x10\x01\x12\x18\n" +
+	"\x14RESULT_LEVEL_DURABLE\x10\x02\x12\x19\n" +
+	"\x15RESULT_LEVEL_REJECTED\x10\x03\x12\x19\n" +
+	"\x15RESULT_LEVEL_RELEASED\x10\x04*?\n" +
+	"\x05Codec\x12\x15\n" +
+	"\x11CODEC_UNSPECIFIED\x10\x00\x12\x0f\n" +
+	"\vCODEC_PROTO\x10\x01\x12\x0e\n" +
+	"\n" +
+	"CODEC_CBOR\x10\x02*\x9c\x01\n" +
+	"\vCompression\x12\x1b\n" +
+	"\x17COMPRESSION_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10COMPRESSION_NONE\x10\x01\x12\x14\n" +
+	"\x10COMPRESSION_GZIP\x10\x02\x12\x14\n" +
+	"\x10COMPRESSION_ZSTD\x10\x03\x12\x13\n" +
+	"\x0fCOMPRESSION_LZ4\x10\x04\x12\x19\n" +
+	"\x15COMPRESSION_ZSTD_DICT\x10\x05B&Z$github.com/iuboy/mbta-go/corepb;mbtab\x06proto3"
 
 var (
 	file_control_proto_rawDescOnce sync.Once
@@ -1595,47 +1383,46 @@ func file_control_proto_rawDescGZIP() []byte {
 	return file_control_proto_rawDescData
 }
 
-var file_control_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_control_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_control_proto_goTypes = []any{
-	(AckMode)(0),              // 0: mbta.v1.AckMode
-	(*HelloMessage)(nil),      // 1: mbta.v1.HelloMessage
-	(*HelloAckMessage)(nil),   // 2: mbta.v1.HelloAckMessage
-	(*AuthMessage)(nil),       // 3: mbta.v1.AuthMessage
-	(*AuthOKMessage)(nil),     // 4: mbta.v1.AuthOKMessage
-	(*AuthFailMessage)(nil),   // 5: mbta.v1.AuthFailMessage
-	(*BatchMessage)(nil),      // 6: mbta.v1.BatchMessage
-	(*DatagramMessage)(nil),   // 7: mbta.v1.DatagramMessage
-	(*AckMessage)(nil),        // 8: mbta.v1.AckMessage
-	(*NackMessage)(nil),       // 9: mbta.v1.NackMessage
-	(*RejectedEvent)(nil),     // 10: mbta.v1.RejectedEvent
-	(*PartialAckMessage)(nil), // 11: mbta.v1.PartialAckMessage
-	(*WindowMessage)(nil),     // 12: mbta.v1.WindowMessage
-	(*ThrottleMessage)(nil),   // 13: mbta.v1.ThrottleMessage
-	(*PingMessage)(nil),       // 14: mbta.v1.PingMessage
-	(*PongMessage)(nil),       // 15: mbta.v1.PongMessage
-	(*CloseMessage)(nil),      // 16: mbta.v1.CloseMessage
-	(*ErrorMessage)(nil),      // 17: mbta.v1.ErrorMessage
-	(Codec)(0),                // 18: mbta.v1.Codec
-	(Compression)(0),          // 19: mbta.v1.Compression
-	(CipherSuite)(0),          // 20: mbta.v1.CipherSuite
-	(*TraceContext)(nil),      // 21: mbta.v1.TraceContext
+	(Profile)(0),         // 0: mbta.v1.Profile
+	(AckMode)(0),         // 1: mbta.v1.AckMode
+	(ResultLevel)(0),     // 2: mbta.v1.ResultLevel
+	(Codec)(0),           // 3: mbta.v1.Codec
+	(Compression)(0),     // 4: mbta.v1.Compression
+	(*Hello)(nil),        // 5: mbta.v1.Hello
+	(*Limits)(nil),       // 6: mbta.v1.Limits
+	(*Credits)(nil),      // 7: mbta.v1.Credits
+	(*HelloAck)(nil),     // 8: mbta.v1.HelloAck
+	(*HelloNak)(nil),     // 9: mbta.v1.HelloNak
+	(*Envelope)(nil),     // 10: mbta.v1.Envelope
+	(*Batch)(nil),        // 11: mbta.v1.Batch
+	(*Result)(nil),       // 12: mbta.v1.Result
+	(*Credit)(nil),       // 13: mbta.v1.Credit
+	(*Close)(nil),        // 14: mbta.v1.Close
+	(*Abort)(nil),        // 15: mbta.v1.Abort
+	(*Redirect)(nil),     // 16: mbta.v1.Redirect
+	(*Ping)(nil),         // 17: mbta.v1.Ping
+	(*Pong)(nil),         // 18: mbta.v1.Pong
+	(*ZstdDict)(nil),     // 19: mbta.v1.ZstdDict
+	nil,                  // 20: mbta.v1.Hello.MetaEntry
+	(*TraceContext)(nil), // 21: mbta.v1.TraceContext
 }
 var file_control_proto_depIdxs = []int32{
-	18, // 0: mbta.v1.HelloAckMessage.codec:type_name -> mbta.v1.Codec
-	19, // 1: mbta.v1.HelloAckMessage.compression:type_name -> mbta.v1.Compression
-	20, // 2: mbta.v1.HelloAckMessage.cipher_suite:type_name -> mbta.v1.CipherSuite
-	12, // 3: mbta.v1.HelloAckMessage.initial_window:type_name -> mbta.v1.WindowMessage
-	20, // 4: mbta.v1.AuthOKMessage.cipher_suite:type_name -> mbta.v1.CipherSuite
-	21, // 5: mbta.v1.BatchMessage.trace_context:type_name -> mbta.v1.TraceContext
-	0,  // 6: mbta.v1.AckMessage.ack_mode:type_name -> mbta.v1.AckMode
-	0,  // 7: mbta.v1.PartialAckMessage.ack_mode:type_name -> mbta.v1.AckMode
-	10, // 8: mbta.v1.PartialAckMessage.rejected:type_name -> mbta.v1.RejectedEvent
-	9,  // [9:9] is the sub-list for method output_type
-	9,  // [9:9] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	0,  // 0: mbta.v1.Hello.profile:type_name -> mbta.v1.Profile
+	20, // 1: mbta.v1.Hello.meta:type_name -> mbta.v1.Hello.MetaEntry
+	1,  // 2: mbta.v1.HelloAck.ack_mode:type_name -> mbta.v1.AckMode
+	6,  // 3: mbta.v1.HelloAck.limits:type_name -> mbta.v1.Limits
+	7,  // 4: mbta.v1.HelloAck.credits:type_name -> mbta.v1.Credits
+	4,  // 5: mbta.v1.Envelope.compression:type_name -> mbta.v1.Compression
+	21, // 6: mbta.v1.Batch.trace:type_name -> mbta.v1.TraceContext
+	2,  // 7: mbta.v1.Result.level:type_name -> mbta.v1.ResultLevel
+	8,  // [8:8] is the sub-list for method output_type
+	8,  // [8:8] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_control_proto_init() }
@@ -1643,19 +1430,14 @@ func file_control_proto_init() {
 	if File_control_proto != nil {
 		return
 	}
-	file_envelope_proto_init()
 	file_signal_proto_init()
-	file_control_proto_msgTypes[0].OneofWrappers = []any{}
-	file_control_proto_msgTypes[3].OneofWrappers = []any{}
-	file_control_proto_msgTypes[10].OneofWrappers = []any{}
-	file_control_proto_msgTypes[15].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_control_proto_rawDesc), len(file_control_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   17,
+			NumEnums:      5,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -7,32 +7,23 @@ import (
 	"time"
 )
 
-// State represents the session state machine state.
+// --- 客户端状态机（4 态；Closed 是任意状态的一等出边）---
+
 type State int
 
 const (
-	// StateDisconnected 表示会话已断开连接。
-	StateDisconnected State = iota
-	// StateConnecting 表示正在建立连接。
-	StateConnecting
-	// StateControlStreamOpen 表示控制流已打开。
-	StateControlStreamOpen
-	// StateHelloSent 表示已发送HELLO消息。
-	StateHelloSent
-	// StateHelloAcked 表示HELLO消息已确认。
-	StateHelloAcked
-	// StateAuthSent 表示已发送认证消息。
-	StateAuthSent
-	// StateReady 表示会话就绪，可以处理数据。
+	// StateIdle 初始态（含握手进行中——握手子步骤不再是 wire 可见状态）。
+	StateIdle State = iota
+	// StateReady 就绪，可发送。
 	StateReady
-	// StateDraining 表示正在排空缓冲区。
+	// StateDraining 排空中（等待全部已发 seq 终态）。
 	StateDraining
-	// StateClosed 表示会话已关闭。
+	// StateClosed 终态。任意状态可达（close 收敛保证）。
 	StateClosed
 )
 
-// state 字符串常量：State 与 ServerState 的 String() 共用，避免重复字面量。
 const (
+	stateStrIdle     = "IDLE"
 	stateStrReady    = "READY"
 	stateStrDraining = "DRAINING"
 	stateStrClosed   = "CLOSED"
@@ -40,18 +31,8 @@ const (
 
 func (s State) String() string {
 	switch s {
-	case StateDisconnected:
-		return "DISCONNECTED"
-	case StateConnecting:
-		return "CONNECTING"
-	case StateControlStreamOpen:
-		return "CONTROL_STREAM_OPEN"
-	case StateHelloSent:
-		return "HELLO_SENT"
-	case StateHelloAcked:
-		return "HELLO_ACKED"
-	case StateAuthSent:
-		return "AUTH_SENT"
+	case StateIdle:
+		return stateStrIdle
 	case StateReady:
 		return stateStrReady
 	case StateDraining:
@@ -63,194 +44,108 @@ func (s State) String() string {
 	}
 }
 
-// validTransitions defines which state can transition to which.
-//
-// StateClosed → StateDisconnected：允许客户端在握手失败/连接终止后重置回初始态，
-// 以便重新 Connect（StateClosed 若无出边，则握手失败后无法重连）。
-// StateAuthSent 自环：允许 AUTH_FAIL(retryable) 后重试 SendAuth 而无需回退状态。
-var validTransitions = map[State][]State{
-	StateDisconnected:      {StateConnecting},
-	StateConnecting:        {StateControlStreamOpen, StateDisconnected},
-	StateControlStreamOpen: {StateHelloSent, StateDisconnected},
-	StateHelloSent:         {StateHelloAcked, StateDisconnected},
-	StateHelloAcked:        {StateAuthSent, StateDisconnected},
-	StateAuthSent:          {StateReady, StateDisconnected, StateAuthSent},
-	StateReady:             {StateDraining, StateClosed, StateDisconnected},
-	StateDraining:          {StateClosed},
-	StateClosed:            {StateDisconnected},
+// clientTransitions：Idle→Ready（握手完成）/ Ready→Draining→Closed；
+// 任意状态 → Closed（close 必须总能收敛）；Idle→Closed（从未连接即 Close）。
+var clientTransitions = map[State][]State{
+	StateIdle:     {StateReady, StateClosed},
+	StateReady:    {StateDraining, StateClosed},
+	StateDraining: {StateClosed},
+	StateClosed:   {},
 }
 
-// ServerState represents the server-side session state.
-type ServerState int
-
-const (
-	// ServerStateAccepted 表示服务器已接受连接。
-	ServerStateAccepted ServerState = iota
-	// ServerStateControlWait 表示等待控制流建立。
-	ServerStateControlWait
-	// ServerStateHelloReceived 表示已收到HELLO消息。
-	ServerStateHelloReceived
-	// ServerStateAuthWait 表示等待认证完成。
-	ServerStateAuthWait
-	// ServerStateReady 表示服务器会话就绪。
-	ServerStateReady
-	// ServerStateDraining 表示服务器正在排空缓冲区。
-	ServerStateDraining
-	// ServerStateClosed 表示服务器会话已关闭。
-	ServerStateClosed
-)
-
-func (s ServerState) String() string {
-	switch s {
-	case ServerStateAccepted:
-		return "ACCEPTED"
-	case ServerStateControlWait:
-		return "CONTROL_WAIT"
-	case ServerStateHelloReceived:
-		return "HELLO_RECEIVED"
-	case ServerStateAuthWait:
-		return "AUTH_WAIT"
-	case ServerStateReady:
-		return stateStrReady
-	case ServerStateDraining:
-		return stateStrDraining
-	case ServerStateClosed:
-		return stateStrClosed
-	default:
-		return fmt.Sprintf("UNKNOWN(%d)", s)
-	}
-}
-
-// DefaultDrainTimeout is the maximum time to wait in StateDraining before
-// the caller should force-close the connection.
-const DefaultDrainTimeout = 30 * time.Second
-
-// DefaultReadTimeout 是无 ctx deadline 时 transport 读操作的默认上限。
-// 避免对端静默断开时 control loop 永久阻塞导致 goroutine 泄漏。
-const DefaultReadTimeout = 5 * time.Minute
-
-// DefaultWriteTimeout 是无 ctx deadline 时 transport 写操作的默认上限。
-// 防止半开对端让写永久阻塞（尤其 sink worker 的 ACK 发送）。
-const DefaultWriteTimeout = 30 * time.Second
-
-// StateMachine is a thread-safe client-side state machine for MBTA sessions.
+// StateMachine 是线程安全的客户端状态机。
 type StateMachine struct {
-	mu           sync.Mutex
-	state        State
-	drainTimer   *time.Timer
-	drainTimeout time.Duration
+	mu    sync.Mutex
+	state State
 }
 
-// NewStateMachine creates a client state machine starting at Disconnected.
-func NewStateMachine() *StateMachine {
-	return &StateMachine{state: StateDisconnected, drainTimeout: DefaultDrainTimeout}
-}
+func NewStateMachine() *StateMachine { return &StateMachine{state: StateIdle} }
 
-// State returns the current state.
 func (sm *StateMachine) State() State {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	return sm.state
 }
 
-// Transition attempts to move from current state to next.
 func (sm *StateMachine) Transition(next State) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-
-	if slices.Contains(validTransitions[sm.state], next) {
-		prev := sm.state
+	if slices.Contains(clientTransitions[sm.state], next) {
 		sm.state = next
-		// Start drain timer when entering Draining state.
-		if next == StateDraining && sm.drainTimeout > 0 {
-			if sm.drainTimer != nil {
-				sm.drainTimer.Stop()
-			}
-			sm.drainTimer = time.NewTimer(sm.drainTimeout)
-		}
-		// Stop drain timer when leaving Draining state to avoid stale timer 占用 runtime heap。
-		if prev == StateDraining && next != StateDraining && sm.drainTimer != nil {
-			sm.drainTimer.Stop()
-			sm.drainTimer = nil
-		}
 		return nil
 	}
-	return NewError(ErrCodeSession, fmt.Sprintf("invalid transition %s -> %s", sm.state, next))
+	return NewError(ErrCodeProtocol, fmt.Sprintf("invalid transition %s -> %s", sm.state, next))
 }
 
-// DrainExpired returns true if the drain timer has fired.
-// Returns false if not in draining state, or if the timer hasn't expired yet.
-func (sm *StateMachine) DrainExpired() bool {
+// ForceClosed 从任意状态收敛到 Closed（close 专用；幂等）。
+func (sm *StateMachine) ForceClosed() {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if sm.state != StateDraining || sm.drainTimer == nil {
-		return false
-	}
-	select {
-	case <-sm.drainTimer.C:
-		return true
+	sm.state = StateClosed
+	sm.mu.Unlock()
+}
+
+// --- 服务端状态机（3 态）---
+
+type ServerState int
+
+const (
+	// ServerStateHandshaking 等待/处理 HELLO。
+	ServerStateHandshaking ServerState = iota
+	// ServerStateReady 已完成握手。
+	ServerStateReady
+	// ServerStateDraining 排空中。
+	ServerStateDraining
+)
+
+func (s ServerState) String() string {
+	switch s {
+	case ServerStateHandshaking:
+		return "HANDSHAKING"
+	case ServerStateReady:
+		return stateStrReady
+	case ServerStateDraining:
+		return stateStrDraining
 	default:
-		return false
+		return fmt.Sprintf("UNKNOWN(%d)", s)
 	}
 }
 
-// ServerMachine is a thread-safe server-side state machine.
+// ServerMachine 是线程安全的服务端状态机。
 type ServerMachine struct {
 	mu    sync.Mutex
 	state ServerState
 }
 
-// NewServerMachine creates a server state machine starting at Accepted.
-func NewServerMachine() *ServerMachine {
-	return &ServerMachine{state: ServerStateAccepted}
-}
+func NewServerMachine() *ServerMachine { return &ServerMachine{state: ServerStateHandshaking} }
 
-// State returns the current state.
 func (sm *ServerMachine) State() ServerState {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	return sm.state
 }
 
-// Transition moves to next state.
 func (sm *ServerMachine) Transition(next ServerState) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-
-	switch sm.state {
-	case ServerStateAccepted:
-		if next != ServerStateControlWait {
-			goto invalid
-		}
-	case ServerStateControlWait:
-		if next != ServerStateHelloReceived && next != ServerStateClosed {
-			goto invalid
-		}
-	case ServerStateHelloReceived:
-		if next != ServerStateAuthWait && next != ServerStateClosed {
-			goto invalid
-		}
-	case ServerStateAuthWait:
-		if next != ServerStateReady && next != ServerStateClosed {
-			goto invalid
-		}
-	case ServerStateReady:
-		if next != ServerStateDraining && next != ServerStateClosed {
-			goto invalid
-		}
-	case ServerStateDraining:
-		if next != ServerStateClosed {
-			goto invalid
-		}
-	case ServerStateClosed:
-		goto invalid
-	default:
-		goto invalid
+	valid := (sm.state == ServerStateHandshaking && next == ServerStateReady) ||
+		(sm.state == ServerStateReady && next == ServerStateDraining)
+	if !valid {
+		return NewError(ErrCodeProtocol, fmt.Sprintf("invalid server transition %s -> %s", sm.state, next))
 	}
-
 	sm.state = next
 	return nil
-
-invalid:
-	return NewError(ErrCodeSession, fmt.Sprintf("invalid server transition %s -> %s", sm.state, next))
 }
+
+// --- 超时常量（继承 v1 防御值）---
+
+// DefaultDrainTimeout 是 Close 排空的默认上限。
+const DefaultDrainTimeout = 30 * time.Second
+
+// DefaultReadTimeout 是无 ctx deadline 时 transport 读操作的默认上限。
+const DefaultReadTimeout = 5 * time.Minute
+
+// DefaultWriteTimeout 是无 ctx deadline 时 transport 写操作的默认上限。
+const DefaultWriteTimeout = 30 * time.Second
+
+// DefaultSessionTTL 是会话默认有效期。
+const DefaultSessionTTL = 24 * time.Hour

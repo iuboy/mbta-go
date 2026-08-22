@@ -1,109 +1,151 @@
 package protocol
 
+// handler_sink.go：异步投递队列（grant 流 + 继承全部加固：条数+字节双限界、
+// 排空超时、panic 契约、字节记账配平、入队二次检查、懒启动 worker）。
+// done 闭包驱动 grant.Settle；SinkDeadline 内未调 → 经同一 done 合成 released。
+
 import (
+	"context"
 	"log/slog"
+	"math"
 	"runtime"
-	"sync"
+	"time"
 
 	"github.com/iuboy/mbta-go/core"
-	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
-// sinkTask 是 sinkQueue 的投递单元，统一承载普通 EventSink 与 AsyncDurableSink 两路径。
-// routeAndACK 投递、worker 消费；asyncDurable=false 走普通 EventSink（fire-and-forget），
-// true 走 AsyncDurableSink（持久化后回调 notifier 发 durable 升级）。
+// sinkTask 是投递单元。
 type sinkTask struct {
-	agentID      string
-	batch        *core.SignalBatch // 普通 EventSink + AsyncDurableSink 共用
-	asyncDurable bool              // true = AsyncDurableSink 路径
-	// AsyncDurableSink 路径专用：发 durable 升级帧所需的元信息。
-	seq         uint64
-	chunkID     []byte
-	eventsCount int
-	notifier    core.DurableNotifier // 协议层注入，sink 持久化后回调
+	ev       core.BatchEvent
+	handler  core.BatchHandler
+	done     func(core.Outcome)
+	bytes    int64
+	deadline time.Time
 }
 
-// initSinkQueue 根据 sink 类型决定是否启用异步投递队列。
-// 启用条件：sink 是普通 EventSink（fire-and-forget）或 AsyncDurableSink（持久化后回调升级）。
-// 仅实现 DurableEventSink/RawEventSink 但未实现 AsyncDurableSink 的 sink 走同步路径（需 RouteResult）。
-// SinkQueueSize < 0 显式禁用异步（测试用）。
+// initSinkQueue 构造期只创建通道与限额；worker 懒启动（首个成功入队触发）。
 func (h *CoreHandler) initSinkQueue() {
-	if h.config.Sink == nil {
+	if h.config.SinkHandler == nil {
 		return
-	}
-	// 判断是否可异步：普通 EventSink（非 Durable）或 AsyncDurableSink（Durable 的可选扩展）。
-	_, isAsyncDurable := h.config.Sink.(core.AsyncDurableSink)
-	_, isDurable := h.config.Sink.(core.DurableEventSink)
-	if isDurable && !isAsyncDurable {
-		return // 同步 Durable/Raw sink：需 RouteResult，不能异步
 	}
 	size := h.config.SinkQueueSize
 	if size == 0 {
 		size = defaultSinkQueueSize
 	}
 	if size < 0 {
-		return // 显式禁用异步
+		return // 同步模式（测试）
 	}
 	h.sinkQueue = make(chan sinkTask, size)
-	// AsyncDurableSink 路径需要 notifier 发 durable 升级帧（复用上方 isAsyncDurable 判定）。
-	if isAsyncDurable {
-		h.durableNotifier = &durableNotifier{handler: h}
+	h.sinkDone = make(chan struct{})
+	maxBytes := h.config.SinkQueueMaxBytes
+	if maxBytes == 0 {
+		maxBytes = defaultSinkQueueMaxBytes
+	} else if maxBytes < 0 {
+		maxBytes = math.MaxInt64
 	}
-	workers := defaultSinkWorkers
-	if workers <= 0 {
-		workers = runtime.NumCPU()
+	h.sinkMaxBytes = maxBytes
+}
+
+// enqueueSink 投递 task。返回 false = 队列满/收尾/字节超限（调用方 grant.Settle(released)）。
+func (h *CoreHandler) enqueueSink(ctx context.Context, grant *core.SettleGrant, batch *core.Batch, batchWire []byte, frameBytes int64, durable bool) bool {
+	if h.sinkQueue == nil {
+		// 同步模式（测试）：直接调用。
+		ev := h.makeEvent(batch, batchWire)
+		h.callHandler(ctx, ev, h.makeDone(grant, durable))
+		return true
 	}
-	for range workers {
-		h.sinkWG.Add(1)
-		go h.sinkWorker()
+	select {
+	case <-h.sinkDone:
+		return false
+	default:
+	}
+	task := sinkTask{
+		ev:       h.makeEvent(batch, batchWire),
+		handler:  h.config.SinkHandler,
+		done:     h.makeDone(grant, durable),
+		bytes:    frameBytes,
+		deadline: time.Now().Add(h.sinkDeadline),
+	}
+	for {
+		cur := h.sinkQueuedBytes.Load()
+		if cur+task.bytes > h.sinkMaxBytes {
+			slog.Warn("sink queue byte limit reached", "queued", cur, "task", task.bytes, "limit", h.sinkMaxBytes)
+			return false
+		}
+		if h.sinkQueuedBytes.CompareAndSwap(cur, cur+task.bytes) {
+			break
+		}
+	}
+	h.startSinkWorkersOnce()
+	select {
+	case h.sinkQueue <- task:
+		select {
+		case <-h.sinkDone: // 二次检查（TOCTOU 收口：跳过 accepted 谎报）
+			return false
+		default:
+		}
+		return true
+	default:
+		h.sinkQueuedBytes.Add(-task.bytes)
+		slog.Warn("sink queue full", "cap", cap(h.sinkQueue))
+		return false
 	}
 }
 
-// sinkWorker 消费 sinkQueue，按 task 类型分发：普通 EventSink 调 OnSignalBatch，
-// AsyncDurableSink 调 OnSignalBatchAsync（持久化后回调 notifier 发 durable 升级）。
-// 用 h.sinkCtx（派生自连接 ctx）使连接关闭后 sink 调用可被取消；普通 EventSink 的
-// 错误递增 SinkFailures 并告警（ACK 已发但 sink 持久化失败=数据丢失风险）。
+// startSinkWorkersOnce 懒启动 worker pool（首个成功入队触发）——
+// 握手前不占 goroutine（万连接下防 pre-auth DoS 放大）。
+func (h *CoreHandler) startSinkWorkersOnce() {
+	h.sinkStart.Do(func() {
+		workers := runtime.NumCPU()
+		if workers < 1 {
+			workers = 1
+		}
+		for range workers {
+			h.sinkWG.Add(1)
+			go h.sinkWorker()
+		}
+	})
+}
+
+// sinkWorker 消费队列；sinkDone 关闭后排空现存 task 退出。
 func (h *CoreHandler) sinkWorker() {
 	defer h.sinkWG.Done()
-	for task := range h.sinkQueue {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// sink 是用户实现，panic 不可控。recover 让单个 task 的 panic 不杀 worker 进程。
-					h.config.Metrics.SinkFailures().Inc()
-					slog.Warn("sink panicked, batch dropped",
-						"agent", task.agentID, "chunk_id", string(task.chunkID), "panic", r)
-				}
-			}()
-			if task.asyncDurable {
-				if asyncSink, ok := h.config.Sink.(core.AsyncDurableSink); ok {
-					asyncSink.OnSignalBatchAsync(h.sinkCtx, task.agentID, task.batch,
-						task.notifier, task.seq, task.chunkID, task.eventsCount)
-				}
-			} else {
-				if err := h.config.Sink.OnSignalBatch(h.sinkCtx, task.agentID, task.batch); err != nil {
-					// ACK_MODE_ACCEPTED 已先发，sink 失败=潜在数据丢失。metrics + 告警让运维感知。
-					h.config.Metrics.SinkFailures().Inc()
-					slog.Warn("sink OnSignalBatch failed after ACK accepted (potential data loss)",
-						"agent", task.agentID, "chunk_id", string(task.chunkID), "error", err)
+	for {
+		select {
+		case t := <-h.sinkQueue:
+			h.runSinkTask(t)
+		case <-h.sinkDone:
+			for {
+				select {
+				case t := <-h.sinkQueue:
+					h.runSinkTask(t)
+				default:
+					return
 				}
 			}
-		}()
+		}
 	}
 }
 
-// durableNotifier 是协议层提供给 AsyncDurableSink 的回调接口实现。
-// sink 持久化完成后调 NotifyDurable，本实现发 ACK_MODE_DURABLE 升级帧。
-// 幂等保护：已发 durable 的 seq 不重复发（防 sink 误多次回调）。
-type durableNotifier struct {
-	handler *CoreHandler
-	seen    sync.Map // seq → struct{}{}，已发 durable 的去重
-}
-
-func (n *durableNotifier) NotifyDurable(seq uint64, chunkID []byte, eventsCount int) {
-	if _, loaded := n.seen.LoadOrStore(seq, struct{}{}); loaded {
-		return // 已发过 durable，幂等跳过
+// runSinkTask 执行单个 task：SinkDeadline 内 handler 未调 done 则经 done 合成
+// released（done 幂等，迟到的真实调用安全丢弃）。
+func (h *CoreHandler) runSinkTask(t sinkTask) {
+	defer h.sinkQueuedBytes.Add(-t.bytes)
+	completed := make(chan struct{})
+	go func() {
+		defer close(completed)
+		h.callHandler(h.sinkCtx, t.ev, t.done) // panic 契约由 callHandler 统一实现
+	}()
+	timeout := time.Until(t.deadline)
+	if timeout < 0 {
+		timeout = 0
 	}
-	// durable 升级帧用 sinkCtx 发送——派生自 Handle 的 ctx，连接关闭时自动取消。
-	n.handler.sendAck(n.handler.sinkCtx, seq, chunkID, eventsCount, corepb.AckMode_ACK_MODE_DURABLE)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-completed:
+	case <-timer.C:
+		t.done(core.Outcome{Level: core.OutcomeReleased, Code: core.CodeInternal})
+		<-completed
+	}
 }
