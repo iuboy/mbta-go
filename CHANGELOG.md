@@ -2,7 +2,7 @@
 
 本文件记录 mbta-go 的显著变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
-## [Unreleased]
+## [0.6.0] - 2026-08-22
 
 ### chore: 无用代码与文档清理（第七轮：r3 收尾后无引用面清扫）
 
