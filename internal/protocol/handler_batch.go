@@ -89,16 +89,29 @@ func (h *CoreHandler) rejectAtCapacity(ctx context.Context, payload []byte) {
 
 // releaseStuck 回收 AddedAt 早于 age 的在途项（reaper + Handle 收尾）。
 // ForceSettle 与 grant.Settle 共享防双回收守卫（terminal 环已命中即跳过额度）。
+// 观测语义（imhk 复盘）：逐条 DEBUG 留 seq 明细，循环结束一条 WARN 汇总
+// count/age_max——durable 等待链被 sink 慢写拖长时 reaper 是主要释放路径，
+// 汇总行直接反映积压规模与最长等待（age=0 的 age=now-AddedAt）。
 func (h *CoreHandler) releaseStuck(ctx context.Context, code uint32, age time.Duration) {
-	cutoff := time.Now().Add(-age)
+	now := time.Now()
+	cutoff := now.Add(-age)
 	send := h.sender(ctx)
+	var count int
+	var oldestAge time.Duration
 	for {
 		seq, slot, ok := h.credit.OldestBefore(cutoff)
 		if !ok {
 			break
 		}
-		slog.Warn("releasing stuck inflight", "seq", seq, "code", core.CodeName(code))
+		if a := now.Sub(slot.AddedAt); a > oldestAge {
+			oldestAge = a
+		}
+		slog.Debug("releasing stuck inflight", "seq", seq, "code", core.CodeName(code), "age", now.Sub(slot.AddedAt).String())
 		h.credit.ForceSettle(send, seq, corepb.ResultLevel_RESULT_LEVEL_RELEASED, code, 1000, slot.Bytes)
+		count++
+	}
+	if count > 0 {
+		slog.Warn("reaper released stuck inflight", "count", count, "oldest_age", oldestAge.String(), "reason", core.CodeName(code))
 	}
 	h.maybeScheduleFlush()
 }

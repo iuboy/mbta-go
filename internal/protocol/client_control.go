@@ -225,7 +225,8 @@ func (c *CoreClient) handlePing(ctx context.Context, payload []byte) {
 	}
 }
 
-// HeartbeatLoop 周期发送 PING（仅 TCP binding 注入；QUIC 用内置 keepalive）。
+// HeartbeatLoop 周期发送 PING（v1/ntls 双 binding 均注入；维持两侧 control
+// 读循环的 DefaultReadTimeout 刷新——QUIC 传输层 keepalive 不产生应用层帧）。
 func (c *CoreClient) HeartbeatLoop(ctx context.Context) {
 	interval := 30 * time.Second
 	ticker := time.NewTicker(interval)

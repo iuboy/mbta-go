@@ -203,6 +203,13 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 注入应用层心跳（与 ntls binding 对齐）。QUIC 传输层 keepalive 是
+	// QUIC PING 帧，不会在 MBTA control stream 上产生数据；而两侧 control
+	// 读循环按应用层帧计 DefaultReadTimeout(5min)——BATCH 走 data stream，
+	// control stream 长时间无帧即被读超时断连（实测：纯发送型 agent 每
+	// 5 分钟 disconnect→handshake，epoch 单调递增）。30s PING/PONG 让双方
+	// control 读持续刷新，长连接稳定。
+	cc.SetHeartbeatLoop(cc.HeartbeatLoop)
 	return &Client{core: cc, cfg: cfg}, nil
 }
 

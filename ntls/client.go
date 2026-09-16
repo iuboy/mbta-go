@@ -139,8 +139,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	// TCP binding 独有：注入心跳 loop（QUIC 侧由传输层 keepalive 保活，不发 PING）。
-	// TCP 层没有空闲超时机制，读侧空闲超时依赖 PING/PONG 维持活性。
+	// 注入应用层心跳（v1/ntls 双 binding 均注入）：读侧空闲超时依赖
+	// PING/PONG 维持活性——QUIC 传输层 keepalive 不产生 MBTA 应用层帧，
+	// 同样需要（见 v1/client.go NewClient 注释的实测复盘）。
 	cc.SetHeartbeatLoop(cc.HeartbeatLoop)
 	return &Client{core: cc, cfg: cfg}, nil
 }

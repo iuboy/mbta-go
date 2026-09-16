@@ -471,7 +471,7 @@ func (h *CoreHandler) getSessionID() []byte {
 	return h.sessionID
 }
 
-// handlePing 回 PONG（仅 TCP binding 客户端使用；QUIC 侧静默）。
+// handlePing 回 PONG（双 binding 客户端均注入心跳，见 v1/ntls NewClient）。
 func (h *CoreHandler) handlePing(ctx context.Context, payload []byte) {
 	var ping core.PingMsg
 	if err := core.Decode(payload, &ping); err != nil {

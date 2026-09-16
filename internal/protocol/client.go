@@ -376,6 +376,12 @@ func (c *CoreClient) SetRedirectHandler(h func(ctx context.Context, payload []by
 func (c *CoreClient) SetReadControlLoop(fn func(context.Context)) { c.readControlFn = fn }
 func (c *CoreClient) SetHeartbeatLoop(fn func(context.Context))   { c.heartbeatLoopFn = fn }
 
+// HeartbeatEnabled 报告 binding 是否注入了应用层心跳。诊断/回归面：
+// QUIC binding 漏注入时连接仍能工作，但空闲会话会被 control 读超时
+// 周期性断连（生产实测每 5 分钟 disconnect→handshake），问题只在线上
+// 显形——binding 测试用它做注入存在性断言。
+func (c *CoreClient) HeartbeatEnabled() bool { return c.heartbeatLoopFn != nil }
+
 // StartLifecycle 启动后台 goroutine（拒绝在已关闭实例上启动）。
 func (c *CoreClient) StartLifecycle() {
 	if c.closed.Load() {
