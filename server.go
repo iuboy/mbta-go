@@ -45,6 +45,7 @@ type ServerConfig struct {
 	Metrics         core.Metrics
 	RedirectChecker core.RedirectChecker // HA：握手完成后检查角色，非 leader 发 REDIRECT（可选，nil=禁用）
 	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）：CONNECTED/DISCONNECTED
+	Commands        *protocol.CommandRegistry // 运维命令通道（按 agentID 寻址；nil=禁用）
 
 	// Sink 注册面（替代旧 EventSink 接口）：opts 声明供给偏好，handler 是投递回调。
 	SinkOpts    core.SinkOptions
@@ -262,6 +263,7 @@ func (s *Server) initV1Server() error {
 		SinkQueueSize:      s.cfg.SinkQueueSize,
 		SinkQueueMaxBytes:  s.cfg.SinkQueueMaxBytes,
 		Epochs:             s.epochs, // facade 双监听共享（同 agent 跨 binding 纪元单调）
+		Commands:           s.cfg.Commands,
 	}
 
 	v1srv, err := v1.NewServer(cfg)
@@ -453,6 +455,16 @@ func WithRedirectChecker(checker core.RedirectChecker) ServerOption {
 func WithOnSession(fn core.OnSession) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.OnSession = fn
+		return nil
+	}
+}
+
+// WithCommandRegistry 启用运维命令通道（COMMAND/COMMAND_ACK 帧）：
+// 注册表按 agentID 寻址活动连接，调用方经 Registry.SendCommand 下发命令
+// 并等待 agent 的 ACK。nil（默认）= 关闭，agent 不注册、命令不可寻址。
+func WithCommandRegistry(reg *protocol.CommandRegistry) ServerOption {
+	return func(sc *ServerConfig) error {
+		sc.Commands = reg
 		return nil
 	}
 }
