@@ -172,3 +172,36 @@ message ZstdDict {
   uint32 dict_id = 1;  // 字典标识（服务端配置；客户端不解释）
   bytes dict = 2;      // 字典内容（zstd raw content dictionary）
 }
+
+// --- 运维命令下发（capability: control_commands；COMMAND 0x23 / COMMAND_ACK 0x24）---
+// S→C 单向下发 + C→S 单帧应答。命令不存储转发：agent 离线即下发失败，
+// 由调用方重发。command_id 为幂等键（agent 对重复 ID 不重执行）。
+
+enum CommandType {
+  COMMAND_TYPE_UNSPECIFIED = 0;
+  COMMAND_TYPE_CONFIG_APPLY = 1;    // payload = 期望配置（JSON/TOML 文本）
+  COMMAND_TYPE_SERVICE_RESTART = 2; // 无参数；agent 落盘后自重启进程
+  COMMAND_TYPE_UPGRADE = 3;         // payload = 升级描述（version/url/sha256）
+  COMMAND_TYPE_UNINSTALL = 4;       // 无参数；需服务端独立权限 + 二次确认
+}
+
+message ControlCommand {
+  string command_id = 1;        // ULID 幂等键
+  CommandType type = 2;
+  bytes payload = 3;            // 命令参数；无参数命令为空
+  int64 issued_at_unix = 4;     // 服务端签发时间（unix 秒）
+}
+
+enum CommandAckCode {
+  COMMAND_ACK_CODE_UNSPECIFIED = 0;
+  COMMAND_ACK_CODE_APPLIED = 1;  // 已执行成功
+  COMMAND_ACK_CODE_ACCEPTED = 2; // 已受理（异步执行中，如重启排空）
+  COMMAND_ACK_CODE_REJECTED = 3; // 拒绝（不支持/校验失败/防卸载保护）
+  COMMAND_ACK_CODE_FAILED = 4;   // 执行失败（message 携带原因）
+}
+
+message ControlCommandAck {
+  string command_id = 1;
+  CommandAckCode code = 2;
+  string message = 3;           // 人读结果/失败原因
+}

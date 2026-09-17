@@ -25,6 +25,9 @@ type ServerConfig struct {
 
 	RedirectChecker core.RedirectChecker // HA：握手完成后检查角色，非 leader 发 REDIRECT（可选）
 	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）
+	// Commands 启用运维命令通道（COMMAND/COMMAND_ACK 帧，按 agentID 寻址）。
+	// nil = 关闭（不注册会话、SendCommand 返回 ErrAgentNotConnected）。
+	Commands *protocol.CommandRegistry
 
 	// Sink 三件套：注册式投递面（替代旧 6 接口 sink 矩阵）。
 	SinkOpts     core.SinkOptions // 供给偏好（Raw/Durable/Async）
@@ -38,6 +41,8 @@ type ServerConfig struct {
 	// Epochs 可选：连接纪元分配器（facade 双监听时共享一份，保证同 agent
 	// 跨 v1/ntls 的纪元单调；nil = 本 server 独立分配）。
 	Epochs *protocol.EpochAllocator
+	// Commands 启用运维命令通道（按 agentID 寻址下发 COMMAND 帧）。nil =
+	// 关闭（不注册会话，不响应命令 API）。
 }
 
 // Server accepts and handles MBTA agent connections.
@@ -51,6 +56,13 @@ type Server struct {
 // Config 返回服务端配置（facade 测试与诊断用；返回副本）。
 func (s *Server) Config() ServerConfig { return s.config }
 
+// SendCommand 向指定 agent 的活动连接下发运维命令并等待其 COMMAND_ACK
+// （同步语义，含超时；REJECTED/FAILED 转为 AckError/ErrCommand*）。
+// agent 离线或未协商 control_commands 能力时返回错误。
+func (s *Server) SendCommand(ctx context.Context, agentID string, cmd *corepb.ControlCommand) (*corepb.ControlCommandAck, error) {
+	return s.config.Commands.SendCommand(ctx, agentID, cmd)
+}
+
 // NewServer creates a new MBTA server.
 func NewServer(cfg ServerConfig) (*Server, error) {
 	if err := core.ValidateListenAddr(cfg.Transport.Address); err != nil {
@@ -63,8 +75,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	hcfg := binding.HandlerConfig{
 		Auth: cfg.Auth, Policy: cfg.Policy, Metrics: cfg.Metrics,
 		ServerID: cfg.ServerID, RedirectChecker: cfg.RedirectChecker,
-		OnSession: cfg.OnSession,
-		SinkOpts:  cfg.SinkOpts, SinkHandler: cfg.SinkHandler, SinkDeadline: cfg.SinkDeadline,
+		OnSession: cfg.OnSession, Commands: cfg.Commands,
+		SinkOpts: cfg.SinkOpts, SinkHandler: cfg.SinkHandler, SinkDeadline: cfg.SinkDeadline,
 		SinkQueueSize: cfg.SinkQueueSize, SinkQueueMaxBytes: cfg.SinkQueueMaxBytes,
 		// epoch 必须服务端级共享分配（r2 审查裁决）：票据丢失的 agent 也要拿到
 		// 单调递增的 epoch，否则被围栏死锁。每个 Server 一份，跨连接复用。

@@ -53,6 +53,9 @@ type CoreClient struct {
 	resultHandler    atomic.Pointer[func(seq uint64, level string, code uint32, correlation string)]
 	redirectHandler  atomic.Pointer[func(ctx context.Context, payload []byte)]
 	redirectInflight atomic.Bool
+	commandHandler   atomic.Pointer[CommandHandler]
+	seenCmdMu        sync.Mutex
+	seenCommands     map[string]struct{}
 
 	sendMu sync.Mutex
 
@@ -367,6 +370,8 @@ func (c *CoreClient) SetResultHandler(h func(seq uint64, level string, code uint
 	c.resultHandler.Store(&h)
 }
 
+// SetCommandHandler 注册运维命令执行回调（capability: control_commands）。
+// 执行完成后协议层自动回 COMMAND_ACK（applied/failed）。
 // SetRedirectHandler 注册 REDIRECT 回调（ctx 带 30s 超时）。
 func (c *CoreClient) SetRedirectHandler(h func(ctx context.Context, payload []byte)) {
 	c.redirectHandler.Store(&h)

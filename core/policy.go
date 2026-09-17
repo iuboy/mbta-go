@@ -26,6 +26,11 @@ const (
 	// CapZstdDict：服务端静态 zstd 字典下发（DICT 帧 0x22，HELLO_ACK 后立即）。
 	// 同样默认关闭：仅当 ServerPolicy 配置了 ZstdDict 时服务端才实际下发。
 	CapZstdDict = "zstd_dict"
+	// CapControlCommands：服务端→agent 运维命令下发（COMMAND/COMMAND_ACK 帧
+	// 0x23/0x24：配置应用/服务重启/升级/卸载）。纳入默认协商表——协商交集仅
+	// 表示"该 agent 接受命令帧"，实际命令安全由服务端 RBAC+审计把守；不希望
+	// 启用的部署可从 SupportedCapabilities 移除。
+	CapControlCommands = "control_commands"
 )
 
 // MaxZstdDictBytes 限制服务端可配置的 zstd 字典尺寸（DICT 帧走 control 通道，
@@ -78,7 +83,7 @@ func (p ServerPolicy) IsZero() bool {
 func DefaultServerPolicy(p corepb.Profile) ServerPolicy {
 	return ServerPolicy{
 		Profile:               p,
-		SupportedCapabilities: []string{CapTraceContext, CapDatagram, CapCbor},
+		SupportedCapabilities: []string{CapTraceContext, CapDatagram, CapCbor, CapControlCommands},
 		AckMode:               corepb.AckMode_ACK_MODE_ACCEPTED_ONLY,
 		InitialCreditBatches:  DefaultInitialCreditBatches,
 		InitialCreditBytes:    DefaultInitialCreditBytes,

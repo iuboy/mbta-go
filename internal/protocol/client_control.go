@@ -1,7 +1,7 @@
 package protocol
 
-// client_control.go：客户端 control loop（RESULT/CREDIT/PING/PONG/CLOSE/REDIRECT/ABORT）
-// + 结果回调 worker + 心跳（仅 TCP binding）。
+// client_control.go：客户端 control loop（RESULT/CREDIT/PING/PONG/CLOSE/REDIRECT/
+// ABORT/COMMAND）+ 结果回调 worker + 心跳（仅 TCP binding）。
 
 import (
 	"context"
@@ -55,6 +55,8 @@ func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 			// TCP 心跳应答：忽略（保活由发送侧判定）
 		case core.TypeRedirect:
 			c.dispatchRedirect(f.Payload)
+		case core.TypeCommand:
+			c.dispatchCommand(ctx, f.Payload)
 		case core.TypeDict:
 			c.handleDict(f.Payload)
 		case core.TypeHello, core.TypeHelloAck, core.TypeHelloNak:
@@ -320,4 +322,88 @@ func isTemporaryError(err error) bool {
 		return ne.Temporary()
 	}
 	return false
+}
+
+// CommandHandler 是命令执行回调：实现执行命令并返回结果码/消息（协议层
+// 自动回 COMMAND_ACK）。RESTART 类自重启命令应在回调内先完成落盘等准备，
+// 再派生脱离会话的重启动作并返回 ACCEPTED——ACK 必须先于进程退出发出。
+type CommandHandler func(ctx context.Context, cmd *corepb.ControlCommand) (corepb.CommandAckCode, string)
+
+// SetCommandHandler 注册命令执行回调（capability: control_commands 协商
+// 选定后，server 的 COMMAND 帧将触发；nil = 忽略命令帧，保持旧版兼容）。
+// 回调以独立 goroutine 运行（panic 防护 + 5min 超时），不阻塞 control loop。
+func (c *CoreClient) SetCommandHandler(h CommandHandler) {
+	if h == nil {
+		c.commandHandler.Store((*CommandHandler)(nil))
+		return
+	}
+	c.commandHandler.Store(&h)
+}
+
+// dispatchCommand 解码命令帧并异步执行，执行完成后自动回 COMMAND_ACK。
+// 命令按 command_id 幂等：同一 ID 的重复帧由 inFlight 去重（重发窗口内）。
+func (c *CoreClient) dispatchCommand(ctx context.Context, payload []byte) {
+	h := c.commandHandler.Load()
+	if h == nil || *h == nil {
+		slog.Debug("command received but no handler registered; ignoring")
+		return
+	}
+	var cmd corepb.ControlCommand
+	if err := core.Decode(payload, &cmd); err != nil {
+		slog.Warn("decode command failed", "error", err)
+		return
+	}
+	if cmd.CommandId == "" {
+		slog.Warn("command without id; ignoring")
+		return
+	}
+	// 幂等：记录已见 command_id（有界防膨胀；成功命令会从服务端移除，重发
+	// 窗口有限，256 条环形足够）。
+	c.seenCmdMu.Lock()
+	if c.seenCommands == nil {
+		c.seenCommands = make(map[string]struct{}, 64)
+	}
+	if _, dup := c.seenCommands[cmd.CommandId]; dup {
+		c.seenCmdMu.Unlock()
+		slog.Warn("duplicate command id; ignoring", "command_id", cmd.CommandId)
+		return
+	}
+	c.seenCommands[cmd.CommandId] = struct{}{}
+	if len(c.seenCommands) > 256 {
+		// 简单防膨胀：超过上限清空（重发窗口远小于此界）。
+		c.seenCommands = make(map[string]struct{}, 64)
+	}
+	c.seenCmdMu.Unlock()
+
+	handler := *h
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Warn("command handler panicked", "command_id", cmd.CommandId, "panic", r)
+				c.sendCommandAck(cmd.CommandId, corepb.CommandAckCode_COMMAND_ACK_CODE_FAILED, "handler panicked")
+			}
+		}()
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+		defer cancel()
+		code, msg := handler(wctx, &cmd)
+		c.sendCommandAck(cmd.CommandId, code, msg)
+	}()
+}
+
+// sendCommandAck 回传命令应答（control stream 串行锁复用）。
+func (c *CoreClient) sendCommandAck(commandId string, code corepb.CommandAckCode, msg string) {
+	ack := &corepb.ControlCommandAck{CommandId: commandId, Code: code, Message: msg}
+	p, err := core.Encode(ack)
+	if err != nil {
+		slog.Warn("encode command ack failed", "error", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// 与 handlePing 同路径：CoreClient 内部直写 transport（controlMu 串行
+	// 由 v1 包装层对外的 WriteFrame 负责，core 内部各帧由 control stream
+	// 单读单写模型天然串行）。
+	if err := c.tr.WriteFrame(ctx, core.TypeCommandAck, p); err != nil {
+		slog.Warn("write command ack failed", "error", err)
+	}
 }

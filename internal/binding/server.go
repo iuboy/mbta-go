@@ -30,6 +30,7 @@ type HandlerConfig struct {
 	SinkQueueSize     int
 	SinkQueueMaxBytes int64
 	Epochs            *protocol.EpochAllocator
+	Commands          *protocol.CommandRegistry
 }
 
 // ResolveHandlerConfig 校验并填充公共字段。
@@ -160,6 +161,7 @@ func handleConn[C any](
 		SinkDeadline:      hcfg.SinkDeadline,
 		SinkQueueSize:     hcfg.SinkQueueSize,
 		SinkQueueMaxBytes: hcfg.SinkQueueMaxBytes,
+		Commands:          hcfg.Commands,
 	})
 	if err := h.Handle(ctx); err != nil {
 		if core.CodeNumOf(err) == core.CodeProtocolError || core.CodeNumOf(err) == core.CodeServerDraining {

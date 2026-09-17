@@ -67,7 +67,8 @@ type HandlerConfig struct {
 	SinkQueueSize     int               // 0 = 256；负 = 同步调用（测试）
 	SinkQueueMaxBytes int64             // 0 = 32MB；负 = 不限
 	// Zdict 是 zstd_dict 字典 codec（构造期从 Policy 注册；nil=未配置）。
-	Zdict *core.ZstdDictCodec
+	Zdict    *core.ZstdDictCodec
+	Commands *CommandRegistry
 }
 
 // CoreHandler 是服务端协议状态机核心。
@@ -250,6 +251,13 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			}
 		case core.TypePing:
 			h.handlePing(ctx, f.Payload)
+		case core.TypeCommandAck:
+			var ack corepb.ControlCommandAck
+			if err := core.Decode(f.Payload, &ack); err != nil {
+				slog.Warn("decode command ack failed", "error", err)
+			} else {
+				h.resolveAck(&ack)
+			}
 		case core.TypeClose:
 			h.handleClose(f.Payload)
 			return nil
@@ -448,6 +456,40 @@ func (h *CoreHandler) maybeSendDict(ctx context.Context, selected []string) erro
 		return core.WrapError(core.ErrCodeProtocolError, "write dict", err)
 	}
 	return nil
+}
+
+// hasCapability 报告该连接是否协商了指定能力（control_commands 门控用）。
+func (h *CoreHandler) hasCapability(capability string) bool {
+	v := h.negCaps.Load()
+	if v == nil {
+		return false
+	}
+	caps, ok := v.([]string)
+	if !ok {
+		return false
+	}
+	return slices.Contains(caps, capability)
+}
+
+// sendCommand 下发一条运维命令帧（COMMAND 0x23）。仅内部使用——外部经
+// CommandRegistry.SendCommand（含能力门控 + ACK 等待）。
+func (h *CoreHandler) sendCommand(cmd *corepb.ControlCommand) error {
+	payload, err := core.Encode(cmd)
+	if err != nil {
+		return core.WrapError(core.ErrCodeInternal, "encode command", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return SendControlFrame(ctx, h.tr, core.TypeCommand, payload)
+}
+
+// resolveAck 将命令应答分发给等待中的发送方（controlLoop COMMAND_ACK case
+// 调用）。等待管道的单一真相在 CommandRegistry.pending——handler 侧不持有
+// 第二套（此前双管道导致 ACK 永远无人等待，测试暴露后修正）。
+func (h *CoreHandler) resolveAck(ack *corepb.ControlCommandAck) {
+	if h.config.Commands != nil {
+		h.config.Commands.resolve(ack)
+	}
 }
 
 // isNilMetrics 拦截 typed-nil（nil 的 *core.MBTAMetrics 赋入接口）。

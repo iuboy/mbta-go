@@ -14,8 +14,12 @@ const (
 	TypeClose    uint8 = 0x40 // 双向优雅关闭（drain 超时提示）
 	TypeRedirect uint8 = 0x41 // S→C HA 重定向
 	TypeAbort    uint8 = 0x50 // 双向立即拆除（写失败/协议违规/账本漂移）
-	TypeDgram    uint8 = 0x90 // C→S 不可靠批次（Envelope；豁免 credit，硬限速）
-	TypeBatch    uint8 = 0x91 // C→S 可靠批次（Envelope；消耗 credit）
+	// 控制命令帧（capability: control_commands；S→C 命令下发 / C→S 应答）。
+	// 幂等键 command_id；agent 离线时命令不投递（无存储转发）。
+	TypeCommand    uint8 = 0x23 // S→C 运维命令（CONFIG_APPLY/SERVICE_RESTART/UPGRADE/UNINSTALL）
+	TypeCommandAck uint8 = 0x24 // C→S 命令应答（applied/failed/rejected）
+	TypeDgram      uint8 = 0x90 // C→S 不可靠批次（Envelope；豁免 credit，硬限速）
+	TypeBatch      uint8 = 0x91 // C→S 可靠批次（Envelope；消耗 credit）
 )
 
 // IsControlType 报告 type 是否落在 control 域（type 高位 = 0）。
