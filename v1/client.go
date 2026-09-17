@@ -331,7 +331,7 @@ func (c *Client) SetResultHandler(h func(seq uint64, level string, code uint32, 
 // REDIRECT frame (S→C cluster redirect to the HA leader).
 // SetCommandHandler 注册运维命令执行回调（capability: control_commands）。
 // 回调以独立 goroutine 运行（5min 超时 + panic 防护），完成后自动回
-// COMMAND_ACK。旧版客户端不声明该能力时永不会收到 COMMAND 帧。
+// COMMAND_ACK（applied/failed）。
 func (c *Client) SetCommandHandler(h func(context.Context, *corepb.ControlCommand) (corepb.CommandAckCode, string)) {
 	c.core.SetCommandHandler(h)
 }

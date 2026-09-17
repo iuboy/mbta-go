@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 	"github.com/iuboy/mbta-go/internal/protocol"
 	ntls "github.com/iuboy/mbta-go/ntls"
 	v1 "github.com/iuboy/mbta-go/v1"
@@ -43,8 +44,8 @@ type ServerConfig struct {
 	Auth            core.TokenValidator
 	Policy          core.ServerPolicy // 零值 = 各版本按 ProfileFor 取默认（v1=intl、ntls=gm）
 	Metrics         core.Metrics
-	RedirectChecker core.RedirectChecker // HA：握手完成后检查角色，非 leader 发 REDIRECT（可选，nil=禁用）
-	OnSession       core.OnSession       // 会话生命周期回调（可选，nil=禁用）：CONNECTED/DISCONNECTED
+	RedirectChecker core.RedirectChecker      // HA：握手完成后检查角色，非 leader 发 REDIRECT（可选，nil=禁用）
+	OnSession       core.OnSession            // 会话生命周期回调（可选，nil=禁用）：CONNECTED/DISCONNECTED
 	Commands        *protocol.CommandRegistry // 运维命令通道（按 agentID 寻址；nil=禁用）
 
 	// Sink 注册面（替代旧 EventSink 接口）：opts 声明供给偏好，handler 是投递回调。
@@ -467,4 +468,22 @@ func WithCommandRegistry(reg *protocol.CommandRegistry) ServerOption {
 		sc.Commands = reg
 		return nil
 	}
+}
+
+// NewCommandRegistry 创建运维命令注册表（配合 WithCommandRegistry 使用）。
+// 返回内部实现的不透明值——调用方无需命名其类型。
+func NewCommandRegistry() *protocol.CommandRegistry {
+	return protocol.NewCommandRegistry()
+}
+
+// SendCommand 向指定 agent 的活动连接下发运维命令并等待其 ACK
+// （仅当 WithCommandRegistry 启用且 v1 server 已启动时有意义）。
+func (s *Server) SendCommand(ctx context.Context, agentID string, cmd *corepb.ControlCommand) (*corepb.ControlCommandAck, error) {
+	s.mu.RLock()
+	v1srv := s.v1Server
+	s.mu.RUnlock()
+	if v1srv == nil {
+		return nil, protocol.ErrAgentNotConnected
+	}
+	return v1srv.SendCommand(ctx, agentID, cmd)
 }

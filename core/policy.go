@@ -150,11 +150,12 @@ const DefaultReapInterval = 10 * time.Second
 // 宣告、服务端策略可加入 SupportedCapabilities），但默认关闭——
 // DefaultServerPolicy 不含二者（r3 裁决：按需显式开启）。
 var KnownCaps = map[string]bool{
-	CapTraceContext:  true,
-	CapDatagram:      true,
-	CapCbor:          true,
-	CapDualIntegrity: true,
-	CapZstdDict:      true,
+	CapTraceContext:    true,
+	CapDatagram:        true,
+	CapCbor:            true,
+	CapDualIntegrity:   true,
+	CapZstdDict:        true,
+	CapControlCommands: true,
 }
 
 // FilterUnknownCaps 返回不在注册表中的能力（客户端 NewClient fail-fast）。

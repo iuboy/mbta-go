@@ -5,6 +5,7 @@ package protocol
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"slices"
@@ -165,8 +166,10 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 	defer sinkCancel()
 
 	defer func() {
-		if h.config.OnSession == nil || !h.authed.Load() {
-			return
+		// 命令注册表注销独立于 OnSession：必须无条件发生于已认证连接
+		// （防止幽灵路由）。重连竞态由 unregister 的指向检查保护。
+		if h.config.Commands != nil && h.authed.Load() {
+			h.config.Commands.unregister(h.getAgentID(), h)
 		}
 		h.config.OnSession(core.SessionEvent{
 			Type:       core.SessionDisconnected,
@@ -395,6 +398,9 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	if am, ok := h.tr.(AuthMarker); ok {
 		am.MarkAuthed()
 	}
+	// 控制命令通道注册：READY 即登记，使 OnSession(CONNECTED) 的接收方
+	// 立即可向该 agent 下发命令。仅当注册表注入且协商了能力。
+	h.registerCommandChannel(hello.GetAgentId())
 
 	slog.Info("handshake completed", "agent", core.SanitizeForLog(hello.GetAgentId()),
 		"session", string(h.getSessionID()), "epoch", h.epoch, "profile", core.ProfileName(hello.GetProfile()))
@@ -456,6 +462,22 @@ func (h *CoreHandler) maybeSendDict(ctx context.Context, selected []string) erro
 		return core.WrapError(core.ErrCodeProtocolError, "write dict", err)
 	}
 	return nil
+}
+
+// registerCommandChannel 在握手 READY 后登记控制命令通道（能力协商通过
+// 才注册；未协商时告警，便于观察混合舰队中旧 agent 的覆盖情况）。
+func (h *CoreHandler) registerCommandChannel(agentID string) {
+	if h.config.Commands == nil {
+		return
+	}
+	if !h.hasCapability(core.CapControlCommands) {
+		slog.Warn("command capability not negotiated",
+			"agent", core.SanitizeForLog(agentID),
+			"selected", fmt.Sprint(h.negCaps.Load()))
+		return
+	}
+	h.config.Commands.register(agentID, h)
+	slog.Info("command channel registered", "agent", core.SanitizeForLog(agentID))
 }
 
 // hasCapability 报告该连接是否协商了指定能力（control_commands 门控用）。
