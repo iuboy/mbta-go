@@ -88,7 +88,8 @@ func VerifyTokenProof(v TokenValidator, p corepb.Profile, agentID string, thHell
 		return WrapError(ErrCodeInternal, "resolve token", err)
 	}
 	for _, tok := range cands {
-		if hmac.Equal(TokenProof(p, tok, thHello), proof) {
+		want := TokenProof(p, tok, thHello)
+		if hmac.Equal(want, proof) {
 			return nil
 		}
 	}

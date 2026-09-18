@@ -321,7 +321,16 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 		return err
 	}
 	if verr := core.VerifyTokenProof(h.config.Auth, hello.GetProfile(), hello.GetAgentId(), thHello, hello.GetTokenProof()); verr != nil {
-		slog.Warn("token proof verification failed", "agent", core.SanitizeForLog(hello.GetAgentId()))
+		// 候选诊断字段：candidates 数量/首候选前缀直接区分「候选缺失
+		//（服务端未纳管该 token 类别）」与「候选在但证明不匹配」两类故障。
+		cands, _ := h.config.Auth.ResolveToken(hello.GetAgentId())
+		slog.Warn("token proof verification failed", "agent", core.SanitizeForLog(hello.GetAgentId()),
+			"candidates", len(cands), "first_prefix", func() string {
+				if len(cands) > 0 && len(cands[0]) > 8 {
+					return cands[0][:8]
+				}
+				return ""
+			}(), "hello_caps", fmt.Sprint(hello.GetCapabilities()))
 		h.sendNak(ctx, core.CodeAuthFailed, true, 1000) // 单一代码 + retryable + 退避提示
 		return nil                                      //nolint:nilerr // 握手失败不拆传输层（NAK 已回）
 	}
