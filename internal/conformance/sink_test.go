@@ -208,9 +208,11 @@ func TestSink_AsyncDoneAfterReturn(t *testing.T) {
 // TestSink_QueueFull_Released 验证投递队列满 → RESULT(released, server_draining,
 // retry_hint) + 额度回收；释放后其余批次正常 durable（enqueue 失败必须映射 wire 语义）。
 //
-// 容量上界推导：队列容量 1、handler 全部阻塞 → 进入系统的任务数 ≤ worker 数 + 1
-// （worker 逐个被阻塞任务占用，channel 缓冲至多 1）。逐批发送并观察上一批 RESULT
-// 后再发下一批；越过上界后必然出现 released(server_draining)。
+// 容量与饱和判定：稳态容量 = worker 数 + 队列缓冲——每个已入队任务占住一个
+// worker（runSinkTask 等待 handler 完成）或缓冲槽，handler 阻塞期间槽位不可能
+// 释放。worker 懒启动存在调度竞态：首批任务可能在 worker 就位前撞满缓冲出现
+// 瞬时 released——released ≠ 稳态饱和，唯一确定性饱和条件是 accepted 达到
+// 理论容量（workers + queueCap）。
 func TestSink_QueueFull_Released(t *testing.T) {
 	var releaseOnce sync.Once
 	block := make(chan struct{})
@@ -224,7 +226,7 @@ func TestSink_QueueFull_Released(t *testing.T) {
 
 	workers := runtime.NumCPU()
 	const queueCap = 1
-	upperBound := workers + queueCap + 2 // 容量硬上界 + 松弛
+	capacity := workers + queueCap
 
 	env := startEnv(t, envConfig{
 		ackMode:              corepb.AckMode_ACK_MODE_DURABLE,
@@ -236,11 +238,13 @@ func TestSink_QueueFull_Released(t *testing.T) {
 		sink:                 handler,
 	})
 
-	// 填充：逐批发送直到出现第一个 released（队列满）或越过容量上界。
+	// 填充至真饱和（accepted == workers + queueCap）。途中出现的 released 是
+	// 懒启动竞态的瞬时拒绝，不占容量；其 wire 语义（server_draining +
+	// retry_hint）与饱和路径一致，一并断言。
 	var accepted int
 	var seq uint64
-	var sawReleased bool
-	for i := 0; i < upperBound && !sawReleased; i++ {
+	fillBound := capacity + 16 // 瞬时 released 不占容量：留裕量
+	for i := 0; i < fillBound && accepted < capacity; i++ {
 		seq = uint64(i + 1)
 		env.sendBatch(t, seq, "flood", "")
 		r := AwaitResult(t, env.tr.Sent, seq, 10*time.Second)
@@ -248,7 +252,6 @@ func TestSink_QueueFull_Released(t *testing.T) {
 		case corepb.ResultLevel_RESULT_LEVEL_ACCEPTED:
 			accepted++
 		case corepb.ResultLevel_RESULT_LEVEL_RELEASED:
-			sawReleased = true
 			if r.GetCode() != core.CodeServerDraining {
 				t.Errorf("released code = %d (%s), want %d (server_draining)",
 					r.GetCode(), core.CodeName(r.GetCode()), core.CodeServerDraining)
@@ -260,15 +263,13 @@ func TestSink_QueueFull_Released(t *testing.T) {
 			t.Fatalf("seq %d: unexpected level %v", seq, r.GetLevel())
 		}
 	}
-	if !sawReleased {
-		t.Fatalf("queue never filled after %d sequential batches (capacity upper bound workers=%d + queue=%d)",
-			upperBound, workers, queueCap)
-	}
-	if accepted < 1 {
-		t.Fatal("no batch was accepted before queue filled")
+	if accepted < capacity {
+		t.Fatalf("queue never saturated: accepted %d < capacity %d (workers=%d + queue=%d)",
+			accepted, capacity, workers, queueCap)
 	}
 
-	// 容量已满：后续批次 enqueue 失败 → 全部 released(server_draining)。
+	// 真饱和：handler 全阻塞、槽位无以为继 → 后续批次 enqueue 必失败，
+	// 全部 released(server_draining)。
 	for extra := 1; extra <= 2; extra++ {
 		s := seq + uint64(extra)
 		env.sendBatch(t, s, "flood", "")

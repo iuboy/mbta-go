@@ -171,12 +171,14 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 		if h.config.Commands != nil && h.authed.Load() {
 			h.config.Commands.unregister(h.getAgentID(), h)
 		}
-		h.config.OnSession(core.SessionEvent{
-			Type:       core.SessionDisconnected,
-			AgentID:    h.getAgentID(),
-			SessionID:  string(h.getSessionID()),
-			RemoteAddr: h.tr.RemoteAddr(),
-		})
+		if h.config.OnSession != nil {
+			h.config.OnSession(core.SessionEvent{
+				Type:       core.SessionDisconnected,
+				AgentID:    h.getAgentID(),
+				SessionID:  string(h.getSessionID()),
+				RemoteAddr: h.tr.RemoteAddr(),
+			})
+		}
 	}()
 
 	err := h.controlLoop(ctx)
