@@ -49,6 +49,10 @@ type envConfig struct {
 	// zstd_dict：服务端静态字典（配了且协商成功才发 DICT 帧）。
 	zstdDict   []byte
 	zstdDictID uint32
+
+	// onSession：会话生命周期回调（nil = 不注入——契约允许，Handle 收尾
+	// 的 DISCONNECTED 回调必须有 nil 守卫）。
+	onSession core.OnSession
 }
 
 func (c *envConfig) normalize() {
@@ -130,6 +134,7 @@ func startEnv(t *testing.T, cfg envConfig) *testEnv {
 		SinkDeadline:      cfg.sinkDeadline,
 		SinkQueueSize:     cfg.sinkQueueSize,
 		SinkQueueMaxBytes: cfg.sinkQueueMaxByt,
+		OnSession:         cfg.onSession,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -575,6 +580,7 @@ func startHandlerOnly(t *testing.T, cfg envConfig) *testEnv {
 		SinkDeadline:      cfg.sinkDeadline,
 		SinkQueueSize:     cfg.sinkQueueSize,
 		SinkQueueMaxBytes: cfg.sinkQueueMaxByt,
+		OnSession:         cfg.onSession,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	env := &testEnv{tr: tr, handler: h, cfg: cfg, handleErr: make(chan error, 1)}
