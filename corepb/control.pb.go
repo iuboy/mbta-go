@@ -291,6 +291,7 @@ const (
 	CommandType_COMMAND_TYPE_SERVICE_RESTART CommandType = 2 // 无参数；agent 落盘后自重启进程
 	CommandType_COMMAND_TYPE_UPGRADE         CommandType = 3 // payload = 升级描述（version/url/sha256）
 	CommandType_COMMAND_TYPE_UNINSTALL       CommandType = 4 // 无参数；需服务端独立权限 + 二次确认
+	CommandType_COMMAND_TYPE_RULESET_APPLY   CommandType = 5 // payload = 安全检测规则包签名信封（rulesign.Envelope）；
 )
 
 // Enum value maps for CommandType.
@@ -301,6 +302,7 @@ var (
 		2: "COMMAND_TYPE_SERVICE_RESTART",
 		3: "COMMAND_TYPE_UPGRADE",
 		4: "COMMAND_TYPE_UNINSTALL",
+		5: "COMMAND_TYPE_RULESET_APPLY",
 	}
 	CommandType_value = map[string]int32{
 		"COMMAND_TYPE_UNSPECIFIED":     0,
@@ -308,6 +310,7 @@ var (
 		"COMMAND_TYPE_SERVICE_RESTART": 2,
 		"COMMAND_TYPE_UPGRADE":         3,
 		"COMMAND_TYPE_UNINSTALL":       4,
+		"COMMAND_TYPE_RULESET_APPLY":   5,
 	}
 )
 
@@ -1618,13 +1621,14 @@ const file_control_proto_rawDesc = "" +
 	"\x10COMPRESSION_GZIP\x10\x02\x12\x14\n" +
 	"\x10COMPRESSION_ZSTD\x10\x03\x12\x13\n" +
 	"\x0fCOMPRESSION_LZ4\x10\x04\x12\x19\n" +
-	"\x15COMPRESSION_ZSTD_DICT\x10\x05*\xa2\x01\n" +
+	"\x15COMPRESSION_ZSTD_DICT\x10\x05*\xc2\x01\n" +
 	"\vCommandType\x12\x1c\n" +
 	"\x18COMMAND_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19COMMAND_TYPE_CONFIG_APPLY\x10\x01\x12 \n" +
 	"\x1cCOMMAND_TYPE_SERVICE_RESTART\x10\x02\x12\x18\n" +
 	"\x14COMMAND_TYPE_UPGRADE\x10\x03\x12\x1a\n" +
-	"\x16COMMAND_TYPE_UNINSTALL\x10\x04*\xab\x01\n" +
+	"\x16COMMAND_TYPE_UNINSTALL\x10\x04\x12\x1e\n" +
+	"\x1aCOMMAND_TYPE_RULESET_APPLY\x10\x05*\xab\x01\n" +
 	"\x0eCommandAckCode\x12 \n" +
 	"\x1cCOMMAND_ACK_CODE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18COMMAND_ACK_CODE_APPLIED\x10\x01\x12\x1d\n" +

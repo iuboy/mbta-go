@@ -183,6 +183,9 @@ enum CommandType {
   COMMAND_TYPE_SERVICE_RESTART = 2; // 无参数；agent 落盘后自重启进程
   COMMAND_TYPE_UPGRADE = 3;         // payload = 升级描述（version/url/sha256）
   COMMAND_TYPE_UNINSTALL = 4;       // 无参数；需服务端独立权限 + 二次确认
+  COMMAND_TYPE_RULESET_APPLY = 5;   // payload = 安全检测规则包签名信封（rulesign.Envelope）；
+                                    // agent 验签通过后落盘规则包文件并热重载检测引擎，
+                                    // 验签失败 REJECTED（不落盘不重载）
 }
 
 message ControlCommand {
