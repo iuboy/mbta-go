@@ -307,8 +307,8 @@ type Scope struct {
 type SignalRecord struct {
 	SignalType     string         `json:"signal_type"` // 必填，禁止空字符串
 	EventID        string         `json:"event_id,omitempty"`
-	TimeUnixMs     int64          `json:"time_unix_ms"`
-	ObservedTimeMs int64          `json:"observed_time_unix_ms,omitempty"`
+	TimeUnixNs     int64          `json:"time_unix_ns"`
+	ObservedTimeNs int64          `json:"observed_time_unix_ns,omitempty"`
 	TraceID        string         `json:"trace_id,omitempty"`
 	SpanID         string         `json:"span_id,omitempty"`
 	ParentSpanID   string         `json:"parent_span_id,omitempty"`
@@ -325,8 +325,8 @@ type SignalRecord struct {
 	// Span 字段
 	Name            string `json:"name,omitempty"`
 	Kind            string `json:"kind,omitempty"`
-	StartTimeUnixMs int64  `json:"start_time_unix_ms,omitempty"`
-	EndTimeUnixMs   int64  `json:"end_time_unix_ms,omitempty"`
+	StartTimeUnixNs int64  `json:"start_time_unix_ns,omitempty"`
+	EndTimeUnixNs   int64  `json:"end_time_unix_ns,omitempty"`
 	StatusCode      string `json:"status_code,omitempty"`
 	StatusMessage   string `json:"status_message,omitempty"`
 	// W3C Trace Context 字段（capability w3c_trace_context，core spec §6.2.2）。

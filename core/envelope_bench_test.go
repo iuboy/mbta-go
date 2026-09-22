@@ -61,7 +61,7 @@ func benchBatchWire(b *testing.B, target int, nSignals int) []byte {
 	for i := range signals {
 		signals[i] = &SignalRecord{
 			SignalType: SignalTypeLog,
-			TimeUnixMs: time.Now().UnixMilli(),
+			TimeUnixNs: time.Now().UnixNano(),
 			Body:       benchLogBody(bodySize, i),
 		}
 	}

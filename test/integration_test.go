@@ -215,7 +215,7 @@ func smallBatch(n int, bodySize int) *core.SignalBatch {
 	for i := range signals {
 		signals[i] = &core.SignalRecord{
 			SignalType:     core.SignalTypeLog,
-			TimeUnixMs:     time.Now().UnixMilli(),
+			TimeUnixNs:     time.Now().UnixNano(),
 			SeverityNumber: 9,
 			Body:           randHex(bodySize / 2), // hex 保证合法 UTF-8（ASCII 子集）
 		}

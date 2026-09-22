@@ -635,7 +635,7 @@ Multiplexing / Close / RemoteAddr
 ### 9.2 保活
 
 - **QUIC**：使用 QUIC 传输层 keepalive；MUST NOT 发 PING（应用层保活与传输层重复）。
-- **TCP 系**：MUST 用 PING/PONG 保活——客户端周期发送 PING（默认 30s 间隔、5s 写超时），服务端 MUST 回 PONG（回显 time_unix_ms 与 nonce，status="ok"）。读侧空闲超时依赖 PING 维持。
+- **TCP 系**：MUST 用 PING/PONG 保活——客户端周期发送 PING（默认 30s 间隔、5s 写超时），服务端 MUST 回 PONG（回显 time_unix_ns 与 nonce，status="ok"）。读侧空闲超时依赖 PING 维持。 <!-- 2026-09-22 破坏性升级：毫秒→纳秒（无存量兼容）；UTC epoch -->
 
 ### 9.3 pre-auth 策略（binding 内建职责）
 

@@ -552,7 +552,7 @@ func (h *CoreHandler) handlePing(ctx context.Context, payload []byte) {
 	if err := core.Decode(payload, &ping); err != nil {
 		return
 	}
-	pong := &core.PongMsg{TimeUnixMs: ping.GetTimeUnixMs(), Nonce: ping.GetNonce(), Status: "ok"}
+	pong := &core.PongMsg{TimeUnixNs: ping.GetTimeUnixNs(), Nonce: ping.GetNonce(), Status: "ok"}
 	p, err := core.Encode(pong)
 	if err != nil {
 		return

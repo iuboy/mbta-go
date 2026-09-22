@@ -150,7 +150,7 @@ func signalsOf(t *testing.T, n int, body string) *core.SignalBatch {
 	for i := range signals {
 		signals[i] = &core.SignalRecord{
 			SignalType: core.SignalTypeLog,
-			TimeUnixMs: time.Now().UnixMilli(),
+			TimeUnixNs: time.Now().UnixNano(),
 			Body:       body,
 		}
 	}

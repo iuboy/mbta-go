@@ -126,7 +126,7 @@ func TestClose_DrainTimeoutClamp(t *testing.T) {
 // TestPing_Pong 验证 TCP binding 保活路径：PING 回显 PONG（nonce/时间戳）。
 func TestPing_Pong(t *testing.T) {
 	env := startEnv(t, envConfig{})
-	ping := &core.PingMsg{TimeUnixMs: 123456, Nonce: []byte{0x07, 0x89}}
+	ping := &core.PingMsg{TimeUnixNs: 123456, Nonce: []byte{0x07, 0x89}}
 	p, err := core.Encode(ping)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestPing_Pong(t *testing.T) {
 	if err := core.Decode(pongF.Payload, &pong); err != nil {
 		t.Fatalf("decode pong: %v", err)
 	}
-	if pong.GetTimeUnixMs() != 123456 || string(pong.GetNonce()) != "\x07\x89" {
-		t.Errorf("pong echo = (%d,% X), want (123456, 07 89)", pong.GetTimeUnixMs(), pong.GetNonce())
+	if pong.GetTimeUnixNs() != 123456 || string(pong.GetNonce()) != "\x07\x89" {
+		t.Errorf("pong echo = (%d,% X), want (123456, 07 89)", pong.GetTimeUnixNs(), pong.GetNonce())
 	}
 }

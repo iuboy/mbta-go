@@ -89,7 +89,7 @@ TCP 是连续字节流，接收端 MUST（core §1.5）：
 TCP 层没有空闲超时机制（OS keepalive 只能杀死死链路，活着的静默对端会 ACK 探测包），读侧空闲超时依赖应用层 PING 维持：
 
 - **客户端** MUST 周期发送 PING（默认间隔 30s，单次写超时 5s）；写失败即退出心跳循环（连接由读侧收敛）。
-- **服务端** MUST 对 PING 回 PONG（回显 `time_unix_ms` 与 `nonce`，`status="ok"`）；QUIC binding 不发 PING（传输层 keepalive 承担），服务端在 QUIC 侧对 PING 静默。
+- **服务端** MUST 对 PING 回 PONG（回显 `time_unix_ns` 与 `nonce`，`status="ok"`）；QUIC binding 不发 PING（传输层 keepalive 承担），服务端在 QUIC 侧对 PING 静默。
 - PING/PONG 是双向类型，但本 binding 中仅由客户端发起、服务端应答；服务端不主动探测。
 
 ### 4.1 读超时档位（pre-auth / 认证后）

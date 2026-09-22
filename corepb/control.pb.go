@@ -1202,7 +1202,7 @@ func (x *Redirect) GetLeaderId() string {
 
 type Ping struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	TimeUnixMs    int64                  `protobuf:"varint,1,opt,name=time_unix_ms,json=timeUnixMs,proto3" json:"time_unix_ms,omitempty"`
+	TimeUnixNs    int64                  `protobuf:"varint,1,opt,name=time_unix_ns,json=timeUnixNs,proto3" json:"time_unix_ns,omitempty"`
 	Nonce         []byte                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1238,9 +1238,9 @@ func (*Ping) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{12}
 }
 
-func (x *Ping) GetTimeUnixMs() int64 {
+func (x *Ping) GetTimeUnixNs() int64 {
 	if x != nil {
-		return x.TimeUnixMs
+		return x.TimeUnixNs
 	}
 	return 0
 }
@@ -1254,7 +1254,7 @@ func (x *Ping) GetNonce() []byte {
 
 type Pong struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	TimeUnixMs    int64                  `protobuf:"varint,1,opt,name=time_unix_ms,json=timeUnixMs,proto3" json:"time_unix_ms,omitempty"`
+	TimeUnixNs    int64                  `protobuf:"varint,1,opt,name=time_unix_ns,json=timeUnixNs,proto3" json:"time_unix_ns,omitempty"`
 	Nonce         []byte                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
 	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1291,9 +1291,9 @@ func (*Pong) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{13}
 }
 
-func (x *Pong) GetTimeUnixMs() int64 {
+func (x *Pong) GetTimeUnixNs() int64 {
 	if x != nil {
-		return x.TimeUnixMs
+		return x.TimeUnixNs
 	}
 	return 0
 }
@@ -1573,12 +1573,12 @@ const file_control_proto_rawDesc = "" +
 	"leaderAddr\x12\x1b\n" +
 	"\tleader_id\x18\x02 \x01(\tR\bleaderId\">\n" +
 	"\x04Ping\x12 \n" +
-	"\ftime_unix_ms\x18\x01 \x01(\x03R\n" +
-	"timeUnixMs\x12\x14\n" +
+	"\ftime_unix_ns\x18\x01 \x01(\x03R\n" +
+	"timeUnixNs\x12\x14\n" +
 	"\x05nonce\x18\x02 \x01(\fR\x05nonce\"V\n" +
 	"\x04Pong\x12 \n" +
-	"\ftime_unix_ms\x18\x01 \x01(\x03R\n" +
-	"timeUnixMs\x12\x14\n" +
+	"\ftime_unix_ns\x18\x01 \x01(\x03R\n" +
+	"timeUnixNs\x12\x14\n" +
 	"\x05nonce\x18\x02 \x01(\fR\x05nonce\x12\x16\n" +
 	"\x06status\x18\x03 \x01(\tR\x06status\"7\n" +
 	"\bZstdDict\x12\x17\n" +

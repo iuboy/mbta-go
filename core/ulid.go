@@ -35,7 +35,7 @@ func NewChunkID() ChunkID {
 			if r := recover(); r != nil {
 				// 降级：保留前 6 字节 ULID 时间戳，后 10 字节填随机数。
 				slog.Warn("ulid generation panicked, falling back to random entropy", "panic", r)
-				now := uint64(time.Now().UnixMilli())
+				now := uint64(time.Now().UnixNano())
 				u[0] = byte(now >> 40)
 				u[1] = byte(now >> 32)
 				u[2] = byte(now >> 24)

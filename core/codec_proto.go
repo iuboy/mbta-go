@@ -67,8 +67,8 @@ func toProtoSignalRecord(s *SignalRecord) *corepb.SignalRecord {
 	pb := &corepb.SignalRecord{
 		SignalType:         s.SignalType,
 		EventId:            s.EventID,
-		TimeUnixMs:         s.TimeUnixMs,
-		ObservedTimeUnixMs: s.ObservedTimeMs,
+		TimeUnixNs:         s.TimeUnixNs,
+		ObservedTimeUnixNs: s.ObservedTimeNs,
 		TraceId:            s.TraceID,
 		SpanId:             s.SpanID,
 		ParentSpanId:       s.ParentSpanID,
@@ -81,8 +81,8 @@ func toProtoSignalRecord(s *SignalRecord) *corepb.SignalRecord {
 		IsMonotonic:        s.IsMonotonic,
 		Name:               s.Name,
 		Kind:               s.Kind,
-		StartTimeUnixMs:    s.StartTimeUnixMs,
-		EndTimeUnixMs:      s.EndTimeUnixMs,
+		StartTimeUnixNs:    s.StartTimeUnixNs,
+		EndTimeUnixNs:      s.EndTimeUnixNs,
 		StatusCode:         s.StatusCode,
 		StatusMessage:      s.StatusMessage,
 	}
@@ -132,8 +132,8 @@ func fromProtoSignalRecord(s *corepb.SignalRecord) *SignalRecord {
 	r := &SignalRecord{
 		SignalType:      s.GetSignalType(),
 		EventID:         s.GetEventId(),
-		TimeUnixMs:      s.GetTimeUnixMs(),
-		ObservedTimeMs:  s.GetObservedTimeUnixMs(),
+		TimeUnixNs:      s.GetTimeUnixNs(),
+		ObservedTimeNs:  s.GetObservedTimeUnixNs(),
 		TraceID:         s.GetTraceId(),
 		SpanID:          s.GetSpanId(),
 		ParentSpanID:    s.GetParentSpanId(),
@@ -146,8 +146,8 @@ func fromProtoSignalRecord(s *corepb.SignalRecord) *SignalRecord {
 		IsMonotonic:     s.GetIsMonotonic(),
 		Name:            s.GetName(),
 		Kind:            s.GetKind(),
-		StartTimeUnixMs: s.GetStartTimeUnixMs(),
-		EndTimeUnixMs:   s.GetEndTimeUnixMs(),
+		StartTimeUnixNs: s.GetStartTimeUnixNs(),
+		EndTimeUnixNs:   s.GetEndTimeUnixNs(),
 		StatusCode:      s.GetStatusCode(),
 		StatusMessage:   s.GetStatusMessage(),
 	}

@@ -648,33 +648,35 @@ func (x *TraceContext) GetTraceState() []*TraceStateEntry {
 
 // 统一信号外壳。signal_type 必填；log MUST 用 "log"。
 type SignalRecord struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	SignalType         string                 `protobuf:"bytes,1,opt,name=signal_type,json=signalType,proto3" json:"signal_type,omitempty"`
-	EventId            string                 `protobuf:"bytes,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	TimeUnixMs         int64                  `protobuf:"varint,3,opt,name=time_unix_ms,json=timeUnixMs,proto3" json:"time_unix_ms,omitempty"`
-	ObservedTimeUnixMs int64                  `protobuf:"varint,4,opt,name=observed_time_unix_ms,json=observedTimeUnixMs,proto3" json:"observed_time_unix_ms,omitempty"`
-	TraceId            string                 `protobuf:"bytes,5,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
-	SpanId             string                 `protobuf:"bytes,6,opt,name=span_id,json=spanId,proto3" json:"span_id,omitempty"`
-	ParentSpanId       string                 `protobuf:"bytes,7,opt,name=parent_span_id,json=parentSpanId,proto3" json:"parent_span_id,omitempty"`
-	Attributes         map[string]*AnyValue   `protobuf:"bytes,8,rep,name=attributes,proto3" json:"attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Body               *AnyValue              `protobuf:"bytes,9,opt,name=body,proto3" json:"body,omitempty"`
-	SeverityNumber     int32                  `protobuf:"varint,10,opt,name=severity_number,json=severityNumber,proto3" json:"severity_number,omitempty"`
-	SeverityText       string                 `protobuf:"bytes,11,opt,name=severity_text,json=severityText,proto3" json:"severity_text,omitempty"`
-	MetricName         string                 `protobuf:"bytes,12,opt,name=metric_name,json=metricName,proto3" json:"metric_name,omitempty"`
-	MetricFields       map[string]float64     `protobuf:"bytes,13,rep,name=metric_fields,json=metricFields,proto3" json:"metric_fields,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"fixed64,2,opt,name=value"`
-	Unit               string                 `protobuf:"bytes,14,opt,name=unit,proto3" json:"unit,omitempty"`
-	Temporality        string                 `protobuf:"bytes,15,opt,name=temporality,proto3" json:"temporality,omitempty"`
-	IsMonotonic        bool                   `protobuf:"varint,16,opt,name=is_monotonic,json=isMonotonic,proto3" json:"is_monotonic,omitempty"`
-	Name               string                 `protobuf:"bytes,17,opt,name=name,proto3" json:"name,omitempty"`
-	Kind               string                 `protobuf:"bytes,18,opt,name=kind,proto3" json:"kind,omitempty"`
-	StartTimeUnixMs    int64                  `protobuf:"varint,19,opt,name=start_time_unix_ms,json=startTimeUnixMs,proto3" json:"start_time_unix_ms,omitempty"`
-	EndTimeUnixMs      int64                  `protobuf:"varint,20,opt,name=end_time_unix_ms,json=endTimeUnixMs,proto3" json:"end_time_unix_ms,omitempty"`
-	StatusCode         string                 `protobuf:"bytes,21,opt,name=status_code,json=statusCode,proto3" json:"status_code,omitempty"`
-	StatusMessage      string                 `protobuf:"bytes,22,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
-	ExpHistogram       *ExponentialHistogram  `protobuf:"bytes,23,opt,name=exp_histogram,json=expHistogram,proto3" json:"exp_histogram,omitempty"` // signal_type=histogram 且 aggregation=exponential
-	Profile            *ProfilePayload        `protobuf:"bytes,24,opt,name=profile,proto3" json:"profile,omitempty"`                               // signal_type=profile
-	TraceFlags         uint32                 `protobuf:"varint,25,opt,name=trace_flags,json=traceFlags,proto3" json:"trace_flags,omitempty"`      // W3C traceparent trace-flags（capability w3c_trace_context）
-	TraceState         []*TraceStateEntry     `protobuf:"bytes,26,rep,name=trace_state,json=traceState,proto3" json:"trace_state,omitempty"`       // W3C tracestate（有序，w3c_trace_context）
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	SignalType string                 `protobuf:"bytes,1,opt,name=signal_type,json=signalType,proto3" json:"signal_type,omitempty"`
+	EventId    string                 `protobuf:"bytes,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	// 事件时间，epoch 纳秒（mbta/1 于 2026-09-22 自毫秒升级；UTC）。
+	TimeUnixNs int64 `protobuf:"varint,3,opt,name=time_unix_ns,json=timeUnixNs,proto3" json:"time_unix_ns,omitempty"`
+	// 采集观测时间，epoch 纳秒。
+	ObservedTimeUnixNs int64                 `protobuf:"varint,4,opt,name=observed_time_unix_ns,json=observedTimeUnixNs,proto3" json:"observed_time_unix_ns,omitempty"`
+	TraceId            string                `protobuf:"bytes,5,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
+	SpanId             string                `protobuf:"bytes,6,opt,name=span_id,json=spanId,proto3" json:"span_id,omitempty"`
+	ParentSpanId       string                `protobuf:"bytes,7,opt,name=parent_span_id,json=parentSpanId,proto3" json:"parent_span_id,omitempty"`
+	Attributes         map[string]*AnyValue  `protobuf:"bytes,8,rep,name=attributes,proto3" json:"attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Body               *AnyValue             `protobuf:"bytes,9,opt,name=body,proto3" json:"body,omitempty"`
+	SeverityNumber     int32                 `protobuf:"varint,10,opt,name=severity_number,json=severityNumber,proto3" json:"severity_number,omitempty"`
+	SeverityText       string                `protobuf:"bytes,11,opt,name=severity_text,json=severityText,proto3" json:"severity_text,omitempty"`
+	MetricName         string                `protobuf:"bytes,12,opt,name=metric_name,json=metricName,proto3" json:"metric_name,omitempty"`
+	MetricFields       map[string]float64    `protobuf:"bytes,13,rep,name=metric_fields,json=metricFields,proto3" json:"metric_fields,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"fixed64,2,opt,name=value"`
+	Unit               string                `protobuf:"bytes,14,opt,name=unit,proto3" json:"unit,omitempty"`
+	Temporality        string                `protobuf:"bytes,15,opt,name=temporality,proto3" json:"temporality,omitempty"`
+	IsMonotonic        bool                  `protobuf:"varint,16,opt,name=is_monotonic,json=isMonotonic,proto3" json:"is_monotonic,omitempty"`
+	Name               string                `protobuf:"bytes,17,opt,name=name,proto3" json:"name,omitempty"`
+	Kind               string                `protobuf:"bytes,18,opt,name=kind,proto3" json:"kind,omitempty"`
+	StartTimeUnixNs    int64                 `protobuf:"varint,19,opt,name=start_time_unix_ns,json=startTimeUnixNs,proto3" json:"start_time_unix_ns,omitempty"`
+	EndTimeUnixNs      int64                 `protobuf:"varint,20,opt,name=end_time_unix_ns,json=endTimeUnixNs,proto3" json:"end_time_unix_ns,omitempty"`
+	StatusCode         string                `protobuf:"bytes,21,opt,name=status_code,json=statusCode,proto3" json:"status_code,omitempty"`
+	StatusMessage      string                `protobuf:"bytes,22,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
+	ExpHistogram       *ExponentialHistogram `protobuf:"bytes,23,opt,name=exp_histogram,json=expHistogram,proto3" json:"exp_histogram,omitempty"` // signal_type=histogram 且 aggregation=exponential
+	Profile            *ProfilePayload       `protobuf:"bytes,24,opt,name=profile,proto3" json:"profile,omitempty"`                               // signal_type=profile
+	TraceFlags         uint32                `protobuf:"varint,25,opt,name=trace_flags,json=traceFlags,proto3" json:"trace_flags,omitempty"`      // W3C traceparent trace-flags（capability w3c_trace_context）
+	TraceState         []*TraceStateEntry    `protobuf:"bytes,26,rep,name=trace_state,json=traceState,proto3" json:"trace_state,omitempty"`       // W3C tracestate（有序，w3c_trace_context）
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -723,16 +725,16 @@ func (x *SignalRecord) GetEventId() string {
 	return ""
 }
 
-func (x *SignalRecord) GetTimeUnixMs() int64 {
+func (x *SignalRecord) GetTimeUnixNs() int64 {
 	if x != nil {
-		return x.TimeUnixMs
+		return x.TimeUnixNs
 	}
 	return 0
 }
 
-func (x *SignalRecord) GetObservedTimeUnixMs() int64 {
+func (x *SignalRecord) GetObservedTimeUnixNs() int64 {
 	if x != nil {
-		return x.ObservedTimeUnixMs
+		return x.ObservedTimeUnixNs
 	}
 	return 0
 }
@@ -835,16 +837,16 @@ func (x *SignalRecord) GetKind() string {
 	return ""
 }
 
-func (x *SignalRecord) GetStartTimeUnixMs() int64 {
+func (x *SignalRecord) GetStartTimeUnixNs() int64 {
 	if x != nil {
-		return x.StartTimeUnixMs
+		return x.StartTimeUnixNs
 	}
 	return 0
 }
 
-func (x *SignalRecord) GetEndTimeUnixMs() int64 {
+func (x *SignalRecord) GetEndTimeUnixNs() int64 {
 	if x != nil {
-		return x.EndTimeUnixMs
+		return x.EndTimeUnixNs
 	}
 	return 0
 }
@@ -957,9 +959,9 @@ const file_signal_proto_rawDesc = "" +
 	"\vsignal_type\x18\x01 \x01(\tR\n" +
 	"signalType\x12\x19\n" +
 	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12 \n" +
-	"\ftime_unix_ms\x18\x03 \x01(\x03R\n" +
-	"timeUnixMs\x121\n" +
-	"\x15observed_time_unix_ms\x18\x04 \x01(\x03R\x12observedTimeUnixMs\x12\x19\n" +
+	"\ftime_unix_ns\x18\x03 \x01(\x03R\n" +
+	"timeUnixNs\x121\n" +
+	"\x15observed_time_unix_ns\x18\x04 \x01(\x03R\x12observedTimeUnixNs\x12\x19\n" +
 	"\btrace_id\x18\x05 \x01(\tR\atraceId\x12\x17\n" +
 	"\aspan_id\x18\x06 \x01(\tR\x06spanId\x12$\n" +
 	"\x0eparent_span_id\x18\a \x01(\tR\fparentSpanId\x12E\n" +
@@ -978,8 +980,8 @@ const file_signal_proto_rawDesc = "" +
 	"\fis_monotonic\x18\x10 \x01(\bR\visMonotonic\x12\x12\n" +
 	"\x04name\x18\x11 \x01(\tR\x04name\x12\x12\n" +
 	"\x04kind\x18\x12 \x01(\tR\x04kind\x12+\n" +
-	"\x12start_time_unix_ms\x18\x13 \x01(\x03R\x0fstartTimeUnixMs\x12'\n" +
-	"\x10end_time_unix_ms\x18\x14 \x01(\x03R\rendTimeUnixMs\x12\x1f\n" +
+	"\x12start_time_unix_ns\x18\x13 \x01(\x03R\x0fstartTimeUnixNs\x12'\n" +
+	"\x10end_time_unix_ns\x18\x14 \x01(\x03R\rendTimeUnixNs\x12\x1f\n" +
 	"\vstatus_code\x18\x15 \x01(\tR\n" +
 	"statusCode\x12%\n" +
 	"\x0estatus_message\x18\x16 \x01(\tR\rstatusMessage\x12B\n" +

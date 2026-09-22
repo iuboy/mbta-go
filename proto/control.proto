@@ -150,12 +150,12 @@ message Redirect {
 // --- 保活（仅 TCP binding；QUIC 用内置 keepalive）---
 
 message Ping {
-  int64 time_unix_ms = 1;
+  int64 time_unix_ns = 1;
   bytes nonce = 2;
 }
 
 message Pong {
-  int64 time_unix_ms = 1;
+  int64 time_unix_ns = 1;
   bytes nonce = 2;
   string status = 3;
 }

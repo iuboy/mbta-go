@@ -50,7 +50,7 @@ func main() {
 		Signals: []*core.SignalRecord{
 			{
 				SignalType:     "log",
-				TimeUnixMs:     time.Now().UnixMilli(),
+				TimeUnixNs:     time.Now().UnixNano(),
 				SeverityText:   "INFO",
 				SeverityNumber: 9,
 				Body:           "hello from mbta-go client example",

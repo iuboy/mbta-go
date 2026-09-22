@@ -217,7 +217,7 @@ func (c *CoreClient) handlePing(ctx context.Context, payload []byte) {
 	if err := core.Decode(payload, &ping); err != nil {
 		return
 	}
-	pong := &core.PongMsg{TimeUnixMs: ping.GetTimeUnixMs(), Nonce: ping.GetNonce(), Status: "ok"}
+	pong := &core.PongMsg{TimeUnixNs: ping.GetTimeUnixNs(), Nonce: ping.GetNonce(), Status: "ok"}
 	p, err := core.Encode(pong)
 	if err != nil {
 		return
@@ -238,7 +238,7 @@ func (c *CoreClient) HeartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ping := &core.PingMsg{TimeUnixMs: time.Now().UnixMilli()}
+			ping := &core.PingMsg{TimeUnixNs: time.Now().UnixNano()}
 			p, err := core.Encode(ping)
 			if err != nil {
 				continue

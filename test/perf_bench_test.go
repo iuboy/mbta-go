@@ -173,7 +173,7 @@ func perfBatchWire(t *testing.T, total, nSignals int) []byte {
 	for i := range signals {
 		signals[i] = &core.SignalRecord{
 			SignalType: core.SignalTypeLog,
-			TimeUnixMs: time.Now().UnixMilli(),
+			TimeUnixNs: time.Now().UnixNano(),
 			Body:       perfLogBody(bodySize),
 		}
 	}

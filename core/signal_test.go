@@ -175,7 +175,7 @@ func TestSignalRecordFields(t *testing.T) {
 		sig := &SignalRecord{
 			SignalType:     "log",
 			EventID:        eventID,
-			TimeUnixMs:     ts,
+			TimeUnixNs:     ts,
 			SeverityNumber: severity,
 			SeverityText:   "INFO",
 			Body:           body,
@@ -229,8 +229,8 @@ func TestSignalRecordFields(t *testing.T) {
 			ParentSpanID:    parentSpanID,
 			Name:            name,
 			Kind:            "client",
-			StartTimeUnixMs: int64(testutil.RandInt(1, 2_000_000_000)),
-			EndTimeUnixMs:   int64(testutil.RandInt(1, 2_000_000_000)),
+			StartTimeUnixNs: int64(testutil.RandInt(1, 2_000_000_000)),
+			EndTimeUnixNs:   int64(testutil.RandInt(1, 2_000_000_000)),
 			StatusCode:      "OK",
 		}
 
@@ -382,15 +382,15 @@ func TestSignalRecordTimestamps(t *testing.T) {
 	obs := ts + int64(testutil.RandInt(1, 100))
 	sig := &SignalRecord{
 		SignalType:     "log",
-		TimeUnixMs:     ts,
-		ObservedTimeMs: obs,
+		TimeUnixNs:     ts,
+		ObservedTimeNs: obs,
 	}
 
-	if sig.TimeUnixMs != ts {
-		t.Errorf("TimeUnixMs = %d, want %d", sig.TimeUnixMs, ts)
+	if sig.TimeUnixNs != ts {
+		t.Errorf("TimeUnixNs = %d, want %d", sig.TimeUnixNs, ts)
 	}
-	if sig.ObservedTimeMs != obs {
-		t.Errorf("ObservedTimeMs = %d, want %d", sig.ObservedTimeMs, obs)
+	if sig.ObservedTimeNs != obs {
+		t.Errorf("ObservedTimeNs = %d, want %d", sig.ObservedTimeNs, obs)
 	}
 }
 
