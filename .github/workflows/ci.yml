@@ -148,9 +148,10 @@ jobs:
     name: Vulnerability scan
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # govulncheck 对 stdlib crypto/tls 的调用链分析在 TLS 库中必然命中——
-    # 本库的职责就是在 TLS 上构建协议，非本库可修复的传递依赖漏洞不应阻塞 CI。
-    continue-on-error: true
+    # 硬门禁：stdlib 漏洞由 go.mod 的 go 指令钉住（当前 go1.26.9 已含全部
+    # 已披露修复），发现命中漏洞时升级该指令即可清零——扫描失败必须显式
+    # 处理而非静默放行。旧 continue-on-error（"TLS 库必然命中"）的理由
+    # 不成立，已移除。
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

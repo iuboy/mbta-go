@@ -1,6 +1,9 @@
 module github.com/iuboy/mbta-go
 
-go 1.26.5
+// go 1.26.9：stdlib 安全基线——GO-2026-6617（net/http HPACK 竞态）等 8 条
+// govulncheck stdlib 漏洞在 go1.26.9 修复；CI 以 go-version-file 取该版本，
+// 升级本指令即升级 CI 的 stdlib 扫描基线。与 pollux-go（go.work）保持一致。
+go 1.26.9
 
 require (
 	github.com/emmansun/gmsm v0.45.0

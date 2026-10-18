@@ -6,6 +6,7 @@
 
 ### 依赖更新与兼容适配
 
+- **Go 基线 go1.26.5→go1.26.9（stdlib 安全修复）**：清零 govulncheck 的 8 条 stdlib 漏洞（GO-2026-6617 net/http HPACK 竞态、GO-2026-6613/6612/6611/6607/6603 crypto/tls、GO-2026-6090 等，修复版最大交集 go1.26.9）；CI 以 `go-version-file: go.mod` 自动取新基线。**恢复 Vulnerability scan 硬门禁**（移除 continue-on-error——"TLS 库必然命中"的旧理由不成立：stdlib 漏洞由 go 指令钉住，升级即清零，扫描失败应显式处理而非静默放行）。
 - **直接依赖全量更新**：gmsm v0.44.1→v0.45.0、quic-go v0.61.0→v0.64.0、x/crypto v0.54.0→v0.58.0、x/sync v0.22.0→v0.24.0、cbor v2.9.2→v2.9.6、klauspost/compress v1.19.2→v1.20.3、pierrec/lz4 v4.1.28→v4.1.33、prometheus/client_golang v1.24.1→v1.25.0（client_model/common/procfs 随动）、x/net v0.57.0→v0.60.0、x/sys v0.47.0→v0.49.0。
 - **protobuf v1.36.11→v1.36.12**（prometheus/common v0.72.0 硬性要求，MVS 不可回调）：仍在握手互操作策略 pin 的 1.36 minor 内（patch 级，wire 序列化稳定）；CI `protoc-gen-go` pin 同步 v1.36.11→v1.36.12（插件版本写入生成文件头，drift 校验依赖两侧一致），corepb 已按 v1.36.12 重新生成验证逐字节一致。
 - **ntls TLCP ServerName 推导**（pollux-go tlcp 新增握手期校验「ServerName 与 InsecureSkipVerify 至少其一」的适配）：客户端未显式指定 ServerName 且未跳过校验时，从拨号地址 host 推导（与 crypto/tls 语义对齐），由证书 SAN 完成校验——存量「仅配 CAFile」的调用方无需改动即恢复可连。
