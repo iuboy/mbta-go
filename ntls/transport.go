@@ -121,13 +121,21 @@ func buildServerTLCP(cfg *ServerConfig) (*tlcp.Config, error) {
 	return tc, nil
 }
 
-func buildClientTLCP(cfg *ClientCredentials) (*tlcp.Config, error) {
+// buildClientTLCP 构建客户端 TLCP 配置。serverAddr 用于在未显式指定 ServerName
+// 且未跳过校验时推导校验名——与 crypto/tls 语义对齐（ServerName 为空时回退到
+// 拨号地址的 host）；pollux-go tlcp 在握手期硬性要求二者至少其一。
+func buildClientTLCP(cfg *ClientCredentials, serverAddr string) (*tlcp.Config, error) {
 	if cfg == nil {
 		return nil, core.NewError(core.ErrCodeCredential, "ntls credentials required")
 	}
 	tc := tlcp.NewConfig()
 	tc.ServerName = cfg.ServerName
 	tc.InsecureSkipVerify = cfg.InsecureSkipVerify
+	if tc.ServerName == "" && !tc.InsecureSkipVerify {
+		if host, _, err := net.SplitHostPort(serverAddr); err == nil && host != "" {
+			tc.ServerName = host
+		}
+	}
 	if cfg.InsecureSkipVerify {
 		slog.Warn("TLCP certificate verification is DISABLED - do not use in production")
 	}
@@ -283,7 +291,7 @@ func Dial(ctx context.Context, cfg *ClientConfig) (net.Conn, error) {
 			ch <- result{c, err}
 			return
 		}
-		tc, err := buildClientTLCP(cfg.Credentials)
+		tc, err := buildClientTLCP(cfg.Credentials, cfg.Server)
 		if err != nil {
 			ch <- result{nil, err}
 			return

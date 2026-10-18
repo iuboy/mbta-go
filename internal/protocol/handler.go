@@ -277,6 +277,17 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 	}
 }
 
+// helloNakCode 将 HELLO 结构校验失败映射为 NAK 错误码：可精确归因的码
+// （不支持 profile / 客户端 eph 非法）原样透传以便客户端定位，其余归一为
+// 通用 BadHandshakeMessage。
+func helloNakCode(err error) uint32 {
+	code := core.CodeBadHandshakeMessage
+	if core.CodeNumOf(err) == core.CodeUnsupportedProfile || core.CodeNumOf(err) == core.CodeHelloEphInvalid {
+		code = core.CodeNumOf(err)
+	}
+	return code
+}
+
 // handleHello 执行 1-RTT 握手（r3 §5.1）：
 // 解码校验 → token_proof 验证 → eph/ECDH → 派生 → HELLO_ACK。
 func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
@@ -287,11 +298,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	}
 	if err := core.ValidateHello(&hello); err != nil {
 		slog.Debug("HELLO validation failed", "error", err)
-		code := core.CodeBadHandshakeMessage
-		if core.CodeNumOf(err) == core.CodeUnsupportedProfile || core.CodeNumOf(err) == core.CodeHelloEphInvalid {
-			code = core.CodeNumOf(err)
-		}
-		h.sendNak(ctx, code, false, 0)
+		h.sendNak(ctx, helloNakCode(err), false, 0)
 		return err
 	}
 
@@ -324,7 +331,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	}
 	if verr := core.VerifyTokenProof(h.config.Auth, hello.GetProfile(), hello.GetAgentId(), thHello, hello.GetTokenProof()); verr != nil {
 		// 候选诊断字段：candidates 数量/首候选前缀直接区分「候选缺失
-		//（服务端未纳管该 token 类别）」与「候选在但证明不匹配」两类故障。
+		// （服务端未纳管该 token 类别）」与「候选在但证明不匹配」两类故障。
 		cands, _ := h.config.Auth.ResolveToken(hello.GetAgentId())
 		slog.Warn("token proof verification failed", "agent", core.SanitizeForLog(hello.GetAgentId()),
 			"candidates", len(cands), "first_prefix", func() string {
@@ -337,21 +344,9 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 		return nil                                      //nolint:nilerr // 握手失败不拆传输层（NAK 已回）
 	}
 
-	// ECDH + 密钥派生。
-	clientPub := hello.GetClientEph()
-	priv, _, gerr := core.GenerateEphemeral(hello.GetProfile())
-	if gerr != nil {
-		h.sendNak(ctx, core.CodeInternal, false, 0)
-		return gerr
-	}
-	zz, derr := core.DeriveZZ(hello.GetProfile(), priv, clientPub)
-	if derr != nil {
-		h.sendNak(ctx, core.CodeHelloEphInvalid, false, 0)
-		return derr
-	}
-	keys, kerr := core.DeriveSessionKeysWithCaps(hello.GetProfile(), zz, thHello, hello.GetTokenProof(), selected)
+	// ECDH + 密钥派生（失败即 NAK，见 deriveServerKeys）。
+	keys, serverEph, kerr := h.deriveServerKeys(ctx, hello.GetProfile(), hello.GetClientEph(), thHello, hello.GetTokenProof(), selected)
 	if kerr != nil {
-		h.sendNak(ctx, core.CodeInternal, false, 0)
 		return kerr
 	}
 	h.keys.Store(keys)
@@ -378,7 +373,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 			Batches: h.config.Policy.InitialCreditBatches,
 			Bytes:   h.config.Policy.InitialCreditBytes,
 		},
-		ServerEph:  ephPub(priv),
+		ServerEph:  serverEph,
 		ExpiryUnix: h.expiresAt.Load(),
 	}
 	thFull, terr := core.TranscriptFull(hello.GetProfile(), &hello, ack)
@@ -440,6 +435,30 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	}
 	h.metrics.AuthSuccess().Inc()
 	return nil
+}
+
+// deriveServerKeys 执行服务端侧 ECDH 与会话密钥派生（r3 §5.1）：
+// 生成服务端临时密钥 → 双侧 ECDH 共享密钥 → 按 profile 单点派生（含能力绑定的
+// split 布局与 dual_integrity MAC 密钥）。返回服务端临时公钥 wire 字节（HELLO_ACK
+// ServerEph 所需）。任一步失败即 NAK 对应错误码并返回错误，派生失败属握手致命——
+// 调用方直接中断握手流程。
+func (h *CoreHandler) deriveServerKeys(ctx context.Context, profile corepb.Profile, clientEph []byte, thHello []byte, tokenProof []byte, caps []string) (*core.SessionKeys, []byte, error) {
+	priv, _, err := core.GenerateEphemeral(profile)
+	if err != nil {
+		h.sendNak(ctx, core.CodeInternal, false, 0)
+		return nil, nil, err
+	}
+	zz, err := core.DeriveZZ(profile, priv, clientEph)
+	if err != nil {
+		h.sendNak(ctx, core.CodeHelloEphInvalid, false, 0)
+		return nil, nil, err
+	}
+	keys, err := core.DeriveSessionKeysWithCaps(profile, zz, thHello, tokenProof, caps)
+	if err != nil {
+		h.sendNak(ctx, core.CodeInternal, false, 0)
+		return nil, nil, err
+	}
+	return keys, ephPub(priv), nil
 }
 
 // ephPub 返回临时公钥 wire 字节（持有者自身）。

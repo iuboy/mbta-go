@@ -2,6 +2,15 @@
 
 本文件记录 mbta-go 的显著变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [Unreleased]
+
+### 依赖更新与兼容适配
+
+- **直接依赖全量更新**：gmsm v0.44.1→v0.45.0、quic-go v0.61.0→v0.64.0、x/crypto v0.54.0→v0.58.0、x/sync v0.22.0→v0.24.0、cbor v2.9.2→v2.9.6、klauspost/compress v1.19.2→v1.20.3、pierrec/lz4 v4.1.28→v4.1.33、prometheus/client_golang v1.24.1→v1.25.0（client_model/common/procfs 随动）、x/net v0.57.0→v0.60.0、x/sys v0.47.0→v0.49.0。
+- **protobuf v1.36.11→v1.36.12**（prometheus/common v0.72.0 硬性要求，MVS 不可回调）：仍在握手互操作策略 pin 的 1.36 minor 内（patch 级，wire 序列化稳定）；CI `protoc-gen-go` pin 同步 v1.36.11→v1.36.12（插件版本写入生成文件头，drift 校验依赖两侧一致），corepb 已按 v1.36.12 重新生成验证逐字节一致。
+- **ntls TLCP ServerName 推导**（pollux-go tlcp 新增握手期校验「ServerName 与 InsecureSkipVerify 至少其一」的适配）：客户端未显式指定 ServerName 且未跳过校验时，从拨号地址 host 推导（与 crypto/tls 语义对齐），由证书 SAN 完成校验——存量「仅配 CAFile」的调用方无需改动即恢复可连。
+- **lint 收敛**：handleHello 认知复杂度 33→达标（ECDH/密钥派生段抽取 `deriveServerKeys`、NAK 码映射抽取 `helloNakCode`，行为不变）；注释格式修正。
+
 ## [0.6.0] - 2026-08-22
 
 ### chore: 无用代码与文档清理（第七轮：r3 收尾后无引用面清扫）

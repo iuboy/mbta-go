@@ -117,7 +117,9 @@ jobs:
         # 版本必须 pin：插件把自身版本写进生成文件头（"protoc-gen-go vX.Y.Z"），
         # @latest 会随上游发版漂移，导致未改动 proto 时 diff 校验也失败（不可复现构建）。
         # 升级插件时须同步重新生成全部 corepb/*.pb.go。
-        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+        # v1.36.12：与 go.mod 的 protobuf 模块版本同步（prometheus/common v0.72.0
+        # 硬性要求 v1.36.12；仍在 pin 的 1.36 minor 内，符合握手互操作 pin-minor 策略）。
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
       - name: buf generate
         run: buf generate
       - name: Check generated code is up to date
