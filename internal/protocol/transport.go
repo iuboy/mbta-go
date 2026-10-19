@@ -1,95 +1,99 @@
-// Package protocol 承载 MBTA 协议状态机核心，与传输无关（core spec §10.2）。
-//
-// v1（QUIC）/ ntls（TCP+TLCP）/ tcp（TCP+TLS1.3）退化为薄 transport binding，
-// 仅实现 Transport 接口；协议逻辑（握手/envelope/投递/流控/ACK 派发）集中在 CoreHandler。
+// Package protocol 承载 MBTA 服务端/客户端的共享协议核心（r3 重设计）。
+// 仅依赖 core 与 Transport 接口，不感知 quic.Stream/net.Conn。
 package protocol
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/iuboy/mbta-go/core"
 )
 
-// MultiplexModel 描述 binding 的多路复用模型（core spec §10）。
-// CoreHandler 据此在两种模型下复用逻辑，不强行抹平并发模型差异。
+// MultiplexModel 描述 binding 的多路复用模型。
 type MultiplexModel int
 
 const (
-	// MultiplexQuicMultiStream：QUIC control stream + N 并发 data stream。
 	MultiplexQuicMultiStream MultiplexModel = iota
-	// MultiplexTCPSingleConn：单 TCP 连接按 ChannelID 帧多路复用。
 	MultiplexTCPSingleConn
 )
 
 // ErrDatagramUnsupported 由不支持不可靠通道的 binding（TCP 系列）返回。
-// CoreHandler 对 durability=lossy 的 signal 据此回退 reliable BATCH（core spec §11.4）。
 var ErrDatagramUnsupported = errors.New("protocol: unreliable datagram not supported by this transport")
 
 // Transport 抽象 QUIC stream 与 TCP conn 的最小公约，CoreHandler 仅依赖此接口。
 //
-// control/data 分流：v1/handler 与 ntls/handler 都有 control loop（HELLO/AUTH/PING/CLOSE）
-// 与 data loop（BATCH 并发处理）两个读路径。Transport 把这层差异吸收进 binding：
+// 帧路由：type 高位为通道域（core.IsControlType/IsDataType）。QUIC binding 以
+// stream 角色放置（control stream / data streams）；TCP binding 在单连接上按
+// type 高位分流到两个逻辑通道。写侧串行化由 binding 负责。
 //
-//   - QUIC binding：RecvControlFrame 从 control stream 读；RecvDataFrame 从 accept 的
-//     data stream 聚合读；SendFrame 按 ChannelID 写 control/data stream。
-//   - TCP binding：单 conn 读所有帧，按 type/ChannelID 分发到 control/data 逻辑通道；
-//     SendFrame 写单 conn（写锁串行化）。
-//
-// 写侧串行化（同 channel 帧不交错）由 binding 负责（传输职责）。
+// 连接策略（pre-auth 超时/认证后空闲超时）是 binding 内建职责，不漏进协议层。
 type Transport interface {
-	// RecvControlFrame 阻塞读下一控制帧（HELLO/AUTH/PING/CLOSE 等）。
-	// 已校验 magic/version/flags/length/CRC。
-	//
-	// 并发约定：CoreHandler 会启动独立 goroutine 分别循环调用 RecvControlFrame 与
-	// RecvDataFrame，实现 MUST 支持两者并发调用（或由调用方串行化）。
+	// RecvControlFrame 阻塞读下一控制帧。必须支持与 RecvDataFrame 并发调用。
 	RecvControlFrame(ctx context.Context) (core.Frame, error)
 
-	// RecvDataFrame 阻塞读下一数据帧（BATCH/DATAGRAM）。
-	// QUIC：聚合多 data stream；TCP：单 conn 按 type 分发。
-	// 并发约定同 RecvControlFrame：可与 RecvControlFrame 并发调用。
+	// RecvDataFrame 阻塞读下一数据帧（BATCH/DGRAM）。
+	// QUIC：多 data stream 聚合（乱序到达是常态——服务端去重为集合制窗口）。
 	RecvDataFrame(ctx context.Context) (core.Frame, error)
 
-	// SendFrame 写一帧，按 f.Header.ChannelID 路由到 control/data channel。
-	// binding 负责串行化（写锁）。
+	// SendFrame 写一帧（按帧 type 的通道域路由）。
 	SendFrame(ctx context.Context, f core.Frame) error
 
 	// SupportsDatagram 报告是否提供不可靠通道（QUIC=true，TCP 系列=false）。
 	SupportsDatagram() bool
 
-	// SendDatagram 走不可靠通道（QUIC DATAGRAM, RFC 9221）。
-	// 不支持的 binding 返回 ErrDatagramUnsupported。
+	// SendDatagram 走不可靠通道。不支持的 binding 返回 ErrDatagramUnsupported。
 	SendDatagram(ctx context.Context, payload []byte) error
 
-	// Multiplexing 报告多路复用模型，CoreHandler 据此选择并发策略分支。
+	// Multiplexing 报告多路复用模型。
 	Multiplexing() MultiplexModel
 
-	// Close 关闭传输。MUST 幂等（多次调用安全）。Close 后 Recv*/Send* 可返回错误。
+	// Close 关闭传输。MUST 幂等。
 	Close() error
+
+	// RemoteAddr 返回对端地址（已关闭时 nil 合法）。
+	RemoteAddr() net.Addr
 }
 
-// SendControlFrame 是 binding/control 写入的便捷构造：构造一个 control channel 帧并发送。
-// server 端所有应答（HELLO_ACK/AUTH_OK/AUTH_FAIL/ACK/NACK/WINDOW/THROTTLE/PONG/ERROR/CLOSE）
-// 都走 control channel（ChannelControl=0）。
-//
-// 安全校验：在构造帧前检查 payload 长度不超过 MaxPayloadSize 且可被 uint32 表示，
-// 避免 uint32 截断导致对端收到与实际 payload 不一致的 Length 字段（旧实现直接 uint32(len)
-// 会静默截断超长 payload）。
-func SendControlFrame(ctx context.Context, tr Transport, typ uint8, flags byte, payload []byte) error {
-	if int64(len(payload)) > int64(core.MaxPayloadSize) {
-		return core.NewError(core.NumProtocol, core.CodeFrameTooLarge,
-			fmt.Sprintf("control frame payload %d exceeds MaxPayloadSize %d", len(payload), core.MaxPayloadSize))
+// SendControlFrame 构造一个 control 域帧并发送（server 全部应答帧共用）。
+func SendControlFrame(ctx context.Context, tr Transport, typ uint8, payload []byte) error {
+	if uint64(len(payload)) > core.MaxFrameBytes {
+		return core.NewError(core.ErrCodeProtocolError,
+			fmt.Sprintf("control frame payload %d exceeds max %d", len(payload), core.MaxFrameBytes))
 	}
-	f := core.Frame{
-		Header: core.Header{
-			Version:   core.Version,
-			Flags:     flags | core.FlagControl,
-			Type:      typ,
-			ChannelID: core.ChannelControl,
-			Length:    uint32(len(payload)),
-		},
+	return tr.SendFrame(ctx, core.Frame{
+		Header:  core.Header{Type: typ},
 		Payload: payload,
-	}
-	return tr.SendFrame(ctx, f)
+	})
+}
+
+// --- 客户端传输（binding 提供）---
+
+// ClientTransport 是客户端侧的最小传输接口。
+type ClientTransport interface {
+	ReadFrame(ctx context.Context) (core.Frame, error)
+	WriteFrame(ctx context.Context, typ uint8, payload []byte) error
+	CloseConn() error
+}
+
+// ClientDatagramTransport 是客户端传输的可选不可靠通道接口（QUIC binding 实现；
+// TCP 系 binding 不实现，CoreClient.SendDatagram 自动降级可靠 BATCH 路径）。
+// SupportsDatagram 反映连接实际能力（QUIC 需两侧均启用 datagram 扩展）。
+type ClientDatagramTransport interface {
+	SupportsDatagram() bool
+	SendDatagram(ctx context.Context, payload []byte) error
+}
+
+// FrameLimitSetter 可选接口：客户端 transport 实现后，协议层在 HELLO_ACK 解析后
+// 调用 SetFrameLimit，把协商的 limits.max_frame_bytes 接入后续帧读取路径
+// （握手首帧仍用默认——控制消息有天然小上界）。
+type FrameLimitSetter interface {
+	SetFrameLimit(maxBytes uint64)
+}
+
+// AuthMarker 可选接口：transport 实现 MarkAuthed 后，协议层在握手完成后调用。
+// binding 据此把读超时从 pre-auth 短超时切换到认证后空闲超时（内建连接策略）。
+type AuthMarker interface {
+	MarkAuthed()
 }

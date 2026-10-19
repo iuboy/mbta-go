@@ -16,32 +16,26 @@ import (
 // wire 上传 raw 16 字节；map key / spool 文件名用文本编码（Crockford base32，26 字符），
 // 以最小化下游（文件系统）改动。
 //
-// [16]byte 可比、可作 map key，满足 ReplayCache / pendingAcks 的键需求。
+// [16]byte 可比、可作 map key，满足 ReplayCache / spool 的键需求。
 type ChunkID [16]byte
 
-// chunkEntropy 是进程级单调熵源，保证同毫秒内生成的 ChunkID 单调递增不碰撞。
-//
-// ulid.Monotonic 返回的 *MonotonicEntropy 明确「not safe for concurrent use」
-// （内部 bufio.Reader 非线程安全，并发调用会 panic: slice bounds out of range）。
-// 用 LockedMonotonicReader 包装以提供并发安全——NewChunkID 会在服务端
-// processBatch、handleHello，客户端 SendBatch、heartbeat 等多路径被并发调用。
+// chunkEntropy 是进程级共享的单调熵源：跨调用保持 ms/entropy 状态，同一毫秒内
+// 生成的 ULID 严格递增（毫秒内有序对 spool 文件名排序等场景有意义）。
+// LockedMonotonicReader 保证并发安全。
+// 不能在 NewChunkID 内每次新建 Monotonic 实例——新实例无历史状态，毫秒内单调性
+// 完全失效，且每次调用额外分配一个 4KB bufio 缓冲（热路径：每个 batch 一次）。
 var chunkEntropy = &ulid.LockedMonotonicReader{MonotonicReader: ulid.Monotonic(rand.Reader, 0)}
 
 // NewChunkID 生成一个新的 ULID ChunkID（并发安全）。
-//
-// ulid.MustNew 在熵源失败或单调计数器溢出时会 panic 崩溃整个进程，
-// 这对运行中的服务不可接受。此处用 recover 兜底：若 MustNew panic，
-// 降级为纯随机 ChunkID（仍全局唯一，仅丧失同毫秒单调性），绝不崩溃进程。
+// MustNew panic（熵源失败/单调溢出）时降级为随机 ChunkID，保证进程不崩溃。
 func NewChunkID() ChunkID {
 	var u ulid.ULID
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				// 熵源失败/单调溢出降级：保留 ULID 时间戳结构（前 6 字节），
-				// 后 10 字节填充随机数保证唯一性。旧实现将全部 16 字节填随机数，
-				// 前 6 字节不是标准 ULID 时间戳 → Timestamp() 返回错误且丧失时序可排序性。
+				// 降级：保留前 6 字节 ULID 时间戳，后 10 字节填随机数。
 				slog.Warn("ulid generation panicked, falling back to random entropy", "panic", r)
-				now := uint64(time.Now().UnixMilli())
+				now := uint64(time.Now().UnixNano())
 				u[0] = byte(now >> 40)
 				u[1] = byte(now >> 32)
 				u[2] = byte(now >> 24)
@@ -49,14 +43,9 @@ func NewChunkID() ChunkID {
 				u[4] = byte(now >> 8)
 				u[5] = byte(now)
 				if _, err := rand.Read(u[6:]); err != nil {
-					// crypto/rand 彻底不可用：用时间戳 + 进程启动偏移填充剩余字节，
-					// 保证有效熵（旧实现 i%8*8 使高 8 字节与低 8 字节重复，仅 8 字节熵，
-					// 同纳秒内会产生相同 ChunkID，抗重放失效）。
+					// crypto/rand 不可用：用纳秒时间戳及其按位取反填充剩余字节。
 					slog.Error("crypto/rand unavailable, using weak timestamp-based ChunkID", "error", err)
 					nowNs := uint64(time.Now().UnixNano())
-					// 低 8 字节：纳秒时间戳；高 8 字节：时间戳按位取反。
-					// 同纳秒两次调用结果相同（此为极端降级路径，crypto/rand 不可用），
-					// 但高低 8 字节互补保证 16 字节整体有有效熵。
 					binary.LittleEndian.PutUint64(u[6:14], nowNs)
 					binary.LittleEndian.PutUint64(u[8:16], ^nowNs)
 				}

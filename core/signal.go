@@ -81,11 +81,6 @@ var validSignalTypes = map[string]bool{
 	SignalTypeSpan: true, SignalTypeProfile: true,
 }
 
-// Deprecated: "metric" 不在 spec §6.2 的闭合枚举内（{log,gauge,counter,histogram,
-// summary,span,profile}），使用 SignalTypeGauge/SignalTypeCounter 等具体类型。
-// 保留仅为过渡；Validate 会拒绝该值。
-const SignalTypeMetric = "metric"
-
 // SignalBatch 是 BATCH payload 的规范结构，对齐协议文档 §6。
 type SignalBatch struct {
 	SchemaURL string          `json:"schema_url"`
@@ -105,15 +100,15 @@ const (
 // Validate 校验 SignalBatch 必填字段。
 func (b *SignalBatch) Validate() error {
 	if len(b.Signals) == 0 {
-		return NewError(NumValidation, CodeValidation, "signals must not be empty")
+		return NewError(ErrCodeBatchInvalid, "signals must not be empty")
 	}
 	// Resource attributes 同样受条目数/key 长度约束，使用独立前缀避免 signal[-1] 错误消息。
-	if err := validateAttrsMap("resource.attributes", b.Resource.Attributes); err != nil {
+	if err := validateAttrsMap("", "resource.attributes", b.Resource.Attributes); err != nil {
 		return err
 	}
 	for i, s := range b.Signals {
 		if s == nil {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: must not be null", i))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: must not be null", i))
 		}
 		if err := validateSignal(i, s); err != nil {
 			return err
@@ -138,59 +133,54 @@ func validateSignal(i int, s *SignalRecord) error {
 // 以及各 signal_type 的类型特定必填字段、合法枚举值（severity/temporality/kind）。
 func validateSignalType(i int, s *SignalRecord) error {
 	if s.SignalType == "" {
-		return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: signal_type is required", i))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: signal_type is required", i))
 	}
 	if !validSignalTypes[s.SignalType] {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("signal[%d]: invalid signal_type %q", i, s.SignalType))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: invalid signal_type %q", i, s.SignalType))
 	}
 	// SeverityNumber 必须落在 OTel 规范范围（1-24），0 表示未设置（OK）。
 	// 超出范围的值会破坏下游 Jaeger/Loki 的级别映射。
 	if s.SeverityNumber < 0 || s.SeverityNumber > 24 {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("signal[%d]: severity_number %d out of valid range [0,24]", i, s.SeverityNumber))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: severity_number %d out of valid range [0,24]", i, s.SeverityNumber))
 	}
 	// Temporality 非空时必须为合法枚举值。
 	if s.Temporality != "" && !validTemporalities[s.Temporality] {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("signal[%d]: invalid temporality %q (expected delta or cumulative)", i, s.Temporality))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: invalid temporality %q (expected delta or cumulative)", i, s.Temporality))
 	}
 	// Span Kind 非空时必须为合法枚举值。Kind 是 OTel SpanKind 的映射，
 	// 仅对 SignalTypeSpan 有意义——非 Span 类型的 Kind 字段语义未定义，
 	// 故仅校验 Span 类型（避免将未来非 Span 扩展的合法值误拒）。
 	if s.SignalType == SignalTypeSpan && s.Kind != "" && !validSpanKinds[s.Kind] {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("signal[%d]: invalid span kind %q", i, s.Kind))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: invalid span kind %q", i, s.Kind))
 	}
 	switch s.SignalType {
 	case SignalTypeGauge, SignalTypeCounter, SignalTypeHistogram, SignalTypeSummary:
 		if s.MetricName == "" {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
 		}
 		// Histogram 必须携带 ExpHistogram 载荷（对标 Profile 的 Profile 必填校验）。
 		if s.SignalType == SignalTypeHistogram && s.ExpHistogram == nil {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("signal[%d]: exp_histogram is required for histogram type", i))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: exp_histogram is required for histogram type", i))
 		}
 	case SignalTypeSpan:
 		if s.Name == "" {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: name is required for span type", i))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: name is required for span type", i))
 		}
 		if s.TraceID == "" {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: trace_id is required for span type", i))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: trace_id is required for span type", i))
 		}
 		// W3C Trace Context：span 必须同时具备 trace_id 和 span_id 才构成合法 span。
 		// validateHexID 对空串放行（视为「不参与 trace」），故此处对 span 类型显式要求非空。
 		if s.SpanID == "" {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: span_id is required for span type", i))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: span_id is required for span type", i))
 		}
 	case SignalTypeLog:
 		if s.Body == nil {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: body is required for log type", i))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: body is required for log type", i))
 		}
 	case SignalTypeProfile:
 		if s.Profile == nil {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: profile payload is required for profile type", i))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: profile payload is required for profile type", i))
 		}
 	}
 	return nil
@@ -224,73 +214,49 @@ func validateSignalFieldLengths(i int, s *SignalRecord) error {
 			continue
 		}
 		if err := validateTextField(f.name, f.val); err != nil {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
 		}
 	}
-	if err := validateSignalAttrs(i, "attributes", s.Attributes); err != nil {
+	sigPrefix := fmt.Sprintf("signal[%d]: ", i)
+	if err := validateAttrsMap(sigPrefix, "attributes", s.Attributes); err != nil {
 		return err
 	}
-	if err := validateMetricFields(i, s.MetricFields); err != nil {
+	if err := validateMetricFields(sigPrefix, s.MetricFields); err != nil {
 		return err
 	}
 	return nil
 }
 
-// validateAttrsMap 校验 resource/scope 等非 signal 级别的 attributes map。
-// 与 validateSignalAttrs 的区别：不使用 signal 索引前缀，直接使用字段名定位。
-func validateAttrsMap(fieldName string, attrs map[string]any) error {
+// validateAttrsMap 校验 attributes map 的条目数上限 + key 合法性（长度 + 严格控制字符）。
+// prefix 用于错误消息定位（如 "resource.attributes" 或 "signal[3]: attributes"）。
+// value 为 any 类型不做递归校验（嵌套深度与内容类型由 codec 层协议约束保证）。
+func validateAttrsMap(prefix, fieldName string, attrs map[string]any) error {
 	if len(attrs) > MaxSignalAttrs {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("%s exceeds max entries %d (got %d)", fieldName, MaxSignalAttrs, len(attrs)))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%s%s exceeds max entries %d (got %d)", prefix, fieldName, MaxSignalAttrs, len(attrs)))
 	}
 	for k := range attrs {
 		if len(k) > MaxSignalAttrKeyLen {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("%s key %q exceeds max length %d", fieldName, k, MaxSignalAttrKeyLen))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%s%s key %q exceeds max length %d", prefix, fieldName, k, MaxSignalAttrKeyLen))
 		}
 		// attribute key 出现在日志/metrics label 中，使用严格控制字符校验防注入。
 		if hasStrictControlChars(k) {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("%s key contains control characters", fieldName))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%s%s key contains control characters", prefix, fieldName))
 		}
 	}
 	return nil
 }
 
-// validateSignalAttrs 校验 signal 级别的 attributes map：条目数上限 + key 长度/控制字符。
-// value 为 any 类型不做递归校验（嵌套深度与内容类型由 codec 层协议约束保证）。
-func validateSignalAttrs(i int, fieldName string, attrs map[string]any) error {
-	if len(attrs) > MaxSignalAttrs {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("signal[%d]: %s exceeds max entries %d (got %d)", i, fieldName, MaxSignalAttrs, len(attrs)))
-	}
-	for k := range attrs {
-		if len(k) > MaxSignalAttrKeyLen {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("signal[%d]: %s key %q exceeds max length %d", i, fieldName, k, MaxSignalAttrKeyLen))
-		}
-		if hasStrictControlChars(k) {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("signal[%d]: %s key contains control characters", i, fieldName))
-		}
-	}
-	return nil
-}
-
-// validateMetricFields 校验 metric_fields map 的条目数上限 + key 合法性（长度 + 严格控制字符）。
-func validateMetricFields(i int, fields map[string]float64) error {
+// validateMetricFields 校验 metric_fields map：与 validateAttrsMap 同构，仅 map 值类型不同。
+func validateMetricFields(prefix string, fields map[string]float64) error {
 	if len(fields) > MaxSignalAttrs {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("signal[%d]: metric_fields exceeds max entries %d (got %d)", i, MaxSignalAttrs, len(fields)))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%smetric_fields exceeds max entries %d (got %d)", prefix, MaxSignalAttrs, len(fields)))
 	}
 	for k := range fields {
 		if len(k) > MaxSignalAttrKeyLen {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("signal[%d]: metric_fields key %q exceeds max length %d", i, k, MaxSignalAttrKeyLen))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%smetric_fields key %q exceeds max length %d", prefix, k, MaxSignalAttrKeyLen))
 		}
 		if hasStrictControlChars(k) {
-			return NewError(NumValidation, CodeValidation,
-				fmt.Sprintf("signal[%d]: metric_fields key contains control characters", i))
+			return NewError(ErrCodeBatchInvalid, prefix+"metric_fields key contains control characters")
 		}
 	}
 	return nil
@@ -311,17 +277,16 @@ func validateSignalTraceContext(i int, s *SignalRecord) error {
 	}
 	for _, id := range hexIDs {
 		if err := validateHexID(id.name, id.val, id.wantBytes); err != nil {
-			return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
 		}
 	}
 	// trace-flags 是 W3C traceparent 的 1 字节字段（仅低 8 位有效）。
 	if s.TraceFlags > 0xff {
-		return NewError(NumValidation, CodeValidation,
-			fmt.Sprintf("signal[%d]: trace_flags exceeds 8-bit W3C range (0x%x)", i, s.TraceFlags))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: trace_flags exceeds 8-bit W3C range (0x%x)", i, s.TraceFlags))
 	}
 	// tracestate 为有序键值对（≤ 32 成员）。详见 validation.validateTraceState。
 	if err := validateTraceState(s.TraceState); err != nil {
-		return NewError(NumValidation, CodeValidation, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
+		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: %s", i, err.Error()))
 	}
 	return nil
 }
@@ -342,8 +307,8 @@ type Scope struct {
 type SignalRecord struct {
 	SignalType     string         `json:"signal_type"` // 必填，禁止空字符串
 	EventID        string         `json:"event_id,omitempty"`
-	TimeUnixMs     int64          `json:"time_unix_ms"`
-	ObservedTimeMs int64          `json:"observed_time_unix_ms,omitempty"`
+	TimeUnixNs     int64          `json:"time_unix_ns"`
+	ObservedTimeNs int64          `json:"observed_time_unix_ns,omitempty"`
 	TraceID        string         `json:"trace_id,omitempty"`
 	SpanID         string         `json:"span_id,omitempty"`
 	ParentSpanID   string         `json:"parent_span_id,omitempty"`
@@ -360,8 +325,8 @@ type SignalRecord struct {
 	// Span 字段
 	Name            string `json:"name,omitempty"`
 	Kind            string `json:"kind,omitempty"`
-	StartTimeUnixMs int64  `json:"start_time_unix_ms,omitempty"`
-	EndTimeUnixMs   int64  `json:"end_time_unix_ms,omitempty"`
+	StartTimeUnixNs int64  `json:"start_time_unix_ns,omitempty"`
+	EndTimeUnixNs   int64  `json:"end_time_unix_ns,omitempty"`
 	StatusCode      string `json:"status_code,omitempty"`
 	StatusMessage   string `json:"status_message,omitempty"`
 	// W3C Trace Context 字段（capability w3c_trace_context，core spec §6.2.2）。

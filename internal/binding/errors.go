@@ -3,4 +3,4 @@
 package binding
 
 // DefaultMaxConcurrentConns 是未配置时的并发连接上限（H-3）。
-const DefaultMaxConcurrentConns = 10000
+// DefaultMaxConcurrentConns 移至 server.go

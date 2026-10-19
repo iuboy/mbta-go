@@ -52,25 +52,20 @@ type Metrics interface {
 
 	// 批次投递
 	BatchesSent() Counter
-	BatchesAcked() Counter
-	BatchesNacked() Counter
-	Throttled() Counter
-	PartialAck() Counter
 
 	// 重放保护
-	ReplayCacheHits() Counter
-	ReplayCacheEvictions() Counter
 
 	// 安全失败
 	HMACFailures() Counter
 	DecryptFailures() Counter
 
-	// 流控窗口
-	WindowCurrentBatches() Gauge
-	WindowCurrentEvents() Gauge
-	WindowCurrentBytes() Gauge
+	// sink 投递失败（BatchHandler 返回错误或 panic 时递增）。
+	// ACK_MODE_ACCEPTED 已发但 sink 持久化失败=潜在数据丢失。
+	SinkFailures() Counter
 
-	ThrottleSeconds() Counter
+	// 流控窗口
+	CreditsOutstanding() Gauge
+	SinkQueueDepth() Gauge
 
 	// 关键 SLI 直方图
 	BatchLatency() Histogram    // SendBatch → ACK latency
@@ -89,56 +84,36 @@ type MBTAMetrics struct {
 	authSuccessTotal       prometheus.Counter
 	authFailureTotal       prometheus.Counter
 
-	batchesSentTotal   prometheus.Counter
-	batchesAckedTotal  prometheus.Counter
-	batchesNackedTotal prometheus.Counter
-	throttledTotal     prometheus.Counter
-	partialAckTotal    prometheus.Counter
-
-	replayCacheHitsTotal prometheus.Counter
-
-	replayCacheEvictionsTotal prometheus.Counter
+	batchesSentTotal prometheus.Counter
 
 	hmacFailuresTotal    prometheus.Counter
 	decryptFailuresTotal prometheus.Counter
-
-	windowCurrentBatchesGauge prometheus.Gauge
-	windowCurrentEventsGauge  prometheus.Gauge
-	windowCurrentBytesGauge   prometheus.Gauge
-
-	throttleSecondsTotal prometheus.Counter
+	sinkFailuresTotal    prometheus.Counter
 
 	// Key SLI histograms
-	batchLatencySeconds   prometheus.Histogram // SendBatch → ACK latency
-	batchSizeEventsHist   prometheus.Histogram // events per batch distribution
-	batchSizeBytesHist    prometheus.Histogram // bytes per batch distribution
-	connectionDurationSec prometheus.Histogram // connection lifetime
+	batchLatencySeconds     prometheus.Histogram // SendBatch → ACK latency
+	batchSizeEventsHist     prometheus.Histogram // events per batch distribution
+	creditsOutstandingGauge prometheus.Gauge     // 当前 outstanding 批数（模型 B 服务端视图）
+	sinkQueueDepthGauge     prometheus.Gauge     // sink 异步队列当前深度
+	batchSizeBytesHist      prometheus.Histogram // bytes per batch distribution
+	connectionDurationSec   prometheus.Histogram // connection lifetime
 }
 
 // 接口实现：MBTAMetrics 满足 Metrics。每个方法返回底层 prometheus 指标
 // （prometheus.Gauge/Counter/Histogram 已满足对应的最小接口）。
 // Counter 类方法统一返回 guardedCounter，防御负值 Add panic。
 
-func (m *MBTAMetrics) ConnectionsActive() Gauge { return m.connectionsActiveGauge }
-func (m *MBTAMetrics) AuthSuccess() Counter     { return guardedCounter{m.authSuccessTotal} }
-func (m *MBTAMetrics) AuthFailure() Counter     { return guardedCounter{m.authFailureTotal} }
-func (m *MBTAMetrics) BatchesSent() Counter     { return guardedCounter{m.batchesSentTotal} }
-func (m *MBTAMetrics) BatchesAcked() Counter    { return guardedCounter{m.batchesAckedTotal} }
-func (m *MBTAMetrics) BatchesNacked() Counter   { return guardedCounter{m.batchesNackedTotal} }
-func (m *MBTAMetrics) Throttled() Counter       { return guardedCounter{m.throttledTotal} }
-func (m *MBTAMetrics) PartialAck() Counter      { return guardedCounter{m.partialAckTotal} }
-func (m *MBTAMetrics) ReplayCacheHits() Counter { return guardedCounter{m.replayCacheHitsTotal} }
-func (m *MBTAMetrics) ReplayCacheEvictions() Counter {
-	return guardedCounter{m.replayCacheEvictionsTotal}
-}
+func (m *MBTAMetrics) ConnectionsActive() Gauge      { return m.connectionsActiveGauge }
+func (m *MBTAMetrics) AuthSuccess() Counter          { return guardedCounter{m.authSuccessTotal} }
+func (m *MBTAMetrics) AuthFailure() Counter          { return guardedCounter{m.authFailureTotal} }
+func (m *MBTAMetrics) BatchesSent() Counter          { return guardedCounter{m.batchesSentTotal} }
 func (m *MBTAMetrics) HMACFailures() Counter         { return guardedCounter{m.hmacFailuresTotal} }
 func (m *MBTAMetrics) DecryptFailures() Counter      { return guardedCounter{m.decryptFailuresTotal} }
-func (m *MBTAMetrics) WindowCurrentBatches() Gauge   { return m.windowCurrentBatchesGauge }
-func (m *MBTAMetrics) WindowCurrentEvents() Gauge    { return m.windowCurrentEventsGauge }
-func (m *MBTAMetrics) WindowCurrentBytes() Gauge     { return m.windowCurrentBytesGauge }
-func (m *MBTAMetrics) ThrottleSeconds() Counter      { return guardedCounter{m.throttleSecondsTotal} }
+func (m *MBTAMetrics) SinkFailures() Counter         { return guardedCounter{m.sinkFailuresTotal} }
 func (m *MBTAMetrics) BatchLatency() Histogram       { return m.batchLatencySeconds }
 func (m *MBTAMetrics) BatchSizeEvents() Histogram    { return m.batchSizeEventsHist }
+func (m *MBTAMetrics) CreditsOutstanding() Gauge     { return m.creditsOutstandingGauge }
+func (m *MBTAMetrics) SinkQueueDepth() Gauge         { return m.sinkQueueDepthGauge }
 func (m *MBTAMetrics) BatchSizeBytes() Histogram     { return m.batchSizeBytesHist }
 func (m *MBTAMetrics) ConnectionDuration() Histogram { return m.connectionDurationSec }
 
@@ -171,31 +146,6 @@ func New(reg prometheus.Registerer) *MBTAMetrics {
 			Name:      "batches_sent_total",
 			Help:      "Total number of batches sent by agents",
 		}),
-		batchesAckedTotal: newCounter(reg, prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "batches_acked_total",
-			Help:      "Total number of batches acknowledged",
-		}),
-		batchesNackedTotal: newCounter(reg, prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "batches_nacked_total",
-			Help:      "Total number of batches rejected (NACK)",
-		}),
-		throttledTotal: newCounter(reg, prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "throttled_total",
-			Help:      "Total number of THROTTLE frames sent to clients",
-		}),
-		partialAckTotal: newCounter(reg, prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "partial_ack_total",
-			Help:      "Total number of partial acknowledgements",
-		}),
-		replayCacheHitsTotal: newCounter(reg, prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "replay_cache_hits_total",
-			Help:      "Total number of replay cache duplicate detections",
-		}),
 		hmacFailuresTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "hmac_failures_total",
@@ -206,31 +156,26 @@ func New(reg prometheus.Registerer) *MBTAMetrics {
 			Name:      "decrypt_failures_total",
 			Help:      "Total number of decryption failures",
 		}),
-		windowCurrentBatchesGauge: newGauge(reg, prometheus.GaugeOpts{
+		sinkFailuresTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
-			Name:      "window_current_batches",
-			Help:      "Current inflight batches against the flow-control window",
-		}),
-		windowCurrentEventsGauge: newGauge(reg, prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "window_current_events",
-			Help:      "Current inflight events against the flow-control window",
-		}),
-		windowCurrentBytesGauge: newGauge(reg, prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "window_current_bytes",
-			Help:      "Current inflight bytes against the flow-control window",
-		}),
-		throttleSecondsTotal: newCounter(reg, prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "throttle_seconds_total",
-			Help:      "Total seconds the client has been throttled",
+			Name:      "sink_failures_total",
+			Help:      "Total sink delivery failures (handler error or panic after terminal result)",
 		}),
 		batchLatencySeconds: newHistogram(reg, prometheus.HistogramOpts{
 			Namespace: namespace,
 			Name:      "batch_latency_seconds",
 			Help:      "Latency from SendBatch to ACK in seconds",
 			Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10},
+		}),
+		creditsOutstandingGauge: newGauge(reg, prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "credits_outstanding",
+			Help:      "Current outstanding credit batches (granted minus recovered)",
+		}),
+		sinkQueueDepthGauge: newGauge(reg, prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "sink_queue_depth",
+			Help:      "Current sink async queue depth (tasks)",
 		}),
 		batchSizeEventsHist: newHistogram(reg, prometheus.HistogramOpts{
 			Namespace: namespace,
@@ -250,11 +195,6 @@ func New(reg prometheus.Registerer) *MBTAMetrics {
 			Help:      "Connection lifetime in seconds",
 			Buckets:   []float64{60, 300, 900, 1800, 3600, 21600, 43200, 86400},
 		}),
-		replayCacheEvictionsTotal: newCounter(reg, prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "replay_cache_evictions_total",
-			Help:      "Total number of replay cache evictions",
-		}),
 	}
 
 	return m
@@ -268,19 +208,13 @@ func (NoOpMetrics) ConnectionsActive() Gauge      { return noopGauge{} }
 func (NoOpMetrics) AuthSuccess() Counter          { return noopCounter{} }
 func (NoOpMetrics) AuthFailure() Counter          { return noopCounter{} }
 func (NoOpMetrics) BatchesSent() Counter          { return noopCounter{} }
-func (NoOpMetrics) BatchesAcked() Counter         { return noopCounter{} }
-func (NoOpMetrics) BatchesNacked() Counter        { return noopCounter{} }
-func (NoOpMetrics) Throttled() Counter            { return noopCounter{} }
-func (NoOpMetrics) PartialAck() Counter           { return noopCounter{} }
-func (NoOpMetrics) ReplayCacheHits() Counter      { return noopCounter{} }
-func (NoOpMetrics) ReplayCacheEvictions() Counter { return noopCounter{} }
 func (NoOpMetrics) HMACFailures() Counter         { return noopCounter{} }
 func (NoOpMetrics) DecryptFailures() Counter      { return noopCounter{} }
-func (NoOpMetrics) WindowCurrentBatches() Gauge   { return noopGauge{} }
-func (NoOpMetrics) WindowCurrentEvents() Gauge    { return noopGauge{} }
-func (NoOpMetrics) WindowCurrentBytes() Gauge     { return noopGauge{} }
-func (NoOpMetrics) ThrottleSeconds() Counter      { return noopCounter{} }
+func (NoOpMetrics) SinkFailures() Counter         { return noopCounter{} }
 func (NoOpMetrics) BatchLatency() Histogram       { return noopHistogram{} }
+func (NoOpMetrics) CreditsOutstanding() Gauge     { return noopGauge{} }
+func (NoOpMetrics) ResultsByLevel(string) Counter { return noopCounter{} }
+func (NoOpMetrics) SinkQueueDepth() Gauge         { return noopGauge{} }
 func (NoOpMetrics) BatchSizeEvents() Histogram    { return noopHistogram{} }
 func (NoOpMetrics) BatchSizeBytes() Histogram     { return noopHistogram{} }
 func (NoOpMetrics) ConnectionDuration() Histogram { return noopHistogram{} }
@@ -301,11 +235,7 @@ type noopHistogram struct{}
 
 func (noopHistogram) Observe(float64) {}
 
-// guardedCounter 包装 prometheus.Counter，防御负值 Add 导致的进程 panic。
-//
-// prometheus.Counter.Add 在入参为负时直接 panic 崩溃进程（Go client 设计约束）。
-// 本包装在 Add 前检查：负值安全丢弃并 warn 日志，保证进程存活。
-// Inc/Desc/Write/Collect/Describe 直接委托底层 Counter，零额外开销。
+// guardedCounter 包装 prometheus.Counter，丢弃负值 Add（避免 Go client panic）。
 type guardedCounter struct {
 	c prometheus.Counter
 }
@@ -330,11 +260,7 @@ var (
 	_ Counter            = guardedCounter{}
 )
 
-// registerOrExisting 尝试注册 collector；若已注册（重复调用 New），返回已有 collector 而非 panic。
-//
-// 对 ExistingCollector 用 type-switch 兜底而非裸类型断言：若同名指标被注册为不同类型
-// （跨包冲突），are.ExistingCollector.(T) 会 panic 崩溃进程。此处降级为返回新 collector
-// （不再注册）+ warn 日志，保证进程存活。
+// registerOrExisting 注册 collector；已注册（重复 New）时返回已有 collector，跨包类型冲突时降级返回新 collector（避免 panic）。
 func registerOrExisting[T prometheus.Collector](reg prometheus.Registerer, c T) T {
 	if err := reg.Register(c); err != nil {
 		var are prometheus.AlreadyRegisteredError

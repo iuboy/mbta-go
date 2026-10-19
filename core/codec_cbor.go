@@ -26,7 +26,7 @@ type cborCodec struct{}
 var cborEncMode cbor.EncMode
 
 func init() {
-	// CanonicalEncOptions 返回合法选项，EncMode 仅在选项非法时报错；此处选项合法。
+	// CanonicalEncOptions 返回合法选项，EncMode 不会报错（panic 为防御）。
 	mode, err := cbor.CanonicalEncOptions().EncMode()
 	if err != nil {
 		panic("cbor: failed to build canonical EncMode: " + err.Error())
@@ -40,7 +40,7 @@ func (cborCodec) Codec() corepb.Codec { return corepb.Codec_CODEC_CBOR }
 func (cborCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 	out, err := cborEncMode.Marshal(sb)
 	if err != nil {
-		return nil, WrapError(NumValidation, CodeValidation, "marshal signal batch (cbor)", err)
+		return nil, WrapError(ErrCodeBatchInvalid, "marshal signal batch (cbor)", err)
 	}
 	return out, nil
 }
@@ -48,7 +48,7 @@ func (cborCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 func (cborCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	var sb SignalBatch
 	if err := cbor.Unmarshal(data, &sb); err != nil {
-		return nil, WrapError(NumValidation, CodeValidation, "unmarshal signal batch (cbor)", err)
+		return nil, WrapError(ErrCodeBatchInvalid, "unmarshal signal batch (cbor)", err)
 	}
 	return &sb, nil
 }

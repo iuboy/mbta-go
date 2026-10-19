@@ -3,10 +3,14 @@ package core
 import (
 	"strings"
 	"testing"
+
+	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/iuboy/mbta-go/internal/testutil"
 )
 
 // TestSignalBatchValidate tests the SignalBatch.Validate() method.
 func TestSignalBatchValidate(t *testing.T) {
+	schemaURL := "https://" + testutil.RandString(10) + ".com/schema"
 	tests := []struct {
 		name    string
 		batch   SignalBatch
@@ -16,9 +20,9 @@ func TestSignalBatchValidate(t *testing.T) {
 		{
 			name: "valid SignalBatch",
 			batch: SignalBatch{
-				SchemaURL: "https://example.com/schema",
+				SchemaURL: schemaURL,
 				Signals: []*SignalRecord{
-					{SignalType: "log", Body: "hello"},
+					{SignalType: "log", Body: testutil.RandPayloadString(8)},
 				},
 			},
 			wantErr: false,
@@ -26,7 +30,7 @@ func TestSignalBatchValidate(t *testing.T) {
 		{
 			name: "empty signals",
 			batch: SignalBatch{
-				SchemaURL: "https://example.com/schema",
+				SchemaURL: schemaURL,
 				Signals:   []*SignalRecord{},
 			},
 			wantErr: true,
@@ -35,7 +39,7 @@ func TestSignalBatchValidate(t *testing.T) {
 		{
 			name: "nil signals",
 			batch: SignalBatch{
-				SchemaURL: "https://example.com/schema",
+				SchemaURL: schemaURL,
 				Signals:   nil,
 			},
 			wantErr: true,
@@ -44,7 +48,7 @@ func TestSignalBatchValidate(t *testing.T) {
 		{
 			name: "signal with empty signal_type",
 			batch: SignalBatch{
-				SchemaURL: "https://example.com/schema",
+				SchemaURL: schemaURL,
 				Signals: []*SignalRecord{
 					{SignalType: ""},
 				},
@@ -55,11 +59,11 @@ func TestSignalBatchValidate(t *testing.T) {
 		{
 			name: "multiple signals all valid",
 			batch: SignalBatch{
-				SchemaURL: "https://example.com/schema",
+				SchemaURL: schemaURL,
 				Signals: []*SignalRecord{
-					{SignalType: "log", Body: "msg"},
-					{SignalType: "counter", MetricName: "req_total"},
-					{SignalType: "span", Name: "GET /api", TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef"},
+					{SignalType: "log", Body: testutil.RandPayloadString(6)},
+					{SignalType: "counter", MetricName: testutil.RandString(10)},
+					{SignalType: "span", Name: testutil.RandString(12), TraceID: testutil.RandTraceID(), SpanID: testutil.RandSpanID()},
 				},
 			},
 			wantErr: false,
@@ -67,9 +71,9 @@ func TestSignalBatchValidate(t *testing.T) {
 		{
 			name: "one signal with empty type among valid ones",
 			batch: SignalBatch{
-				SchemaURL: "https://example.com/schema",
+				SchemaURL: schemaURL,
 				Signals: []*SignalRecord{
-					{SignalType: "log", Body: "msg"},
+					{SignalType: "log", Body: testutil.RandPayloadString(6)},
 					{SignalType: ""},
 				},
 			},
@@ -100,18 +104,20 @@ func TestSignalBatchValidate(t *testing.T) {
 // TestResource tests Resource structure.
 func TestResource(t *testing.T) {
 	t.Run("resource with attributes", func(t *testing.T) {
+		svcName := "svc-" + testutil.RandString(8)
+		hostName := testutil.RandHost()
 		r := Resource{
 			Attributes: map[string]any{
-				"service.name": "my-service",
-				"host":         "localhost",
+				"service.name": svcName,
+				"host":         hostName,
 			},
 		}
 
 		if len(r.Attributes) != 2 {
 			t.Errorf("Attributes count = %d, want 2", len(r.Attributes))
 		}
-		if r.Attributes["service.name"] != "my-service" {
-			t.Errorf("service.name = %v, want 'my-service'", r.Attributes["service.name"])
+		if r.Attributes["service.name"] != svcName {
+			t.Errorf("service.name = %v, want %q", r.Attributes["service.name"], svcName)
 		}
 	})
 
@@ -126,28 +132,32 @@ func TestResource(t *testing.T) {
 // TestScope tests Scope structure.
 func TestScope(t *testing.T) {
 	t.Run("scope with all fields", func(t *testing.T) {
+		name := "scope-" + testutil.RandString(6)
+		version := testutil.RandVersion()
+		collector := "collector-" + testutil.RandString(6)
 		s := Scope{
-			Name:        "otel-collector",
-			Version:     "1.0.0",
-			CollectorID: "collector-123",
+			Name:        name,
+			Version:     version,
+			CollectorID: collector,
 		}
 
-		if s.Name != "otel-collector" {
-			t.Errorf("Name = %q, want 'otel-collector'", s.Name)
+		if s.Name != name {
+			t.Errorf("Name = %q, want %q", s.Name, name)
 		}
-		if s.Version != "1.0.0" {
-			t.Errorf("Version = %q, want '1.0.0'", s.Version)
+		if s.Version != version {
+			t.Errorf("Version = %q, want %q", s.Version, version)
 		}
-		if s.CollectorID != "collector-123" {
-			t.Errorf("CollectorID = %q, want 'collector-123'", s.CollectorID)
+		if s.CollectorID != collector {
+			t.Errorf("CollectorID = %q, want %q", s.CollectorID, collector)
 		}
 	})
 
 	t.Run("scope with only required fields", func(t *testing.T) {
-		s := Scope{Name: "my-collector"}
+		name := "scope-" + testutil.RandString(6)
+		s := Scope{Name: name}
 
-		if s.Name != "my-collector" {
-			t.Errorf("Name = %q, want 'my-collector'", s.Name)
+		if s.Name != name {
+			t.Errorf("Name = %q, want %q", s.Name, name)
 		}
 		if s.Version != "" {
 			t.Errorf("Version should be empty by default")
@@ -158,30 +168,35 @@ func TestScope(t *testing.T) {
 // TestSignalRecordFields tests SignalRecord with various signal types.
 func TestSignalRecordFields(t *testing.T) {
 	t.Run("log signal", func(t *testing.T) {
+		eventID := testutil.RandEventID()
+		ts := int64(testutil.RandInt(1, 2_000_000_000))
+		severity := testutil.RandInt(1, 24)
+		body := "log-" + testutil.RandString(12)
 		sig := &SignalRecord{
 			SignalType:     "log",
-			EventID:        "evt-123",
-			TimeUnixMs:     1234567890,
-			SeverityNumber: 9,
+			EventID:        eventID,
+			TimeUnixNs:     ts,
+			SeverityNumber: severity,
 			SeverityText:   "INFO",
-			Body:           "Test log message",
+			Body:           body,
 		}
 
 		if sig.SignalType != "log" {
 			t.Errorf("SignalType = %q, want 'log'", sig.SignalType)
 		}
-		if sig.SeverityNumber != 9 {
-			t.Errorf("SeverityNumber = %d, want 9", sig.SeverityNumber)
+		if sig.SeverityNumber != severity {
+			t.Errorf("SeverityNumber = %d, want %d", sig.SeverityNumber, severity)
 		}
 	})
 
 	t.Run("counter signal", func(t *testing.T) {
+		metricName := "metric-" + testutil.RandString(10)
 		sig := &SignalRecord{
 			SignalType: "counter",
-			MetricName: "http_requests_total",
+			MetricName: metricName,
 			MetricFields: map[string]float64{
-				"count": 100.0,
-				"sum":   0.5,
+				"count": float64(testutil.RandInt(1, 1000)),
+				"sum":   float64(testutil.RandInt(1, 1000)) / 10.0,
 			},
 			Unit:        "1",
 			Temporality: "cumulative",
@@ -191,8 +206,8 @@ func TestSignalRecordFields(t *testing.T) {
 		if sig.SignalType != "counter" {
 			t.Errorf("SignalType = %q, want 'counter'", sig.SignalType)
 		}
-		if sig.MetricName != "http_requests_total" {
-			t.Errorf("MetricName = %q, want 'http_requests_total'", sig.MetricName)
+		if sig.MetricName != metricName {
+			t.Errorf("MetricName = %q, want %q", sig.MetricName, metricName)
 		}
 		if len(sig.MetricFields) != 2 {
 			t.Errorf("MetricFields count = %d, want 2", len(sig.MetricFields))
@@ -203,23 +218,27 @@ func TestSignalRecordFields(t *testing.T) {
 	})
 
 	t.Run("span signal", func(t *testing.T) {
+		traceID := testutil.RandTraceID()
+		spanID := testutil.RandSpanID()
+		parentSpanID := testutil.RandSpanID()
+		name := "op-" + testutil.RandString(10)
 		sig := &SignalRecord{
 			SignalType:      "span",
-			TraceID:         "0123456789abcdef0123456789abcdef",
-			SpanID:          "0123456789abcdef",
-			ParentSpanID:    "fedcba9876543210",
-			Name:            "HTTP GET /api/users",
+			TraceID:         traceID,
+			SpanID:          spanID,
+			ParentSpanID:    parentSpanID,
+			Name:            name,
 			Kind:            "client",
-			StartTimeUnixMs: 1234567890,
-			EndTimeUnixMs:   1234567900,
+			StartTimeUnixNs: int64(testutil.RandInt(1, 2_000_000_000)),
+			EndTimeUnixNs:   int64(testutil.RandInt(1, 2_000_000_000)),
 			StatusCode:      "OK",
 		}
 
 		if sig.SignalType != "span" {
 			t.Errorf("SignalType = %q, want 'span'", sig.SignalType)
 		}
-		if sig.Name != "HTTP GET /api/users" {
-			t.Errorf("Name = %q, want 'HTTP GET /api/users'", sig.Name)
+		if sig.Name != name {
+			t.Errorf("Name = %q, want %q", sig.Name, name)
 		}
 		if sig.Kind != "client" {
 			t.Errorf("Kind = %q, want 'client'", sig.Kind)
@@ -233,8 +252,8 @@ func TestSignalRecordWithAttributes(t *testing.T) {
 		SignalType: "log",
 		Attributes: map[string]any{
 			"http.method":      "GET",
-			"http.status_code": 200,
-			"user.id":          "user-123",
+			"http.status_code": testutil.RandInt(100, 600),
+			"user.id":          "user-" + testutil.RandString(8),
 		},
 	}
 
@@ -254,7 +273,7 @@ func TestSignalRecordWithBody(t *testing.T) {
 	}{
 		{
 			name: "string body",
-			body: "Test log message",
+			body: "log-" + testutil.RandString(12),
 		},
 		{
 			name: "nil body",
@@ -277,9 +296,10 @@ func TestSignalRecordWithBody(t *testing.T) {
 
 	// Test map body separately since we cannot compare maps directly
 	t.Run("map body", func(t *testing.T) {
+		msgVal := "val-" + testutil.RandString(6)
 		sig := &SignalRecord{
 			SignalType: "log",
-			Body:       map[string]any{"message": "Test", "code": 123},
+			Body:       map[string]any{"message": msgVal, "code": testutil.RandInt(1, 1000)},
 		}
 
 		if sig.Body == nil {
@@ -290,32 +310,34 @@ func TestSignalRecordWithBody(t *testing.T) {
 		if !ok {
 			t.Error("Body should be a map")
 		}
-		if bodyMap["message"] != "Test" {
-			t.Errorf("message = %v, want 'Test'", bodyMap["message"])
+		if bodyMap["message"] != msgVal {
+			t.Errorf("message = %v, want %q", bodyMap["message"], msgVal)
 		}
 	})
 }
 
 // TestSignalBatchWithResourceAndScope tests complete SignalBatch.
 func TestSignalBatchWithResourceAndScope(t *testing.T) {
+	svcName := "svc-" + testutil.RandString(8)
+	scopeName := "scope-" + testutil.RandString(8)
 	batch := &SignalBatch{
 		SchemaURL: "https://opentelemetry.io/schemas/1.0.0",
 		Resource: Resource{
 			Attributes: map[string]any{
-				"service.name":   "my-service",
+				"service.name":   svcName,
 				"deployment.env": "production",
 			},
 		},
 		Scope: Scope{
-			Name:        "my-processor",
-			Version:     "1.0.0",
-			CollectorID: "collector-123",
+			Name:        scopeName,
+			Version:     testutil.RandVersion(),
+			CollectorID: "collector-" + testutil.RandString(6),
 		},
 		Signals: []*SignalRecord{
 			{
 				SignalType: "log",
-				EventID:    "evt-1",
-				Body:       "Test message",
+				EventID:    testutil.RandEventID(),
+				Body:       "msg-" + testutil.RandString(10),
 			},
 		},
 	}
@@ -325,11 +347,11 @@ func TestSignalBatchWithResourceAndScope(t *testing.T) {
 		t.Errorf("Validate() unexpected error: %v", err)
 	}
 
-	if batch.Resource.Attributes["service.name"] != "my-service" {
-		t.Errorf("service.name = %v, want 'my-service'", batch.Resource.Attributes["service.name"])
+	if batch.Resource.Attributes["service.name"] != svcName {
+		t.Errorf("service.name = %v, want %q", batch.Resource.Attributes["service.name"], svcName)
 	}
-	if batch.Scope.Name != "my-processor" {
-		t.Errorf("Scope Name = %q, want 'my-processor'", batch.Scope.Name)
+	if batch.Scope.Name != scopeName {
+		t.Errorf("Scope Name = %q, want %q", batch.Scope.Name, scopeName)
 	}
 }
 
@@ -337,10 +359,10 @@ func TestSignalBatchWithResourceAndScope(t *testing.T) {
 func TestSignalBatchWithMultipleSignals(t *testing.T) {
 	batch := &SignalBatch{
 		Signals: []*SignalRecord{
-			{SignalType: "log", EventID: "evt-1", Body: "msg1"},
-			{SignalType: "counter", EventID: "evt-2", MetricName: "m1"},
-			{SignalType: "span", EventID: "evt-3", Name: "s1", TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef"},
-			{SignalType: "log", EventID: "evt-4", Body: "msg4"},
+			{SignalType: "log", EventID: testutil.RandEventID(), Body: "msg-" + testutil.RandString(8)},
+			{SignalType: "counter", EventID: testutil.RandEventID(), MetricName: "m-" + testutil.RandString(6)},
+			{SignalType: "span", EventID: testutil.RandEventID(), Name: "s-" + testutil.RandString(6), TraceID: testutil.RandTraceID(), SpanID: testutil.RandSpanID()},
+			{SignalType: "log", EventID: testutil.RandEventID(), Body: "msg-" + testutil.RandString(8)},
 		},
 	}
 
@@ -356,44 +378,50 @@ func TestSignalBatchWithMultipleSignals(t *testing.T) {
 
 // TestSignalRecordTimestamps tests timestamp fields.
 func TestSignalRecordTimestamps(t *testing.T) {
+	ts := int64(testutil.RandInt(1, 2_000_000_000))
+	obs := ts + int64(testutil.RandInt(1, 100))
 	sig := &SignalRecord{
 		SignalType:     "log",
-		TimeUnixMs:     1234567890,
-		ObservedTimeMs: 1234567895,
+		TimeUnixNs:     ts,
+		ObservedTimeNs: obs,
 	}
 
-	if sig.TimeUnixMs != 1234567890 {
-		t.Errorf("TimeUnixMs = %d, want 1234567890", sig.TimeUnixMs)
+	if sig.TimeUnixNs != ts {
+		t.Errorf("TimeUnixNs = %d, want %d", sig.TimeUnixNs, ts)
 	}
-	if sig.ObservedTimeMs != 1234567895 {
-		t.Errorf("ObservedTimeMs = %d, want 1234567895", sig.ObservedTimeMs)
+	if sig.ObservedTimeNs != obs {
+		t.Errorf("ObservedTimeNs = %d, want %d", sig.ObservedTimeNs, obs)
 	}
 }
 
 // TestSignalRecordTraceContext tests trace context fields.
 func TestSignalRecordTraceContext(t *testing.T) {
+	traceID := testutil.RandTraceID()
+	spanID := testutil.RandSpanID()
+	parentSpanID := testutil.RandSpanID()
 	sig := &SignalRecord{
 		SignalType:   "span",
-		TraceID:      "0123456789abcdef0123456789abcdef",
-		SpanID:       "0123456789abcdef",
-		ParentSpanID: "fedcba9876543210",
+		TraceID:      traceID,
+		SpanID:       spanID,
+		ParentSpanID: parentSpanID,
 	}
 
-	if sig.TraceID != "0123456789abcdef0123456789abcdef" {
-		t.Errorf("TraceID = %q, want '0123456789abcdef0123456789abcdef'", sig.TraceID)
+	if sig.TraceID != traceID {
+		t.Errorf("TraceID = %q, want %q", sig.TraceID, traceID)
 	}
-	if sig.SpanID != "0123456789abcdef" {
-		t.Errorf("SpanID = %q, want '0123456789abcdef'", sig.SpanID)
+	if sig.SpanID != spanID {
+		t.Errorf("SpanID = %q, want %q", sig.SpanID, spanID)
 	}
-	if sig.ParentSpanID != "fedcba9876543210" {
-		t.Errorf("ParentSpanID = %q, want 'fedcba9876543210'", sig.ParentSpanID)
+	if sig.ParentSpanID != parentSpanID {
+		t.Errorf("ParentSpanID = %q, want %q", sig.ParentSpanID, parentSpanID)
 	}
 }
 
 // TestSignalRecordW3CTraceContext 校验 W3C trace_flags/trace_state 的协议级承载
 // （capability w3c_trace_context，§6.2.2）：校验规则 + proto 编解码往返不丢字段。
 func TestSignalRecordW3CTraceContext(t *testing.T) {
-	const validTraceID = "0123456789abcdef0123456789abcdef"
+	// 合法的 32 hex trace_id（非全零），随机生成以满足 W3C 格式。
+	validTraceID := testutil.RandTraceID()
 
 	t.Run("trace_flags over 8-bit rejected", func(t *testing.T) {
 		b := SignalBatch{Signals: []*SignalRecord{
@@ -420,7 +448,7 @@ func TestSignalRecordW3CTraceContext(t *testing.T) {
 	t.Run("valid trace context passes", func(t *testing.T) {
 		b := SignalBatch{Signals: []*SignalRecord{
 			{SignalType: "span", Name: "s", TraceID: validTraceID,
-				SpanID: "0123456789abcdef", TraceFlags: 0x01,
+				SpanID: testutil.RandSpanID(), TraceFlags: 0x01,
 				TraceState: []*TraceStateEntry{{Key: "vendor", Value: "value"}}},
 		}}
 		if err := b.Validate(); err != nil {
@@ -431,14 +459,14 @@ func TestSignalRecordW3CTraceContext(t *testing.T) {
 	t.Run("proto round-trip preserves trace_flags and trace_state", func(t *testing.T) {
 		orig := &SignalBatch{Signals: []*SignalRecord{
 			{SignalType: "span", Name: "s", TraceID: validTraceID,
-				SpanID: "0123456789abcdef", TraceFlags: 0x01,
+				SpanID: testutil.RandSpanID(), TraceFlags: 0x01,
 				TraceState: []*TraceStateEntry{{Key: "a", Value: "1"}, {Key: "b", Value: "2"}}},
 		}}
-		data, err := MarshalSignalBatch(orig)
+		data, err := MarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, orig)
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
-		got, err := UnmarshalSignalBatch(data)
+		got, err := UnmarshalSignalBatchCodec(corepb.Codec_CODEC_PROTO, data)
 		if err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}

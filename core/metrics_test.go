@@ -79,38 +79,6 @@ func TestMetricsFields(t *testing.T) {
 			},
 		},
 		{
-			name: "BatchesAckedTotal",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.BatchesAcked() == nil {
-					t.Error("BatchesAcked should not be nil")
-				}
-			},
-		},
-		{
-			name: "BatchesNackedTotal",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.BatchesNacked() == nil {
-					t.Error("BatchesNacked should not be nil")
-				}
-			},
-		},
-		{
-			name: "PartialAckTotal",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.PartialAck() == nil {
-					t.Error("PartialAck should not be nil")
-				}
-			},
-		},
-		{
-			name: "ReplayCacheHitsTotal",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.ReplayCacheHits() == nil {
-					t.Error("ReplayCacheHits should not be nil")
-				}
-			},
-		},
-		{
 			name: "HMACFailuresTotal",
 			check: func(t *testing.T, m *MBTAMetrics) {
 				if m.HMACFailures() == nil {
@@ -123,38 +91,6 @@ func TestMetricsFields(t *testing.T) {
 			check: func(t *testing.T, m *MBTAMetrics) {
 				if m.DecryptFailures() == nil {
 					t.Error("DecryptFailures should not be nil")
-				}
-			},
-		},
-		{
-			name: "WindowCurrentBatches",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.WindowCurrentBatches() == nil {
-					t.Error("WindowCurrentBatches should not be nil")
-				}
-			},
-		},
-		{
-			name: "WindowCurrentEvents",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.WindowCurrentEvents() == nil {
-					t.Error("WindowCurrentEvents should not be nil")
-				}
-			},
-		},
-		{
-			name: "WindowCurrentBytes",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.WindowCurrentBytes() == nil {
-					t.Error("WindowCurrentBytes should not be nil")
-				}
-			},
-		},
-		{
-			name: "ThrottleSecondsTotal",
-			check: func(t *testing.T, m *MBTAMetrics) {
-				if m.ThrottleSeconds() == nil {
-					t.Error("ThrottleSeconds should not be nil")
 				}
 			},
 		},
@@ -199,7 +135,7 @@ func TestMetricsCount(t *testing.T) {
 		t.Fatalf("Gather() error: %v", err)
 	}
 
-	expectedCount := 20
+	expectedCount := 13 // r3 清理：删 9 旧概念 metric，增 2 gauge
 	if len(metricFamilies) != expectedCount {
 		t.Errorf("Expected %d metrics, got %d", expectedCount, len(metricFamilies))
 	}
@@ -212,9 +148,8 @@ func TestMetricsMetricTypes(t *testing.T) {
 
 	t.Run("Gauge metrics exist", func(t *testing.T) {
 		if metrics.ConnectionsActive() == nil ||
-			metrics.WindowCurrentBatches() == nil ||
-			metrics.WindowCurrentEvents() == nil ||
-			metrics.WindowCurrentBytes() == nil {
+			metrics.CreditsOutstanding() == nil ||
+			metrics.SinkQueueDepth() == nil {
 			t.Error("One or more Gauge metrics are nil")
 		}
 	})
@@ -223,13 +158,9 @@ func TestMetricsMetricTypes(t *testing.T) {
 		if metrics.AuthSuccess() == nil ||
 			metrics.AuthFailure() == nil ||
 			metrics.BatchesSent() == nil ||
-			metrics.BatchesAcked() == nil ||
-			metrics.BatchesNacked() == nil ||
-			metrics.PartialAck() == nil ||
-			metrics.ReplayCacheHits() == nil ||
 			metrics.HMACFailures() == nil ||
 			metrics.DecryptFailures() == nil ||
-			metrics.ThrottleSeconds() == nil {
+			metrics.SinkFailures() == nil {
 			t.Error("One or more Counter metrics are nil")
 		}
 	})
@@ -245,26 +176,15 @@ func TestNoOpMetrics(t *testing.T) {
 	m.AuthSuccess().Inc()
 	m.AuthFailure().Inc()
 	m.BatchesSent().Add(1)
-	m.BatchesAcked().Inc()
-	m.BatchesNacked().Inc()
-	m.Throttled().Inc()
-	m.PartialAck().Inc()
-	m.ReplayCacheHits().Inc()
-	m.ReplayCacheEvictions().Inc()
 	m.HMACFailures().Inc()
 	m.DecryptFailures().Inc()
-	m.WindowCurrentBatches().Set(1)
-	m.WindowCurrentEvents().Set(1)
-	m.WindowCurrentBytes().Set(1)
-	m.ThrottleSeconds().Add(1)
 	m.BatchLatency().Observe(0.1)
 	m.BatchSizeEvents().Observe(10)
 	m.BatchSizeBytes().Observe(100)
 	m.ConnectionDuration().Observe(60)
 }
 
-// TestMBTAMetrics_ImplementsMetrics 验证 *MBTAMetrics 满足 Metrics 接口
-// （编译期断言已在 metrics.go 底部，此处为运行期可观测的显式检查）。
+// TestMBTAMetrics_ImplementsMetrics 运行期确认 *MBTAMetrics 满足 Metrics 接口（编译期断言见 metrics.go）。
 func TestMBTAMetrics_ImplementsMetrics(t *testing.T) {
 	var _ Metrics = New(prometheus.NewRegistry())
 }

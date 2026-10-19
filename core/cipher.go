@@ -13,7 +13,7 @@ import (
 	"github.com/iuboy/pollux-go/sm4"
 )
 
-// 密码套件密钥长度（core spec §8）。
+// 各 profile 密钥长度（r3：profile 一次选定 ECDH+KDF+AEAD 组合）。
 const (
 	HMACKeyLenIntl = 32 // HMAC-SHA-256
 	HMACKeyLenGM   = 32 // HMAC-SM3
@@ -21,64 +21,53 @@ const (
 	AEADKeyLenGM   = 16 // SM4-GCM
 )
 
-// HMACKeyLen 返回指定套件的 HMAC 密钥长度。
-//
-// 未知套件返回 -1（哨兵值，避免被当作合法长度）。调用方 MUST 检查返回值 < 0
-// 或在调用前校验套件合法性；直接 make([]byte, HMACKeyLen(cs)) 对未知套件会
-// panic（负长度），这是有意为之的 fail-fast——旧实现返回 0 会静默生成空密钥。
-func HMACKeyLen(cs corepb.CipherSuite) int {
-	switch cs {
-	case corepb.CipherSuite_CIPHER_SUITE_INTL:
+// HMACKeyLen 返回 profile 的 HMAC 密钥长度。未知 profile 返回 -1 哨兵
+// （负长度强制调用方显式处理，避免静默空密钥）。
+func HMACKeyLen(p corepb.Profile) int {
+	switch p {
+	case corepb.Profile_PROFILE_INTL:
 		return HMACKeyLenIntl
-	case corepb.CipherSuite_CIPHER_SUITE_GM:
+	case corepb.Profile_PROFILE_GM:
 		return HMACKeyLenGM
 	default:
-		return -1 // UNSPECIFIED/未知：负值避免被当作合法长度，强制调用方显式处理
+		return -1
 	}
 }
 
-// AEADKeyLen 返回指定套件的 AEAD 密钥长度。语义同 HMACKeyLen，未知套件返回 -1。
-func AEADKeyLen(cs corepb.CipherSuite) int {
-	switch cs {
-	case corepb.CipherSuite_CIPHER_SUITE_INTL:
+// AEADKeyLen 返回 profile 的 AEAD 密钥长度。语义同 HMACKeyLen。
+func AEADKeyLen(p corepb.Profile) int {
+	switch p {
+	case corepb.Profile_PROFILE_INTL:
 		return AEADKeyLenIntl
-	case corepb.CipherSuite_CIPHER_SUITE_GM:
+	case corepb.Profile_PROFILE_GM:
 		return AEADKeyLenGM
 	default:
-		return -1 // UNSPECIFIED/未知：负值避免被当作合法长度，强制调用方显式处理
+		return -1
 	}
 }
 
-// NewHMAC 按密码套件创建 HMAC hasher。
-//
-//	intl → HMAC-SHA-256
-//	gm   → HMAC-SM3
-func NewHMAC(cs corepb.CipherSuite, key []byte) (hash.Hash, error) {
-	switch cs {
-	case corepb.CipherSuite_CIPHER_SUITE_INTL:
+// NewHMAC 按 profile 创建 HMAC hasher（intl→SHA-256 / gm→SM3）。
+func NewHMAC(p corepb.Profile, key []byte) (hash.Hash, error) {
+	switch p {
+	case corepb.Profile_PROFILE_INTL:
 		if len(key) != HMACKeyLenIntl {
 			return nil, fmt.Errorf("intl hmac key must be %d bytes, got %d", HMACKeyLenIntl, len(key))
 		}
 		return hmac.New(sha256.New, key), nil
-	case corepb.CipherSuite_CIPHER_SUITE_GM:
+	case corepb.Profile_PROFILE_GM:
 		if len(key) != HMACKeyLenGM {
 			return nil, fmt.Errorf("gm hmac key must be %d bytes, got %d", HMACKeyLenGM, len(key))
 		}
 		return hmac.New(sm3.New, key), nil
 	default:
-		return nil, fmt.Errorf("unsupported cipher suite: %v", cs)
+		return nil, fmt.Errorf("unsupported profile: %v", p)
 	}
 }
 
-// NewAEAD 按密码套件创建 AEAD。
-//
-//	intl → AES-256-GCM（crypto/aes + crypto/cipher）
-//	gm   → SM4-GCM（pollux-go/sm4）
-//
-// 密文格式：nonce(12) || ciphertext || tag(16)（core spec §8.4）。
-func NewAEAD(cs corepb.CipherSuite, key []byte) (cipher.AEAD, error) {
-	switch cs {
-	case corepb.CipherSuite_CIPHER_SUITE_INTL:
+// NewAEAD 按 profile 创建 AEAD（intl→AES-256-GCM / gm→SM4-GCM）。
+func NewAEAD(p corepb.Profile, key []byte) (cipher.AEAD, error) {
+	switch p {
+	case corepb.Profile_PROFILE_INTL:
 		if len(key) != AEADKeyLenIntl {
 			return nil, fmt.Errorf("intl aead key must be %d bytes, got %d", AEADKeyLenIntl, len(key))
 		}
@@ -87,12 +76,12 @@ func NewAEAD(cs corepb.CipherSuite, key []byte) (cipher.AEAD, error) {
 			return nil, fmt.Errorf("aes init: %w", err)
 		}
 		return cipher.NewGCM(block)
-	case corepb.CipherSuite_CIPHER_SUITE_GM:
+	case corepb.Profile_PROFILE_GM:
 		if len(key) != AEADKeyLenGM {
 			return nil, fmt.Errorf("gm aead key must be %d bytes, got %d", AEADKeyLenGM, len(key))
 		}
 		return sm4.NewGCM(key)
 	default:
-		return nil, fmt.Errorf("unsupported cipher suite: %v", cs)
+		return nil, fmt.Errorf("unsupported profile: %v", p)
 	}
 }

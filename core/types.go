@@ -1,61 +1,38 @@
 package core
 
-// Message types (wire values, uint8, core spec §4).
-// 值发布后不可改（§1.4）。1–17 已分配，18–255 保留。
+// 帧类型注册表（r3）。type 高位为通道域：0x00-0x7F control / 0x80-0xFF data。
+// append-only：新类型只能追加；data 方向帧必须落在 data 域（conformance 断言）。
 const (
-	TypeHello    uint8 = 1 // C→S handshake
-	TypeHelloAck uint8 = 2 // S→C handshake response
-	TypeAuth     uint8 = 3 // C→S authentication
-	TypeAuthOK   uint8 = 4 // S→C authentication success
-	TypeAuthFail uint8 = 5 // S→C authentication failure
-
-	TypeBatch      uint8 = 6  // C→S reliable batch
-	TypeDatagram   uint8 = 7  // C→S unreliable datagram (capability unreliable_datagram, §11.4)
-	TypeAck        uint8 = 8  // S→C batch acknowledged
-	TypeNack       uint8 = 9  // S→C batch rejected
-	TypePartialAck uint8 = 10 // S→C partial success
-
-	TypeWindow   uint8 = 11 // S→C flow-control window
-	TypeThrottle uint8 = 12 // S→C explicit backoff
-
-	TypePing     uint8 = 13 // bidirectional health check
-	TypePong     uint8 = 14 // bidirectional health check response
-	TypeClose    uint8 = 15 // bidirectional graceful close
-	TypeError    uint8 = 16 // bidirectional protocol error
-	TypeRedirect uint8 = 17 // S→C cluster redirect: guide client to the leader (§4.17)
+	TypeHello    uint8 = 0x01 // C→S 握手（1-RTT：profile/token_proof/eph/caps）
+	TypeHelloAck uint8 = 0x02 // S→C 握手应答（epoch/ack_mode/limits/credits/finished）
+	TypeHelloNak uint8 = 0x03 // S→C 握手拒绝（code/retryable/retry_hint）
+	TypeResult   uint8 = 0x20 // S→C 唯一反馈帧（accepted/durable/rejected/released）
+	TypeCredit   uint8 = 0x21 // S→C 唯一流控发放帧
+	TypeDict     uint8 = 0x22 // S→C zstd 字典下发（zstd_dict 能力协商后，HELLO_ACK 之后立即发送）
+	TypePing     uint8 = 0x30 // 双向保活（仅 TCP binding）
+	TypePong     uint8 = 0x31
+	TypeClose    uint8 = 0x40 // 双向优雅关闭（drain 超时提示）
+	TypeRedirect uint8 = 0x41 // S→C HA 重定向
+	TypeAbort    uint8 = 0x50 // 双向立即拆除（写失败/协议违规/账本漂移）
+	// 控制命令帧（capability: control_commands；S→C 命令下发 / C→S 应答）。
+	// 幂等键 command_id；agent 离线时命令不投递（无存储转发）。
+	TypeCommand    uint8 = 0x23 // S→C 运维命令（CONFIG_APPLY/SERVICE_RESTART/UPGRADE/UNINSTALL）
+	TypeCommandAck uint8 = 0x24 // C→S 命令应答（applied/failed/rejected）
+	TypeDgram      uint8 = 0x90 // C→S 不可靠批次（Envelope；豁免 credit，硬限速）
+	TypeBatch      uint8 = 0x91 // C→S 可靠批次（Envelope；消耗 credit）
 )
 
-// 帧头 ChannelID 约定（core spec §10.1 / §3）。
-const (
-	ChannelControl uint8 = 0 // control channel：HELLO/AUTH/WINDOW/THROTTLE/PING/PONG/CLOSE/ERROR
-	ChannelData    uint8 = 1 // data channel：BATCH/DATAGRAM/ACK/NACK/PARTIAL_ACK
-)
+// IsControlType 报告 type 是否落在 control 域（type 高位 = 0）。
+// TCP binding 依赖此位做单连接逻辑流 demux；QUIC binding 以 stream 角色放置。
+func IsControlType(t uint8) bool { return t&0x80 == 0 }
 
-// Frame flags (core spec §3)。bit6–7 = FlowClass。
-const (
-	FlagEnvelope    byte = 0x01 // payload 是 SecureEnvelope
-	FlagControl     byte = 0x02 // 控制面消息
-	FlagData        byte = 0x04 // 数据面消息
-	FlagMoreFollows byte = 0x08 // 逻辑多片消息的一片（§3）
-	FlagReserved4   byte = 0x10 // reserved（MUST NOT set，v2 预留）
-	FlagCoalesced   byte = 0x20 // 多条同类型小消息合并打包（§3.2）
+// IsDataType 报告 type 是否落在 data 域（type 高位 = 1）。
+func IsDataType(t uint8) bool { return t&0x80 != 0 }
 
-	FlagControlDataMask byte = 0x06 // Control 与 Data 互斥校验
-	FlagFlowClassMask   byte = 0xC0
-	FlagFlowClassShift  byte = 6
+// Frame flags：v1(r3) 全部位为保留位——压缩标识移入 Envelope（载荷属性，
+// 须在 AEAD 覆盖内）。接收端对任何非零 flags MUST ABORT（frame.go Read/Write 校验）。
 
-	// FlowClass 取值（占 bit6–7）。值 3（reserved）MUST 拒绝。
-	FlowClassNormal     byte = 0x00 << FlagFlowClassShift
-	FlowClassBestEffort byte = 0x01 << FlagFlowClassShift
-	FlowClassCritical   byte = 0x02 << FlagFlowClassShift
-	FlowClassReserved   byte = 0x03 << FlagFlowClassShift
-)
-
-// FlowClassOf 从 flags 提取 FlowClass（返回 0/1/2/3；3 为 reserved，
-// 调用方应在跳过 ValidateFlags 的场景自行拒绝返回值 3）。
-func FlowClassOf(flags byte) byte { return (flags & FlagFlowClassMask) >> FlagFlowClassShift }
-
-// Stream roles.
+// Stream roles（QUIC binding 的 stream 放置语义）。
 const (
 	StreamRoleControl = "control"
 	StreamRoleData    = "data"

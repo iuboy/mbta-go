@@ -27,18 +27,11 @@ func (protoCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 func (protoCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	var pb corepb.SignalBatch
 	if err := proto.Unmarshal(data, &pb); err != nil {
-		return nil, WrapError(NumValidation, CodeValidation, "unmarshal signal batch", err)
+		return nil, WrapError(ErrCodeBatchInvalid, "unmarshal signal batch", err)
 	}
-	sb := fromProtoSignalBatch(&pb)
-	// 反序列化后校验：proto 文件注释标注 signal_type 必填，空字符串视为无效消息。
-	for i, s := range sb.Signals {
-		if s.SignalType == "" {
-			return nil, WrapError(NumValidation, CodeValidation,
-				fmt.Sprintf("signal[%d]: signal_type is required but empty", i),
-				fmt.Errorf("missing signal_type"))
-		}
-	}
-	return sb, nil
+	// signal_type 空检查由调用方的 sb.Validate() 统一负责（handler_batch.go:258 →
+	// validateSignalType），codec 层不重复（cbor/json codec 也无此检查，保持一致）。
+	return fromProtoSignalBatch(&pb), nil
 }
 
 func init() {
@@ -74,8 +67,8 @@ func toProtoSignalRecord(s *SignalRecord) *corepb.SignalRecord {
 	pb := &corepb.SignalRecord{
 		SignalType:         s.SignalType,
 		EventId:            s.EventID,
-		TimeUnixMs:         s.TimeUnixMs,
-		ObservedTimeUnixMs: s.ObservedTimeMs,
+		TimeUnixNs:         s.TimeUnixNs,
+		ObservedTimeUnixNs: s.ObservedTimeNs,
 		TraceId:            s.TraceID,
 		SpanId:             s.SpanID,
 		ParentSpanId:       s.ParentSpanID,
@@ -88,8 +81,8 @@ func toProtoSignalRecord(s *SignalRecord) *corepb.SignalRecord {
 		IsMonotonic:        s.IsMonotonic,
 		Name:               s.Name,
 		Kind:               s.Kind,
-		StartTimeUnixMs:    s.StartTimeUnixMs,
-		EndTimeUnixMs:      s.EndTimeUnixMs,
+		StartTimeUnixNs:    s.StartTimeUnixNs,
+		EndTimeUnixNs:      s.EndTimeUnixNs,
 		StatusCode:         s.StatusCode,
 		StatusMessage:      s.StatusMessage,
 	}
@@ -139,8 +132,8 @@ func fromProtoSignalRecord(s *corepb.SignalRecord) *SignalRecord {
 	r := &SignalRecord{
 		SignalType:      s.GetSignalType(),
 		EventID:         s.GetEventId(),
-		TimeUnixMs:      s.GetTimeUnixMs(),
-		ObservedTimeMs:  s.GetObservedTimeUnixMs(),
+		TimeUnixNs:      s.GetTimeUnixNs(),
+		ObservedTimeNs:  s.GetObservedTimeUnixNs(),
 		TraceID:         s.GetTraceId(),
 		SpanID:          s.GetSpanId(),
 		ParentSpanID:    s.GetParentSpanId(),
@@ -153,8 +146,8 @@ func fromProtoSignalRecord(s *corepb.SignalRecord) *SignalRecord {
 		IsMonotonic:     s.GetIsMonotonic(),
 		Name:            s.GetName(),
 		Kind:            s.GetKind(),
-		StartTimeUnixMs: s.GetStartTimeUnixMs(),
-		EndTimeUnixMs:   s.GetEndTimeUnixMs(),
+		StartTimeUnixNs: s.GetStartTimeUnixNs(),
+		EndTimeUnixNs:   s.GetEndTimeUnixNs(),
 		StatusCode:      s.GetStatusCode(),
 		StatusMessage:   s.GetStatusMessage(),
 	}

@@ -1,14 +1,23 @@
 package core
 
+// envelope.go 实现 r3 Envelope：compress-then-encrypt，确定性 nonce，AD 绑定全部
+// 明文元数据（帧 type/flags、session_id、key_epoch、seq、compression、profile）。
+//
+//	Envelope{key_epoch, seq, compression, ciphertext=AEAD(压缩后 batch 编码)}
+//	nonce = prefix(4B) ‖ seq(8B BE)
+//	AD    = type(1B) ‖ flags(1B) ‖ lp(session_id) ‖ key_epoch(1B) ‖ seq(8B BE)
+//	        ‖ compression(1B) ‖ lp(profile_name)
+
 import (
 	"bytes"
 	"compress/gzip"
+	"container/list"
 	"crypto/hmac"
-	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
-	"time"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
 	"github.com/klauspost/compress/zstd"
@@ -16,357 +25,365 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// EnvelopeVersion 是 SecureEnvelope wire 格式版本（core spec §5.2）。
-const EnvelopeVersion = 1
-
-// MaxDecompressedSize 限制解压后载荷上限，防压缩放大攻击（core spec §7）。
-// 与 max_batch_bytes 对齐：解压后不可能超过 batch 上限，超过即为攻击或畸形。
+// MaxDecompressedSize 限制解压后载荷上限，防压缩放大攻击。
+// 与 limits.max_batch_bytes 对齐：解压后超过 batch 上限即为攻击或畸形。
 const MaxDecompressedSize = 8 * 1024 * 1024
 
-// AEADNonceSize 是 AEAD（AES-256-GCM / SM4-GCM）nonce 长度（core spec §8.4）。
-const AEADNonceSize = 12
-
-// SecureEnvelope 是 r2 wire 层安全信封（payload/mac/nonce 原生 bytes，去 base64）。
-// 等价 corepb.SecureEnvelope。
-type SecureEnvelope = corepb.SecureEnvelope
-
-// BuildParams 控制 SecureEnvelope 构建（r2：CipherSuite 统一 HMAC+AEAD 算法）。
-type BuildParams struct {
-	SessionID    []byte
-	KeyID        string
-	Seq          uint64
-	ChunkID      ChunkID
-	Codec        corepb.Codec
-	Compression  corepb.Compression
-	CipherSuite  corepb.CipherSuite
-	DeliveryMode corepb.DeliveryMode
-	MsgType      corepb.EnvelopeMsgType
-	HMACKey      []byte // 必填，长度按 CipherSuite（HMACKeyLen）
-	AEADKey      []byte // nil = 不加密（仅调试）；非 nil 长度按 CipherSuite（AEADKeyLen）
-	BatchPayload []byte // 已按 Codec 编码的 SignalBatch 字节
+// SealParams 是 Envelope 构建参数。
+type SealParams struct {
+	FrameType   uint8  // 帧类型（TypeBatch/TypeDgram，入 AD）
+	SessionID   []byte // 会话 ID（入 AD）
+	Seq         uint64 // 连接级序号（nonce 与 AD 双绑定）
+	KeyEpoch    uint32 // 首版恒 0
+	Compression corepb.Compression
+	Keys        *SessionKeys
+	Dict        *ZstdDictCodec // ZSTD_DICT 时的字典 codec（nil=fail-closed）
+	BatchWire   []byte         // Batch 消息编码（未压缩）
+	// DualMACKey 是 dual_integrity 能力协商启用时的外层 HMAC 密钥，通常传
+	// Keys.DualMACKey。nil = 跳过，Envelope.mac 置空。
+	DualMACKey []byte
 }
 
-// Build 按 core spec §5.1 顺序构建 SecureEnvelope：
-//
-//	1.（codec 编码由调用方完成，BatchPayload 已是编码字节）
-//	2. 可选压缩
-//	3. 可选加密（AEAD）
-//	4. 填充字段
-//	5. 计算 HMAC（canonical wire bytes）
-func Build(p BuildParams) (*SecureEnvelope, error) {
-	if p.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "cipher suite unspecified")
+// SealEnvelope 压缩 + 加密 batch 编码，返回 marshaled Envelope（即帧 payload）。
+// DualMACKey 非 nil 时追加 mac = HMAC(profileHash, DualMACKey, AD‖ciphertext)。
+func SealEnvelope(p SealParams) ([]byte, error) {
+	if p.Keys == nil {
+		return nil, NewError(ErrCodeInternal, "seal: nil session keys")
 	}
-	if p.Codec == corepb.Codec_CODEC_UNSPECIFIED {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "codec unspecified")
+	if p.Seq == 0 {
+		return nil, NewError(ErrCodeBatchInvalid, "seal: seq must be >= 1")
 	}
-	// 提前校验 HMACKey：非空是规范要求（core spec §5.1），空 key 会在 NewHMAC 深处
-	// 才暴露错误，降低可诊断性，并可能引发 nil key 的 panic。
-	if len(p.HMACKey) == 0 {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "HMAC key is required")
+	// 对称拒绝（Open 侧必拒 KeyEpoch≠0）：允许 Seal 构造对端必拒的帧
+	// 是本地无报错的静默故障源。
+	if p.KeyEpoch != 0 {
+		return nil, NewError(ErrCodeBatchInvalid, "seal: key_epoch must be 0 in first version")
 	}
-
-	env := &SecureEnvelope{
-		EnvelopeVersion: EnvelopeVersion,
-		MessageType:     p.MsgType,
-		SessionId:       p.SessionID,
-		KeyId:           []byte(p.KeyID),
-		Seq:             p.Seq,
-		ChunkId:         p.ChunkID.Bytes(),
-		CreatedAtUnixMs: nowUnixMs(),
-		Codec:           p.Codec,
-		Compression:     p.Compression,
-		CipherSuite:     p.CipherSuite,
-		DeliveryMode:    p.DeliveryMode,
+	if len(p.DualMACKey) > 0 && len(p.DualMACKey) != HMACKeyLen(p.Keys.Profile) {
+		return nil, NewError(ErrCodeInternal, "seal: dual mac key length mismatch")
 	}
-
-	// Step 1: compress
-	processed, err := compress(p.Compression, p.BatchPayload)
-	if err != nil {
-		return nil, err
-	}
-
-	// Step 2: encrypt（AEAD）。密文格式：nonce(12) || ciphertext || tag(16)。
-	// nonce 存 env.Nonce，密文存 env.Payload。
-	if len(p.AEADKey) > 0 {
-		aead, err := NewAEAD(p.CipherSuite, p.AEADKey)
+	plain := p.BatchWire
+	if p.Compression != corepb.Compression_COMPRESSION_NONE {
+		c, err := compress(p.Compression, plain, p.Dict)
 		if err != nil {
 			return nil, err
 		}
-		nonce := make([]byte, AEADNonceSize)
-		if _, err := rand.Read(nonce); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "generate AEAD nonce", err)
-		}
-		env.Nonce = nonce
-		env.Payload = aead.Seal(nil, nonce, processed, nil)
-	} else {
-		env.Payload = processed
+		plain = c
 	}
 
-	// Step 3: canonical HMAC over env(mac=∅)
-	mac, err := canonicalMAC(p.CipherSuite, p.HMACKey, env)
+	aead, err := NewAEAD(p.Keys.Profile, p.Keys.C2SKey)
 	if err != nil {
-		return nil, err
+		return nil, WrapError(ErrCodeInternal, "seal: new aead", err)
 	}
-	env.Mac = mac
-	return env, nil
+	nonce := BuildNonce(p.Keys.NoncePrefixC, p.Seq)
+	ad := envelopeAD(p.FrameType, p.SessionID, p.KeyEpoch, p.Seq, p.Compression, p.Keys.Profile)
+	ct := aead.Seal(nil, nonce[:], plain, ad)
+
+	env := &corepb.Envelope{
+		KeyEpoch:    p.KeyEpoch,
+		Seq:         p.Seq,
+		Compression: p.Compression,
+		Ciphertext:  ct,
+	}
+	if len(p.DualMACKey) > 0 {
+		env.Mac = dualMAC(p.Keys.Profile, p.DualMACKey, ad, ct)
+	}
+	return proto.Marshal(env)
 }
 
-// Open 解析、校验 HMAC、解密、解压 SecureEnvelope，返回 SignalBatch 编码字节。
-// HMAC MUST 在解密/解压前校验（core spec §5.1）。传入非空 hmacKey 时，Open 会在
-// 解密前强制 VerifyMAC；校验失败立即返回错误，杜绝调用方遗漏 VerifyMAC 的安全绕过。
+// OpenEnvelope 解密 + 解压，返回解压后的 batch 编码。
+// frameType 必须与发送侧 Seal 时一致（AD 绑定），错配即 envelope_open_failed。
 //
-// 密钥组合策略（对标 Build，HMACKey 必填、AEADKey 可选）：
-//   - hmacKey 非空 + aeadKey 非空：生产路径（encrypt-then-MAC）
-//   - hmacKey 非空 + aeadKey 空  ：仅 HMAC 无加密（Build 的调试/明文模式）
-//   - hmacKey 空   + aeadKey 非空：禁止——加密但无 MAC 完整性校验，fail-closed
-//   - 两者都为空              ：禁止——调用方应显式选择明文/生产模式
-func Open(env *SecureEnvelope, hmacKey, aeadKey []byte) ([]byte, error) {
-	if env == nil {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "nil envelope")
+// dual_integrity 语义（keys.DualMACKey 非空 = 本地协商启用）：
+//   - mac 非空但本地未启用（无 DualMACKey）→ envelope_open_failed；
+//   - mac 非空且校验失败 → envelope_open_failed；
+//   - 本地启用但 mac 为空（对端未按协商附加）→ envelope_open_failed（fail-closed，
+//     双方由 selected_capabilities 对称驱动，缺 mac 即违约）。
+func OpenEnvelope(frameType uint8, sessionID []byte, keys *SessionKeys, dict *ZstdDictCodec, env *corepb.Envelope) ([]byte, error) {
+	if keys == nil {
+		return nil, NewError(ErrCodeEnvelopeOpenFail, "open: nil session keys")
 	}
-	// 拒绝"有加密无 MAC"的降级攻击路径（encrypt-without-MAC）。
-	// hmacKey 空 + aeadKey 非空 = 完整性校验完全绕过，不可接受。
-	if len(hmacKey) == 0 && len(aeadKey) > 0 {
-		return nil, NewError(NumEnvelope, CodeEnvelope,
-			"AEAD key present but HMAC key empty (encrypt-without-MAC forbidden)")
+	if env.GetKeyEpoch() != 0 {
+		return nil, NewError(ErrCodeEnvelopeOpenFail, fmt.Sprintf("unsupported key_epoch %d", env.GetKeyEpoch()))
 	}
-	// 拒绝两个都空的模糊调用（调用方必须显式选择模式）。
-	if len(hmacKey) == 0 && len(aeadKey) == 0 {
-		return nil, NewError(NumEnvelope, CodeEnvelope,
-			"both HMAC and AEAD keys empty (use explicit mode: production or diagnostics)")
+	if env.GetSeq() == 0 {
+		return nil, NewError(ErrCodeEnvelopeOpenFail, "envelope seq must be >= 1")
 	}
-	// 版本校验：拒绝不兼容协议版本的 envelope，避免字段被静默误解。
-	if env.EnvelopeVersion != EnvelopeVersion {
-		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported envelope version: %d", env.EnvelopeVersion))
-	}
-	if env.CipherSuite == corepb.CipherSuite_CIPHER_SUITE_UNSPECIFIED {
-		return nil, NewError(NumEnvelope, CodeEnvelope, "cipher suite unspecified")
-	}
-	switch env.Compression {
-	case corepb.Compression_COMPRESSION_UNSPECIFIED,
-		corepb.Compression_COMPRESSION_NONE,
-		corepb.Compression_COMPRESSION_ZSTD,
-		corepb.Compression_COMPRESSION_LZ4,
-		corepb.Compression_COMPRESSION_GZIP:
-	default:
-		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", env.Compression))
-	}
-
-	// 强制 HMAC 校验：在解密/解压前。空 hmacKey 视为显式跳过（仅诊断场景）。
-	if len(hmacKey) > 0 {
-		ok, verr := VerifyMAC(hmacKey, env)
-		if verr != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "HMAC verify", verr)
+	ad := envelopeAD(frameType, sessionID, env.GetKeyEpoch(), env.GetSeq(), env.GetCompression(), keys.Profile)
+	if hasMAC := len(env.GetMac()) > 0; hasMAC != (len(keys.DualMACKey) > 0) {
+		if hasMAC {
+			return nil, NewError(ErrCodeEnvelopeOpenFail, "envelope mac present but dual_integrity not negotiated")
 		}
-		if !ok {
-			return nil, NewError(NumHMAC, CodeHMAC, "HMAC verification failed")
+		return nil, NewError(ErrCodeEnvelopeOpenFail, "dual_integrity negotiated but envelope mac missing")
+	}
+	if len(keys.DualMACKey) > 0 {
+		want := dualMAC(keys.Profile, keys.DualMACKey, ad, env.GetCiphertext())
+		if !hmac.Equal(want, env.GetMac()) {
+			return nil, NewError(ErrCodeEnvelopeOpenFail, "dual integrity mac mismatch")
 		}
 	}
-
-	raw := env.Payload
-
-	// Decrypt
-	if len(aeadKey) > 0 {
-		if len(env.Nonce) != AEADNonceSize {
-			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("nonce must be %d bytes", AEADNonceSize))
-		}
-		aead, err := NewAEAD(env.CipherSuite, aeadKey)
-		if err != nil {
-			return nil, err
-		}
-		if len(raw) < aead.Overhead() {
-			return nil, NewError(NumEnvelope, CodeEnvelope, "ciphertext too short for AEAD tag")
-		}
-		pt, err := aead.Open(nil, env.Nonce, raw, nil)
-		if err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "AEAD decrypt", err)
-		}
-		raw = pt
-	} else if len(env.Nonce) > 0 {
-		// 防御：aeadKey 为空（明文模式）但 envelope 携带 Nonce → 发送方加密了但
-		// 接收方未提供解密密钥。直接返回密文到解压器会产生令人困惑的格式错误。
-		return nil, NewError(NumEnvelope, CodeEnvelope,
-			"envelope carries AEAD nonce but no AEAD key was provided (encrypted envelope opened in plaintext mode)")
+	aead, err := NewAEAD(keys.Profile, keys.C2SKey)
+	if err != nil {
+		return nil, WrapError(ErrCodeInternal, "open: new aead", err)
 	}
-
-	// Decompress
-	return decompress(env.Compression, raw)
+	nonce := BuildNonce(keys.NoncePrefixC, env.GetSeq())
+	plain, err := aead.Open(nil, nonce[:], env.GetCiphertext(), ad)
+	if err != nil {
+		return nil, WrapError(ErrCodeEnvelopeOpenFail, "aead open", err)
+	}
+	if env.GetCompression() == corepb.Compression_COMPRESSION_NONE {
+		return plain, nil
+	}
+	return decompress(env.GetCompression(), plain, dict)
 }
 
-// VerifyMAC 用给定 HMAC key 校验 envelope 的 MAC。
-// 使用 hmac.Equal（constant-time）比较 MAC，防止时序侧信道。MUST 在 Open 前调用。
-func VerifyMAC(hmacKey []byte, env *SecureEnvelope) (bool, error) {
-	want, err := canonicalMAC(env.CipherSuite, hmacKey, env)
-	if err != nil {
-		return false, err
-	}
-	return hmac.Equal(env.Mac, want), nil
+// dualMAC 计算 dual_integrity 外层 HMAC：HMAC(profileHash, key, AD‖ciphertext)。
+func dualMAC(profile corepb.Profile, key, ad, ciphertext []byte) []byte {
+	m := hmac.New(ProfileHash(profile), key)
+	_, _ = m.Write(ad)
+	_, _ = m.Write(ciphertext)
+	return m.Sum(nil)
 }
 
-// canonicalMAC 计算 HMAC over env 的 canonical（deterministic）wire bytes。
-// HMAC 输入 = proto.MarshalOptions{Deterministic:true} 对 mac 清空后的 envelope（§5.3）。
-// SecureEnvelope 内无 map 字段，确定性序列化保证跨实现 HMAC 可验证。
-func canonicalMAC(cs corepb.CipherSuite, hmacKey []byte, env *SecureEnvelope) ([]byte, error) {
-	h, err := NewHMAC(cs, hmacKey)
-	if err != nil {
-		return nil, err
-	}
-	clone := proto.Clone(env).(*SecureEnvelope)
-	clone.Mac = nil
-	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(clone)
-	if err != nil {
-		return nil, WrapError(NumEnvelope, CodeEnvelope, "canonical marshal", err)
-	}
-	_, _ = h.Write(wire) // hash.Hash.Write 永不返回错误
-	return h.Sum(nil), nil
+// envelopeAD 构造 AEAD Associated Data（字节级规范见文件头注释）。
+// lp = 4B BE 长度前缀。
+func envelopeAD(frameType uint8, sessionID []byte, keyEpoch uint32, seq uint64, comp corepb.Compression, profile corepb.Profile) []byte {
+	profName := ProfileName(profile)
+	ad := make([]byte, 0, 2+4+len(sessionID)+1+8+1+4+len(profName))
+	ad = append(ad, frameType, 0) // flags 恒 0（冻结面）
+	ad = appendLenPrefixed(ad, sessionID)
+	ad = append(ad, byte(keyEpoch))
+	var seqB [8]byte
+	binary.BigEndian.PutUint64(seqB[:], seq)
+	ad = append(ad, seqB[:]...)
+	ad = append(ad, byte(comp))
+	ad = appendLenPrefixed(ad, []byte(profName))
+	return ad
 }
 
-func nowUnixMs() int64 { return time.Now().UnixMilli() }
+func appendLenPrefixed(dst, b []byte) []byte {
+	var lp [4]byte
+	binary.BigEndian.PutUint32(lp[:], uint32(len(b)))
+	dst = append(dst, lp[:]...)
+	return append(dst, b...)
+}
 
-// ===== 压缩（none/gzip/zstd/lz4，Pool 复用）=====
+// --- 压缩（继承 v1 全部加固：流式上限 + 预分配封顶 + zstd 内存上限）---
 
 var (
-	gzipWriterPool = sync.Pool{
-		New: func() any {
-			w, _ := gzip.NewWriterLevel(io.Discard, gzip.DefaultCompression)
-			return w
-		},
-	}
-	gzipReaderPool = sync.Pool{New: func() any { return new(gzip.Reader) }}
-
+	gzipReaderPool  = sync.Pool{New: func() any { return new(gzip.Reader) }}
 	zstdEncoderPool = sync.Pool{
 		New: func() any {
-			enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+			// 池化为逐调用实例：单并发最优，消除每次 NewWriter 的大额内部状态分配
+			// 未池化时 4KB seal 374µs / 13.5MB allocs。
+			enc, _ := zstd.NewWriter(nil,
+				zstd.WithEncoderConcurrency(1),
+				zstd.WithEncoderLevel(zstd.SpeedDefault))
 			return enc
 		},
 	}
 	zstdDecoderPool = sync.Pool{
 		New: func() any {
-			// WithDecoderMaxMemory 限制单次解压内存，防 zstd 炸弹在大小检查前 OOM。
 			dec, _ := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(MaxDecompressedSize))
 			return dec
 		},
 	}
-
-	// lz4 writer/reader pool：与 gzip/zstd 对齐，避免批量压缩场景每次新建 *lz4.Writer/Reader 的 GC 压力。
-	lz4WriterPool = sync.Pool{New: func() any { return lz4.NewWriter(nil) }}
 	lz4ReaderPool = sync.Pool{New: func() any { return lz4.NewReader(nil) }}
 )
 
-// compress 按算法压缩 src。
-func compress(c corepb.Compression, src []byte) ([]byte, error) {
+// --- zstd 字典（capability: zstd_dict，服务端 DICT 帧下发）---
+//
+// 进程级单例（简单优先，r3 裁决）：COMPRESSION_ZSTD_DICT 隐含"当前字典"
+// （dict_id 由 DICT 帧带外声明，Envelope 不重复携带）。服务端在配置字典时
+// ZstdDictCodec 是字典绑定的编解码器：池化 encoder（逐调用实例，单并发最优）
+// + 共享 decoder。共享的是池（性能——dict-bound encoder 构造昂贵），
+// 隔离的是选择权（正确性——连接持有指针引用，进程单例的覆盖污染不再可能）。
+type ZstdDictCodec struct {
+	ID      uint32
+	raw     []byte
+	encPool sync.Pool
+	dec     *zstd.Decoder
+}
+
+// zstdDictRegistry 键控注册表：key = dict_id:sha256(raw) 前 16 字节 hex。
+// 上界 zstdDictRegistryCap（LRU 淘汰）防恶意服务端字典洪水。
+var (
+	zstdDictMu  sync.Mutex
+	zstdDictReg = map[string]*ZstdDictCodec{}
+	zstdDictOrd list.List
+)
+
+const zstdDictRegistryCap = 8
+
+// RegisterZstdDict 注册/获取字典 codec（幂等：同 (id, 内容) 返回同一实例）。
+// 超出注册表上界时淘汰最久未使用条目。
+func RegisterZstdDict(id uint32, dict []byte) (*ZstdDictCodec, error) {
+	if id == 0 {
+		return nil, NewError(ErrCodeConfig, "zstd dict id must be non-zero")
+	}
+	if len(dict) == 0 {
+		return nil, NewError(ErrCodeConfig, "zstd dict must not be empty")
+	}
+	sum := sha256.Sum256(dict)
+	key := fmt.Sprintf("%d:%x", id, sum[:16])
+	zstdDictMu.Lock()
+	defer zstdDictMu.Unlock()
+	if c, ok := zstdDictReg[key]; ok {
+		touchZstdDictLocked(key, c)
+		return c, nil
+	}
+	raw := append([]byte(nil), dict...)
+	c := &ZstdDictCodec{ID: id, raw: raw}
+	c.encPool.New = func() any {
+		enc, err := zstd.NewWriter(nil,
+			zstd.WithEncoderConcurrency(1),
+			zstd.WithEncoderLevel(zstd.SpeedDefault),
+			zstd.WithEncoderDictRaw(id, raw))
+		if err != nil {
+			return err // New 返回 error 时 Pool.Get panic——构造失败在此即不可达
+		}
+		return enc
+	}
+	dec, err := zstd.NewReader(nil,
+		zstd.WithDecoderMaxMemory(MaxDecompressedSize),
+		zstd.WithDecoderDictRaw(id, raw))
+	if err != nil {
+		return nil, WrapError(ErrCodeInternal, "zstd dict decoder", err)
+	}
+	c.dec = dec
+	zstdDictReg[key] = c
+	touchZstdDictLocked(key, c)
+	for zstdDictOrd.Len() > zstdDictRegistryCap {
+		front := zstdDictOrd.Front()
+		delete(zstdDictReg, front.Value.(string))
+		zstdDictOrd.Remove(front)
+	}
+	return c, nil
+}
+
+func touchZstdDictLocked(key string, c *ZstdDictCodec) {
+	for e := zstdDictOrd.Back(); e != nil; e = e.Prev() {
+		if e.Value.(string) == key {
+			zstdDictOrd.MoveToBack(e)
+			return
+		}
+	}
+	zstdDictOrd.PushBack(key)
+	_ = c
+}
+
+// ResetZstdDicts 清空注册表。测试隔离专用（生产静态字典部署不轮换）；
+// 公共面保留是因为 conformance 为外部包无法用 export_test——doc 声明禁用于生产。
+func ResetZstdDicts() {
+	zstdDictMu.Lock()
+	defer zstdDictMu.Unlock()
+	zstdDictReg = map[string]*ZstdDictCodec{}
+	zstdDictOrd.Init()
+}
+
+// compressZstdDict 用给定字典 codec 压缩；codec 缺失时报错（fail-closed：
+// 字典缺失只会让发送失败，不会静默降级到错误编码）。
+func compressZstdDict(src []byte, dict *ZstdDictCodec) ([]byte, error) {
+	if dict == nil {
+		return nil, NewError(ErrCodeBatchInvalid, "zstd dict compression requested but no dict provided")
+	}
+	v := dict.encPool.Get()
+	enc, ok := v.(*zstd.Encoder)
+	if !ok {
+		return nil, NewError(ErrCodeInternal, "zstd dict encoder pool corrupted")
+	}
+	defer dict.encPool.Put(enc)
+	return enc.EncodeAll(src, nil), nil
+}
+
+// decompressZstdDict 用给定字典 codec 解压（DecodeAll 受 WithDecoderMaxMemory
+// 上限约束——解压炸弹防护与流式路径同值）。codec 缺失时 fail-closed 报错。
+func decompressZstdDict(src []byte, dict *ZstdDictCodec) ([]byte, error) {
+	if dict == nil {
+		return nil, NewError(ErrCodeEnvelopeOpenFail, "zstd dict compression present but no dict provided")
+	}
+	out, err := dict.dec.DecodeAll(src, nil)
+	if err != nil {
+		return nil, WrapError(ErrCodeEnvelopeOpenFail, "zstd dict decode", err)
+	}
+	if len(out) > MaxDecompressedSize {
+		return nil, NewError(ErrCodeDecompressLimit, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
+	}
+	return out, nil
+}
+
+func compress(c corepb.Compression, src []byte, dict *ZstdDictCodec) ([]byte, error) {
 	switch c {
-	case corepb.Compression_COMPRESSION_UNSPECIFIED, corepb.Compression_COMPRESSION_NONE:
-		return src, nil
 	case corepb.Compression_COMPRESSION_GZIP:
 		var buf bytes.Buffer
-		w := gzipWriterPool.Get().(*gzip.Writer)
-		w.Reset(&buf)
+		w := gzip.NewWriter(&buf)
 		if _, err := w.Write(src); err != nil {
-			_ = w.Close() // best-effort cleanup；writer 可能处于损坏状态，不放回 pool
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip compress", err)
+			return nil, WrapError(ErrCodeInternal, "gzip compress", err)
 		}
 		if err := w.Close(); err != nil {
-			// Close 失败：writer 可能已损坏，不放回 pool（与 Write 错误路径一致）。
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip close", err)
+			return nil, WrapError(ErrCodeInternal, "gzip close", err)
 		}
-		gzipWriterPool.Put(w)
 		return buf.Bytes(), nil
 	case corepb.Compression_COMPRESSION_ZSTD:
 		enc := zstdEncoderPool.Get().(*zstd.Encoder)
 		defer zstdEncoderPool.Put(enc)
-		out := enc.EncodeAll(src, make([]byte, 0, len(src)))
-		return out, nil
+		return enc.EncodeAll(src, nil), nil
+	case corepb.Compression_COMPRESSION_ZSTD_DICT:
+		return compressZstdDict(src, dict)
 	case corepb.Compression_COMPRESSION_LZ4:
 		var buf bytes.Buffer
-		w := lz4WriterPool.Get().(*lz4.Writer)
-		w.Reset(&buf)
+		w := lz4.NewWriter(&buf)
 		if _, err := w.Write(src); err != nil {
-			_ = w.Close() // writer 可能已损坏，不放回 pool
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 compress", err)
+			return nil, WrapError(ErrCodeInternal, "lz4 compress", err)
 		}
 		if err := w.Close(); err != nil {
-			// Close 失败：writer 可能已损坏，不放回 pool（与 gzip 路径一致）。
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 close", err)
+			return nil, WrapError(ErrCodeInternal, "lz4 close", err)
 		}
-		lz4WriterPool.Put(w)
 		return buf.Bytes(), nil
 	default:
-		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
+		return nil, NewError(ErrCodeBatchInvalid, fmt.Sprintf("unsupported compression %v", c))
 	}
 }
 
 // decompress 按算法解压 src，强制 MaxDecompressedSize 上限防放大攻击。
-func decompress(c corepb.Compression, src []byte) ([]byte, error) {
+func decompress(c corepb.Compression, src []byte, dict *ZstdDictCodec) ([]byte, error) {
 	switch c {
-	case corepb.Compression_COMPRESSION_UNSPECIFIED, corepb.Compression_COMPRESSION_NONE:
-		return src, nil
 	case corepb.Compression_COMPRESSION_GZIP:
 		r := gzipReaderPool.Get().(*gzip.Reader)
 		if err := r.Reset(bytes.NewReader(src)); err != nil {
 			gzipReaderPool.Put(r)
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip reader", err)
+			return nil, WrapError(ErrCodeEnvelopeOpenFail, "gzip reader", err)
 		}
 		defer gzipReaderPool.Put(r)
-		var buf bytes.Buffer
-		buf.Grow(len(src) * 4)
-		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
-		if _, err := io.Copy(&buf, lr); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "gzip decompress", err)
-		}
-		if lr.N == 0 {
-			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
-		}
-		return buf.Bytes(), nil
+		return copyLimited(r)
 	case corepb.Compression_COMPRESSION_ZSTD:
 		dec := zstdDecoderPool.Get().(*zstd.Decoder)
 		defer zstdDecoderPool.Put(dec)
-		// 用流式 + LimitedReader 防止 zstd 炸弹：DecodeAll 会在大小检查前分配完整解压内容。
 		if err := dec.Reset(bytes.NewReader(src)); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "zstd reset", err)
+			return nil, WrapError(ErrCodeEnvelopeOpenFail, "zstd reset", err)
 		}
-		defer func() { _ = dec.Reset(nil) }() //nolint:errcheck // pool 归还前清理，错误无关紧要
-		lr := &io.LimitedReader{R: dec.IOReadCloser(), N: MaxDecompressedSize + 1}
-		var buf bytes.Buffer
-		buf.Grow(len(src) * 4)
-		if _, err := io.Copy(&buf, lr); err != nil {
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "zstd decompress", err)
-		}
-		if lr.N == 0 {
-			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
-		}
-		return buf.Bytes(), nil
+		defer func() { _ = dec.Reset(nil) }()
+		return copyLimited(dec.IOReadCloser())
+	case corepb.Compression_COMPRESSION_ZSTD_DICT:
+		return decompressZstdDict(src, dict)
 	case corepb.Compression_COMPRESSION_LZ4:
 		r := lz4ReaderPool.Get().(*lz4.Reader)
 		r.Reset(bytes.NewReader(src))
-		lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
-		var buf bytes.Buffer
-		buf.Grow(len(src) * 4)
-		if _, err := io.Copy(&buf, lr); err != nil {
-			lz4ReaderPool.Put(r)
-			return nil, WrapError(NumEnvelope, CodeEnvelope, "lz4 decompress", err)
-		}
-		lz4ReaderPool.Put(r)
-		if lr.N == 0 {
-			return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
-		}
-		return buf.Bytes(), nil
+		defer lz4ReaderPool.Put(r)
+		return copyLimited(r)
 	default:
-		return nil, NewError(NumEnvelope, CodeEnvelope, fmt.Sprintf("unsupported compression: %v", c))
+		return nil, NewError(ErrCodeBatchInvalid, fmt.Sprintf("unsupported compression %v", c))
 	}
 }
 
-// EncodeEnvelope 序列化 envelope 为 wire bytes（proto）。
-func EncodeEnvelope(env *SecureEnvelope) ([]byte, error) {
-	return proto.Marshal(env)
-}
-
-// DecodeEnvelope 从 wire bytes 解析 envelope。
-func DecodeEnvelope(data []byte) (*SecureEnvelope, error) {
-	var env SecureEnvelope
-	if err := proto.Unmarshal(data, &env); err != nil {
-		return nil, WrapError(NumEnvelope, CodeEnvelope, "decode envelope", err)
+// copyLimited 流式解压到 MaxDecompressedSize+1（超限即报错，先于任何放大分配）。
+func copyLimited(r io.Reader) ([]byte, error) {
+	lr := &io.LimitedReader{R: r, N: MaxDecompressedSize + 1}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, lr); err != nil {
+		return nil, WrapError(ErrCodeEnvelopeOpenFail, "decompress", err)
 	}
-	return &env, nil
+	if lr.N == 0 {
+		return nil, NewError(ErrCodeDecompressLimit, fmt.Sprintf("decompressed exceeds %d bytes", MaxDecompressedSize))
+	}
+	return buf.Bytes(), nil
 }

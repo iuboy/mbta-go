@@ -11,7 +11,7 @@ import (
 	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
-// Server 是 binding 无关的服务端外壳，对称于客户端 Phase 2 下沉。
+// Server 是 binding 无关的服务端外壳。
 //
 // 类型参数：
 //   - L：binding 特有的 listener 类型（v1.*Listener / ntls.*Listener）
@@ -28,10 +28,10 @@ import (
 type Server[L, C any] struct {
 	mu       sync.Mutex
 	listener L
-	// runState 是原子状态机，替代旧 listenerSet bool，消除 Run 的 TOCTOU：
+	// runState 是原子状态机（而非 listenerSet bool），消除 Run 的 TOCTOU：
 	//   stopped(0) → starting(1) → running(2) → stopped(0)
 	// CAS stopped→starting 保证只有一个 goroutine 进入 Listen；若 CAS 失败说明
-	// 另一个 Run 正在进行（旧实现「检查 bool → 解锁 → Listen → 加锁置 bool」
+	// 另一个 Run 正在进行（「检查 bool → 解锁 → Listen → 加锁置 bool」
 	// 允许两个并发 Run 都通过检查，各自 Listen 导致 fd/ctx-cancel goroutine 泄漏）。
 	runState atomic.Uint32
 	connSem  chan struct{}
@@ -77,9 +77,15 @@ type RunSpec[L, C any] struct {
 // 各 binding 的 Start 只需：校验配置 → 调 NewServer → 调 Run。
 //
 // 并发安全：用 CAS 状态机（stopped→starting→running）保证同一时刻只有一个
-// Run 进入 Listen，消除旧实现「检查 listenerSet → 解锁 → Listen → 加锁置位」
+// Run 进入 Listen，消除「检查 listenerSet → 解锁 → Listen → 加锁置位」
 // 的 TOCTOU 窗口（两个并发 Run 都能通过检查，各自 Listen 导致 fd/goroutine 泄漏）。
 func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
+	// fail-fast：RunSpec 任一闭包未设置会在后续 Listen/Accept 调用时 nil panic，
+	// 在此集中校验，给出明确错误而非运行时 panic。
+	if spec.Listen == nil || spec.Accept == nil || spec.NewTransport == nil ||
+		spec.CloseConn == nil || spec.AddrOf == nil || spec.CloseListener == nil {
+		return errors.New("binding.Server.Run: RunSpec fields must all be non-nil")
+	}
 	// CAS stopped→starting：只有一个 goroutine 能进入 Listen。
 	if !s.runState.CompareAndSwap(runStateStopped, runStateStarting) {
 		return errors.New("binding.Server.Run: already running")
@@ -110,10 +116,22 @@ func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
 
 	// ctx 取消时关闭 listener：被 Accept 阻塞的循环因此解除并退出。
 	// 监听器 Close 幂等，与 Server.Close 并发调用安全。
+	// done channel 让此 goroutine 在 Run 返回后也退出，即便调用方忘记取消 ctx。
+	done := make(chan struct{})
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-done:
+			// Run 已返回，但 ctx.Done 同时就绪时 select 可能恰好选中 done（随机）。
+			// 此时若不关闭，Run 的 defer 已把状态回置 stopped，Close() 的 CAS 会失败
+			// 跳过关闭——listener fd 泄漏。ctx 已取消时仍需关闭。
+			if ctx.Err() == nil {
+				return
+			}
+		}
 		_ = spec.CloseListener(l)
 	}()
+	defer close(done)
 
 	return AcceptLoop(ctx, s.connSem,
 		func(ctx context.Context) (C, error) { return spec.Accept(ctx, l) },
