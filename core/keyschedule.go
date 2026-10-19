@@ -209,6 +209,26 @@ type SessionKeys struct {
 	DualMACKey []byte
 }
 
+// Wipe 就地清零全部密钥材料（best-effort 纵深防御）。
+//
+// 调用方必须保证调用时刻无任何并发使用者（读/写循环均已退出）：本方法直接写
+// 密钥字节，与并发 Seal/Open 构成数据竞争。Go 移动式 GC 下不保证堆中不存在
+// 密钥副本（slice 传参/扩容不可避免），因此这是降低堆转储/内存取证暴露面的
+// 缓解措施，不是可靠销毁。客户端侧因 send 路径无完成同步（用户 goroutine 持有
+// keys 引用做 Seal），当前不擦除——服务端用法见 handler.go Handle 尾部注释。
+func (k *SessionKeys) Wipe() {
+	if k == nil {
+		return
+	}
+	for _, b := range [][]byte{k.C2SKey, k.S2CKey, k.HandshakeKey, k.DualMACKey} {
+		for i := range b {
+			b[i] = 0
+		}
+	}
+	k.NoncePrefixC = [4]byte{}
+	k.NoncePrefixS = [4]byte{}
+}
+
 // pskCK 计算密钥日程的中间链（ck → pskMix → pskCK）——DeriveSessionKeys 与
 // pskCK 计算密钥日程的中间链（ck → pskMix → pskCK）——DeriveSessionKeys 与
 // DeriveDualMACKey 共用（协商 dual_integrity 时不重算）。

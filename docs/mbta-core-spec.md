@@ -160,6 +160,7 @@ finished     = HMAC(H, key = handshake_key, msg = th_full)
 6. **handshake_key 独立派生**：finished 不复用数据密钥（密钥用途分隔，对齐 TLS 1.3 / Noise 的 finished 子密钥）。
 7. **nonce 构造**：`nonce = nonce_prefix(4B) ‖ seq(8B 固定宽度大端)`，共 12B。seq 以全 64 位宽度参与 nonce——截断重用（seq=k 与 k+2³² 同 nonce 的 GCM 灾难）在构造上不可表达。
 8. **s2c_key 首版预留**：派生但无 s→c 数据加密帧使用。
+9. **token 熵要求（MUST）**：token 必须 ≥128bit 随机熵（如 32 字节随机数的 hex/base64 表示）。token_proof 是对称 PSK 式证明——截获一次 HELLO（transcript 与 proof 均可从流量重建）后，攻击者可对候选 token **离线**逐个验证（HMAC 密钥即 token）。低熵 token（口令、字典词）等于把握手认证降级为离线猜解；此为对称证明的固有属性（同 TLS-PSK），唯一防线是 token 熵。
 
 ### 2.3 split 长度表
 

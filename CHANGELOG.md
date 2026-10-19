@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 安全审查修复（代码级检查产出：1 LOW + 3 INFO 处置）
+
+- **[LOW] 日志 token 原文前缀泄露**：proof 验证失败告警的 `first_prefix` 字段此前输出候选 token 原文前 8 字符（进入日志聚合系统即部分秘密扩散）；改为 `first_fingerprint`——SHA-256 十六进制指纹前 8 字符（`tokenFingerprint`），诊断语义（区分"无候选"vs"候选在但证明不匹配"、跨日志行关联）完整保留，零原文暴露。
+- **[INFO 落地] 服务端会话密钥 best-effort 擦除**：新增 `core.SessionKeys.Wipe()`；服务端 `Handle` 收敛尾在 data goroutine 全部退出（干净路径）后清零全部密钥材料——abandon 路径跳过（仍有 goroutine 持引用，直接写构成数据竞争），客户端侧不擦除（send 路径无完成同步，用户 goroutine 可能正持 keys 做 Seal；teardownPhase 收敛点 impact 评级 CRITICAL，强行接入引入 race）。Wipe 契约有单测锁定（含 DualMACKey/nonce 前缀/nil 安全）。Go 移动式 GC 下此为缓解措施而非可靠销毁（注释明示）。
+- **[INFO 入档] token 高熵要求升格规范性 MUST**：core spec §2.2 要点 9——token_proof 属对称 PSK 式证明，截获 HELLO 后可离线逐候选验证，低熵 token 使认证退化为离线字典攻击；token 必须 ≥128bit 随机熵。README TokenValidator 条目同步。
+- **[INFO 存档] 无 rekey**：key_epoch 恒 0 属既有设计裁决（spec §14.1 演进项），本轮不改。
+
 ### 依赖更新与兼容适配
 
 - **pollux-go v0.4.4→v0.5.2**：承接其三轮安全审查成果——tlcp 空套件回退对齐 DefaultCipherSuites（防静默降级到无 PFS+CBC）、`configToNative` 入口套件校验、客户端 ALPN 信任门、CKE 解密失败错误统一（消格式预言机）；本仓库 import 面（cert/sm3/sm4/smx509/tlcp 核心 API）零适配，双模式（standalone 代理 / workspace 本地）全量验证通过。已知事项：smx509 存在 IP 名称约束绕过缺口（gmsm 上游同步问题，pollux-go 侧已实证并文档化）——依赖 IP 名称约束做隔离的部署不应将 GM 校验路径作为唯一防线；本库 ntls 不使用 quicgm（fork replace 不随其发布生效的警告不适用）。

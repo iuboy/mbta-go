@@ -5,6 +5,8 @@ package protocol
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -193,8 +195,10 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 	}
 	done := make(chan struct{})
 	go func() { h.dataWG.Wait(); close(done) }()
+	dataClean := false
 	select {
 	case <-done:
+		dataClean = true
 	case <-time.After(drainTimeout):
 		slog.Warn("data goroutines did not exit in drain timeout; abandoning", "session", string(h.getSessionID()))
 	}
@@ -212,6 +216,17 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 		case <-time.After(drainTimeout):
 			sinkCancel()
 			slog.Warn("sink workers did not drain; abandoning", "session", string(h.getSessionID()))
+		}
+	}
+
+	// 会话密钥 best-effort 擦除（纵深防御）：仅 data goroutine 全部退出（dataClean）
+	// 时执行——此时密钥的唯二使用者（握手/数据解密路径）都已终止，直接写字节无
+	// 数据竞争；abandon 路径（仍有 goroutine 持引用运行）跳过。sink worker 不接触
+	// 密钥（处理的是已解码 batch），无需等待。客户端侧不擦除：send 路径无完成同步，
+	// 用户 goroutine 可能正持有 keys 做 Seal（见 core.SessionKeys.Wipe 注释）。
+	if dataClean {
+		if k := h.keys.Load(); k != nil {
+			k.Wipe()
 		}
 	}
 	return err
@@ -288,6 +303,15 @@ func helloNakCode(err error) uint32 {
 	return code
 }
 
+// tokenFingerprint 返回 token 的 SHA-256 十六进制指纹前 8 字符，用于日志中的
+// 候选标识诊断。绝不返回 token 原文的任何片段（含前缀）——日志会进入聚合系统，
+// 部分秘密的累积同样是泄露面。指纹确定性（同 token 同值），满足「跨日志行关联
+// 同一候选」的诊断需求。
+func tokenFingerprint(tok string) string {
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:])[:8]
+}
+
 // handleHello 执行 1-RTT 握手（r3 §5.1）：
 // 解码校验 → token_proof 验证 → eph/ECDH → 派生 → HELLO_ACK。
 func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
@@ -330,13 +354,15 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 		return err
 	}
 	if verr := core.VerifyTokenProof(h.config.Auth, hello.GetProfile(), hello.GetAgentId(), thHello, hello.GetTokenProof()); verr != nil {
-		// 候选诊断字段：candidates 数量/首候选前缀直接区分「候选缺失
+		// 候选诊断字段：candidates 数量/首候选指纹直接区分「候选缺失
 		// （服务端未纳管该 token 类别）」与「候选在但证明不匹配」两类故障。
+		// first_fingerprint 是候选 token 的 SHA-256 指纹前缀（tokenFingerprint），
+		// 不是 token 原文的任何片段——日志聚合系统不得累积部分秘密。
 		cands, _ := h.config.Auth.ResolveToken(hello.GetAgentId())
 		slog.Warn("token proof verification failed", "agent", core.SanitizeForLog(hello.GetAgentId()),
-			"candidates", len(cands), "first_prefix", func() string {
-				if len(cands) > 0 && len(cands[0]) > 8 {
-					return cands[0][:8]
+			"candidates", len(cands), "first_fingerprint", func() string {
+				if len(cands) > 0 {
+					return tokenFingerprint(cands[0])
 				}
 				return ""
 			}(), "hello_caps", fmt.Sprint(hello.GetCapabilities()))
