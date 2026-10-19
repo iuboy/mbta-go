@@ -2,24 +2,27 @@
 
 本文件记录 mbta-go 的显著变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
-## [Unreleased]
+## [0.7.0] - 2026-10-19
 
-### 安全审查修复（代码级检查产出：1 LOW + 3 INFO 处置）
+### 破坏性变更
 
-- **[LOW] 日志 token 原文前缀泄露**：proof 验证失败告警的 `first_prefix` 字段此前输出候选 token 原文前 8 字符（进入日志聚合系统即部分秘密扩散）；改为 `first_fingerprint`——SHA-256 十六进制指纹前 8 字符（`tokenFingerprint`），诊断语义（区分"无候选"vs"候选在但证明不匹配"、跨日志行关联）完整保留，零原文暴露。
-- **[INFO 落地] 服务端会话密钥 best-effort 擦除**：新增 `core.SessionKeys.Wipe()`；服务端 `Handle` 收敛尾在 data goroutine 全部退出（干净路径）后清零全部密钥材料——abandon 路径跳过（仍有 goroutine 持引用，直接写构成数据竞争），客户端侧不擦除（send 路径无完成同步，用户 goroutine 可能正持 keys 做 Seal；teardownPhase 收敛点 impact 评级 CRITICAL，强行接入引入 race）。Wipe 契约有单测锁定（含 DualMACKey/nonce 前缀/nil 安全）。Go 移动式 GC 下此为缓解措施而非可靠销毁（注释明示）。
-- **[INFO 入档] token 高熵要求升格规范性 MUST**：core spec §2.2 要点 9——token_proof 属对称 PSK 式证明，截获 HELLO 后可离线逐候选验证，低熵 token 使认证退化为离线字典攻击；token 必须 ≥128bit 随机熵。README TokenValidator 条目同步。
-- **[INFO 存档] 无 rekey**：key_epoch 恒 0 属既有设计裁决（spec §14.1 演进项），本轮不改。
+- **时间字段毫秒→纳秒**（4ce8791）：`SignalRecord` 的 time/observed/start/end 与 `Ping`/`Pong` 的 `*_unix_ms` → `*_unix_ns`。proto 字段号不变（wire 二进制兼容），但 JSON 名与数值语义破坏性变更——跨进程时间统一纳秒。构造点 `UnixMilli`→`UnixNano`，构造/断言/示例全部随动。
 
-### 依赖更新与兼容适配
+### 新特性
 
-- **pollux-go v0.4.4→v0.5.2**：承接其三轮安全审查成果——tlcp 空套件回退对齐 DefaultCipherSuites（防静默降级到无 PFS+CBC）、`configToNative` 入口套件校验、客户端 ALPN 信任门、CKE 解密失败错误统一（消格式预言机）；本仓库 import 面（cert/sm3/sm4/smx509/tlcp 核心 API）零适配，双模式（standalone 代理 / workspace 本地）全量验证通过。已知事项：smx509 存在 IP 名称约束绕过缺口（gmsm 上游同步问题，pollux-go 侧已实证并文档化）——依赖 IP 名称约束做隔离的部署不应将 GM 校验路径作为唯一防线；本库 ntls 不使用 quicgm（fork replace 不随其发布生效的警告不适用）。
-- **prometheus/common v0.72.0→v0.72.1**、x/net v0.60.0→v0.61.0（pollux-go 随动）。protobuf pin 保持 v1.36.12（CI protoc-gen-go pin 不变）。
-- **Go 基线 go1.26.5→go1.26.9（stdlib 安全修复）**：清零 govulncheck 的 8 条 stdlib 漏洞（GO-2026-6617 net/http HPACK 竞态、GO-2026-6613/6612/6611/6607/6603 crypto/tls、GO-2026-6090 等，修复版最大交集 go1.26.9）；CI 以 `go-version-file: go.mod` 自动取新基线。**恢复 Vulnerability scan 硬门禁**（移除 continue-on-error——"TLS 库必然命中"的旧理由不成立：stdlib 漏洞由 go 指令钉住，升级即清零，扫描失败应显式处理而非静默放行）。
-- **直接依赖全量更新**：gmsm v0.44.1→v0.45.0、quic-go v0.61.0→v0.64.0、x/crypto v0.54.0→v0.58.0、x/sync v0.22.0→v0.24.0、cbor v2.9.2→v2.9.6、klauspost/compress v1.19.2→v1.20.3、pierrec/lz4 v4.1.28→v4.1.33、prometheus/client_golang v1.24.1→v1.25.0（client_model/common/procfs 随动）、x/net v0.57.0→v0.60.0、x/sys v0.47.0→v0.49.0。
-- **protobuf v1.36.11→v1.36.12**（prometheus/common v0.72.0 硬性要求，MVS 不可回调）：仍在握手互操作策略 pin 的 1.36 minor 内（patch 级，wire 序列化稳定）；CI `protoc-gen-go` pin 同步 v1.36.11→v1.36.12（插件版本写入生成文件头，drift 校验依赖两侧一致），corepb 已按 v1.36.12 重新生成验证逐字节一致。
-- **ntls TLCP ServerName 推导**（pollux-go tlcp 新增握手期校验「ServerName 与 InsecureSkipVerify 至少其一」的适配）：客户端未显式指定 ServerName 且未跳过校验时，从拨号地址 host 推导（与 crypto/tls 语义对齐），由证书 SAN 完成校验——存量「仅配 CAFile」的调用方无需改动即恢复可连。
-- **lint 收敛**：handleHello 认知复杂度 33→达标（ECDH/密钥派生段抽取 `deriveServerKeys`、NAK 码映射抽取 `helloNakCode`，行为不变）；注释格式修正。
+- **运维命令通道**（58da826/3d38623/014c016/4230ced）：COMMAND/COMMAND_ACK 帧对 + `control_commands` 能力位（客户端 fail-fast 拒绝未知能力）+ `RULESET_APPLY` 命令类型（安全检测规则包签名信封下发）+ facade `WithCommandRegistry` 透传。READY 即登记命令路由，OnSession(CONNECTED) 后接收方即可向 agent 下发命令。
+- **应用层心跳**（394beba）：双 binding（v1 QUIC / ntls TCP）注入，消除 QUIC control stream 5 分钟空闲断连。
+- **会话生命周期契约**（22cc9dc）：OnSession conformance 测试锁定 nil 容忍与事件投递。
+
+### 安全
+
+- **代码级安全审查修复**（b5978cd）：proof 失败告警 token 原文前缀 → SHA-256 指纹（first_fingerprint，零原文暴露）；新增 `core.SessionKeys.Wipe()` 服务端干净收敛路径密钥擦除（abandon/客户端侧不擦除的裁决见实现注释）；token 高熵要求（≥128bit）升格规范 MUST（spec §2.2 要点 9 + README）。
+- **Go 基线 1.26.9 + vuln 硬门禁恢复**（99e0402）：清零 8 条 stdlib 漏洞（GO-2026-6617 等），移除 Vulnerability scan 的 continue-on-error。
+- **DISCONNECTED 回调 nil 守卫**（59d79a7/46b8e41）。
+
+### 依赖
+
+- pollux-go v0.4.4→v0.5.2（tlcp 安全加固批承接：空套件回退对齐默认姿态/入口套件校验/ALPN 信任门/CKE 预言机消除；smx509 IP 名称约束缺口已知事项入档）、quic-go v0.61.0→v0.64.0、gmsm v0.45.0、x/crypto v0.58.0、cbor v2.9.6、klauspost/compress v1.20.3、pierrec/lz4 v4.1.33、prometheus 全家 v1.25.0 系、protobuf v1.36.11→v1.36.12（prometheus/common 硬性要求，pin-minor 策略内；CI protoc-gen-go pin 同步）、ntls TLCP ServerName 地址推导（pollux-go 新握手校验适配）。
 
 ## [0.6.0] - 2026-08-22
 
