@@ -36,27 +36,25 @@ type ntlsClientTransport struct {
 	conn       net.Conn
 	writeSem   chan struct{} // 初始持有 1 token；Close 后不归还以阻止 write-after-close
 	closed     atomic.Bool
+	done       chan struct{} // CloseConn 关闭：写路径快速失败而非在空信号量上永久挂起
 }
 
 // newNTLSClientTransport 初始化写信号量。
 func newNTLSClientTransport() *ntlsClientTransport {
 	sem := make(chan struct{}, 1)
 	sem <- struct{}{}
-	return &ntlsClientTransport{writeSem: sem}
+	return &ntlsClientTransport{writeSem: sem, done: make(chan struct{})}
 }
 
 // SetFrameLimit 注入协商帧上限（HELLO_ACK 后由协议层调用）。
 func (t *ntlsClientTransport) SetFrameLimit(maxBytes uint64) { t.frameLimit.Store(maxBytes) }
 
+// ReadFrame 从单连接读下一帧（control/data 帧共用同一读路径，type 高位通道域
+// 由对端按帧头分流）。ctx 无 deadline 时落到 core.DefaultReadTimeout（5min），
+// 长连接活性由应用层 PING/PONG 心跳维持。
 func (t *ntlsClientTransport) ReadFrame(ctx context.Context) (core.Frame, error) {
-	fl := t.frameLimit.Load()
-	if fl == 0 {
-		return core.ReadFrameCtx(ctx, t.conn)
-	}
-	return core.ReadFrameCtxLimit(ctx, t.conn, core.FrameLimits{MaxFrameBytes: fl})
+	return core.ReadFrameCtxLimit(ctx, t.conn, core.LimitsFor(t.frameLimit.Load()))
 }
-
-// 读超时统一用 core.DefaultReadTimeout。
 
 // WriteFrame 写一帧（control/data 帧均写单连接，type 通道域只影响对端分流）。
 // 受 ctx 约束（设 SetWriteDeadline + 写锁等待可取消），防止慢速/无响应对端导致
@@ -65,9 +63,13 @@ func (t *ntlsClientTransport) WriteFrame(ctx context.Context, typ uint8, payload
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// 获取写信号量（或响应 ctx 取消；CloseConn 已关闭时立即失败）。
+	// 获取写信号量（或响应 ctx 取消/连接关闭）：CloseConn 已 drain 且不归还
+	// 信号量，携带无取消 ctx（如 context.Background()）的写若只等信号量会
+	// 永久挂起——done 分支保证 close 后快速失败（goroutine 不泄漏）。
 	select {
 	case <-t.writeSem:
+	case <-t.done:
+		return core.NewError(core.ErrCodeStream, "transport closed")
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -88,15 +90,24 @@ func (t *ntlsClientTransport) WriteFrame(ctx context.Context, typ uint8, payload
 		return core.WrapError(core.ErrCodeStream, "set write deadline", err)
 	}
 	defer func() { _ = t.conn.SetWriteDeadline(time.Time{}) }()
-	return core.Write(t.conn, typ, 0, payload)
+	if err := core.Write(t.conn, typ, 0, payload); err != nil {
+		// 写失败（含部分写/短写）时拆除连接：半帧残留会使后续帧全部错位（流去
+		// 同步），故障表现远离根因——对齐服务端 tcpTransport.SendFrame 语义，
+		// 关 conn 迫使读循环出错、上层走重连。
+		_ = t.conn.Close()
+		return err
+	}
+	return nil
 }
 
-// 写超时统一用 core.DefaultWriteTimeout。
-
+// CloseConn 关闭底层连接：置 closed 并关闭 done（并发到达的 WriteFrame 快速失败），
+// drain 写信号量（5s 超时兜底）后关 conn。
 func (t *ntlsClientTransport) CloseConn() error {
 	// drain 写信号量（5s 超时兜底）并不归还：阻止后续 WriteFrame 在关闭后挂起或
-	// 对已关 conn 写（与服务端 tcpTransport.Close 对称）。
+	// 对已关 conn 写（与服务端 tcpTransport.Close 对称）。done 关闭让并发到达的
+	// WriteFrame 快速失败。
 	if t.closed.CompareAndSwap(false, true) {
+		close(t.done)
 		select {
 		case <-t.writeSem:
 		case <-time.After(5 * time.Second):
@@ -105,14 +116,20 @@ func (t *ntlsClientTransport) CloseConn() error {
 	return t.conn.Close()
 }
 
+// NewClient 创建 ntls 客户端（仅构造不连接；连接用 [Client.Connect]）。
+// 构造期 fail-fast 校验：Server 地址、Mode 合法性与凭证一致性（TLCP 双 SM2
+// 或 TLS 1.3 单证书）；Profile 未指定时默认国密组合（SM2+HKDF-SM3+SM4-GCM）。
 func NewClient(cfg ClientConfig) (*Client, error) {
 	if err := core.ValidateHostPort(cfg.Server); err != nil {
 		return nil, core.WrapError(core.ErrCodeConfig, "Server", err)
 	}
-	// ntls 特有校验（NewClient 构造期 fail-fast）：
+	// ntls 特有校验（NewClient 构造期 fail-fast）：模式合法性 +
 	// TLCP 双 SM2 凭证一致性；TLS1.3 单证书同填一致性。
 	if cfg.Credentials != nil {
-		if cfg.Credentials.TLSMode {
+		if err := cfg.Credentials.Mode.validate(); err != nil {
+			return nil, err
+		}
+		if cfg.Credentials.Mode.IsTLS13() {
 			if err := validateTLS13Creds(cfg.Credentials); err != nil {
 				return nil, err
 			}
@@ -242,10 +259,12 @@ func (c *Client) Close() error {
 	return c.core.Close()
 }
 
+// State 返回当前连接状态（见 [core.State]）。
 func (c *Client) State() core.State {
 	return c.core.State()
 }
 
+// SessionID 返回当前会话 ID（握手成功前返回空串）。
 func (c *Client) SessionID() string {
 	return c.core.SessionID()
 }

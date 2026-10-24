@@ -10,7 +10,7 @@ import (
 )
 
 // MaxSignalFieldLen 是 SignalRecord 单个字符串字段的最大字节长度。取值保守
-// （远小于 maxEventBytes 256KB），用于在协议入口拒绝异常长输入，兼顾日志注入
+// （远小于 max_batch_bytes 默认 8MB），用于在协议入口拒绝异常长输入，兼顾日志注入
 // 防护与内存放大抑制。
 const MaxSignalFieldLen = 4096
 
@@ -19,8 +19,8 @@ const MaxSignalFieldLen = 4096
 // 规范以保证互操作；误用 MaxSignalFieldLen(4096) 校验会远超规范上限。
 const MaxTraceStateFieldLen = 256
 
-// MaxAgentIDLen 是 agent_id 字段的最大字节长度。agent_id 作为 ReplayCache key、
-// metrics label 来源、sink 调用参数及日志标识，须严格限制长度以防 DoS 与日志注入。
+// MaxAgentIDLen 是 agent_id 字段的最大字节长度。agent_id 作为 metrics label 来源、
+// sink 调用参数、命令寻址目标及日志标识，须严格限制长度以防 DoS 与日志注入。
 const MaxAgentIDLen = 256
 
 // validateAgentID 校验 agent_id：非空、长度上限、不含控制字符（含 \t \n \r）。
@@ -53,7 +53,7 @@ func hasControlChars(s string) bool {
 
 // hasStrictControlChars 报告 s 是否含任何控制字符（含 \t \n \r 和 DEL）。
 // 用于 agent_id、attribute key、metric field key 等标识符——这些字段会出现在
-// 日志/metrics label/ReplayCache key 中，含换行符可构造日志注入攻击。
+// 日志/metrics label 中，含换行符可构造日志注入攻击。
 func hasStrictControlChars(s string) bool {
 	for _, r := range s {
 		if r < 0x20 || r == 0x7f {
@@ -75,7 +75,7 @@ func validateTextField(name, val string) error {
 	return nil
 }
 
-// validateHexID 校验 trace/span ID 字段的 W3C/OTel 格式约束（spec §6.2.1）：
+// validateHexID 校验 trace/span ID 字段的 W3C/OTel 格式约束（规范 §11.3 校验规则）：
 // 非空时必须是指定长度的小写 hex，且全零值非法。空值合法（表示该 signal 不参与
 // trace 关联）。wantBytes 是期望的字节数（trace_id=16，span_id=8）。
 //
@@ -129,7 +129,7 @@ func validateTraceStateEntryField(name, val string) error {
 	return nil
 }
 
-// validateTraceState 校验 W3C tracestate 成员（spec §6.2.2 / W3C Trace Context）。
+// validateTraceState 校验 W3C tracestate 成员（W3C Trace Context 规范）。
 // tracestate 最多 32 个成员，每个 key/value 不超 256 字符（W3C 规范上限）且不含
 // 控制字符。多余成员不静默截断——返回错误让调用方显式收敛，避免无声丢语义。
 func validateTraceState(entries []*TraceStateEntry) error {
@@ -150,8 +150,8 @@ func validateTraceState(entries []*TraceStateEntry) error {
 	return nil
 }
 
-// ValidateBatchTraceContext 校验 batch 级 W3C trace 上下文（spec §6.2.2，capability
-// w3c_trace_context）。客户端发送前置与服务端解码后共用。
+// ValidateBatchTraceContext 校验 batch 级 W3C trace 上下文（capability
+// trace_context）。客户端发送前置与服务端解码后共用。
 //
 // 与 validateSignalTraceContext 的关键区别：batch 级 TraceContext 一旦显式提供，
 // trace_id/span_id 必须非空——它是整批共享的继承点，没有「空=不参与」的退化语义

@@ -25,7 +25,7 @@
 | 帧格式 | core §1（2B 头 + varint；无 magic/version/channel） | 同左 |
 
 - TCP binding 使用**独立 TCP 监听端口**，MUST NOT 与 QUIC 在同一监听入口混合。
-- 两个 ALPN 由服务端 `TLSMode` 配置切换：false（默认）= `mbta-ntls/1`；true = `mbta-tls/1`。
+- 两个 ALPN 由服务端 `Mode` 配置切换：`ModeTLCP`（零值缺省）= `mbta-ntls/1`；`ModeTLS13` = `mbta-tls/1`。
 
 ---
 
@@ -170,8 +170,8 @@ go run test/data/ntls/gen_certs.go         # ntls/TLCP：SM2 签名证书 + 加�
 
 | 模式 | 必填配置 |
 |------|----------|
-| `mbta-ntls/1`（TLSMode=false） | `SignCertFile` + `SignKeyFile` + `EncCertFile` + `EncKeyFile`（四者缺一即构造失败）；可选 `CAFile`（mTLS） |
-| `mbta-tls/1`（TLSMode=true） | `CertFile` + `KeyFile`；可选 `CAFile`（提供即启用 mTLS：RequireAndVerifyClientCert） |
+| `mbta-ntls/1`（ModeTLCP） | `SignCertFile` + `SignKeyFile` + `EncCertFile` + `EncKeyFile`（四者缺一即构造失败）；可选 `CAFile`（mTLS） |
+| `mbta-tls/1`（ModeTLS13） | `CertFile` + `KeyFile`；可选 `CAFile`（提供即启用 mTLS：RequireAndVerifyClientCert） |
 
 ### 9.3 客户端凭证
 

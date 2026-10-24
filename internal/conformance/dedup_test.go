@@ -115,9 +115,12 @@ func TestDedup_BeyondWindow_Aborts(t *testing.T) {
 		t.Errorf("abort code = %d (%s), want %d (window_exceeded)",
 			a.GetCode(), core.CodeName(a.GetCode()), core.CodeWindowExceeded)
 	}
-	// 连接必须被拆除：Handle 返回。
+	// 连接必须被拆除：Handle 返回（带协议错误）。
 	select {
-	case <-env.handleErr:
+	case err := <-env.handleErr:
+		if err == nil {
+			t.Error("Handle returned nil after window violation; want error")
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("handler did not return after window violation")
 	}

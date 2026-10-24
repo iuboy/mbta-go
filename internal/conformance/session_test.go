@@ -30,8 +30,8 @@ func TestSession_NilCallbackDisconnectNoPanic(t *testing.T) {
 	// Handle 收尾含最多 ~5s 的 sink 排空等待（drainTimeout），等待上限须
 	// 与其解耦，避免贴边闪烁。
 	select {
-	case <-env.handleErr:
-		// Handle 正常返回即守卫生效；进程存活由测试继续执行隐式证明。
+	case err := <-env.handleErr:
+		_ = err // Handle 正常返回即守卫生效；进程存活由测试继续执行隐式证明。
 	case <-time.After(12 * time.Second):
 		t.Fatal("Handle did not return after transport close")
 	}
@@ -68,7 +68,8 @@ func TestSession_LifecycleEventsDelivered(t *testing.T) {
 		t.Fatalf("close transport: %v", err)
 	}
 	select {
-	case <-env.handleErr:
+	case err := <-env.handleErr:
+		_ = err // 只关心退出；错误经其他断言覆盖
 	case <-time.After(12 * time.Second):
 		t.Fatal("Handle did not return after transport close")
 	}

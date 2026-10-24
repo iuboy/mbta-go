@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
@@ -23,6 +24,7 @@ type quicTransport struct {
 	conn       *Conn
 	controlStr *quic.Stream
 	maxFrame   uint64 // 帧上限（policy.MaxFrameBytes；0=默认 16MB）
+	authed     atomic.Bool
 
 	controlMu sync.Mutex // control stream 写串行化
 
@@ -34,11 +36,17 @@ type quicTransport struct {
 	wg      sync.WaitGroup // 追踪活跃的 readDataStream goroutine，保证 dataCh 关闭前全部退出
 }
 
-// firstStreamTimeout 是等待客户端打开第一个（control）stream 的上限。
-// 认证前连接未通过 challenge-response：QUIC 层握手完成后保持静默的对端（仅靠
-// 连接层保活）可无限占用 connSem 并发槽位（DoS）。此超时把认证前的钉死窗口
-// 收敛为有界。测试可缩短（包内 var）。
-var firstStreamTimeout = 30 * time.Second
+// firstStreamTimeout 是等待客户端打开第一个（control）stream 的上限；
+// quicPreAuthReadTimeout 是认证前（HELLO 未通过）每帧读取的上限。二者共同把
+// 认证前的钉死窗口收敛为有界：QUIC 层握手完成后保持静默的对端（仅靠连接层
+// keepalive——服务端 KeepAlivePeriod 会主动 PING 使连接永不闲置）若无 pre-auth
+// 帧超时，可无限占用 connSem 并发槽位（DoS）。与 TCP binding 的
+// tcpPreAuthReadTimeout 对称；认证后切换到 core.DefaultReadTimeout（心跳 30s
+// 维持）。测试可缩短（包内 var）。
+var (
+	firstStreamTimeout     = 30 * time.Second
+	quicPreAuthReadTimeout = 30 * time.Second
+)
 
 // newQuicTransport accept 第一个 stream 作为 control stream，启动 data accept 循环；失败时关闭底层 QUIC 连接。
 //
@@ -61,9 +69,11 @@ func newQuicTransport(ctx context.Context, conn *Conn, maxFrame uint64) (*quicTr
 		conn:       conn,
 		controlStr: s,
 		maxFrame:   maxFrame,
-		dataCh:     make(chan core.Frame, 64),
-		dataErr:    make(chan error, 1),
-		done:       make(chan struct{}),
+		// 容量 8：消费阻塞（durable sink 慢/批队列满）时读侧停读、QUIC 流控
+		// 背压生效——64×16MB 帧上限的囤积驻留是 OOM 面（review P2-6 裁决）。
+		dataCh:  make(chan core.Frame, 8),
+		dataErr: make(chan error, 1),
+		done:    make(chan struct{}),
 	}
 	go t.acceptDataStreams(ctx)
 	if t.SupportsDatagram() {
@@ -127,6 +137,17 @@ func (t *quicTransport) readDataStream(s *quic.Stream) {
 		t.wg.Done()
 	}()
 	for {
+		// 认证前每帧设短 deadline（与 control 读同值）：慢滴攻击者在认证前
+		// 打开 data 流可使本 goroutine 在无界 core.Read 上永久阻塞——每连接
+		// 最多 MaxIncomingStreams 条流，钉住的 goroutine/内存随连接数放大。
+		// 认证后清除 deadline（空闲由连接层 idle timeout 与心跳约束）。
+		if !t.authed.Load() {
+			if err := s.SetReadDeadline(time.Now().Add(quicPreAuthReadTimeout)); err != nil {
+				return
+			}
+		} else {
+			_ = s.SetReadDeadline(time.Time{})
+		}
 		f, err := core.Read(s, t.limits())
 		if err != nil {
 			return
@@ -139,26 +160,36 @@ func (t *quicTransport) readDataStream(s *quic.Stream) {
 	}
 }
 
+// MarkAuthed 实现 protocol.AuthMarker：握手完成后由 handler 调用，认证前帧读
+// 超时从 quicPreAuthReadTimeout 切换到 core.DefaultReadTimeout（与 TCP binding
+// 的 tcpTransport.MarkAuthed 对称）。
+func (t *quicTransport) MarkAuthed() { t.authed.Store(true) }
+
 // limits 返回帧上限（0=默认）。
 func (t *quicTransport) limits() core.FrameLimits {
-	if t.maxFrame == 0 {
-		return core.DefaultLimits()
-	}
-	return core.FrameLimits{MaxFrameBytes: t.maxFrame}
+	return core.LimitsFor(t.maxFrame)
 }
 
 // RecvControlFrame 读 control stream 下一帧，受调用方 ctx 约束。
 // 委托 core.ReadFrameCtx：deadline 转换 + ctx.Done watcher（取消能立即唤醒阻塞读，
 // 此前入口一次性转换导致取消后最长滞留 DefaultReadTimeout=5 分钟，服务端停机时
 // handler goroutine 连同 connSem 槽位滞留）。
+// 认证前（HELLO 未通过）叠加 per-frame 短 deadline：调用方 ctx 无 deadline 时
+// 否则落到 DefaultReadTimeout=5min——配合服务端 KeepAlivePeriod 使静默对端可
+// 无限钉住 connSem 槽位（与 tcpTransport 的 pre-auth 档位对称）。
 func (t *quicTransport) RecvControlFrame(ctx context.Context) (core.Frame, error) {
 	if err := ctx.Err(); err != nil {
 		return core.Frame{}, err
 	}
+	if !t.authed.Load() {
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, quicPreAuthReadTimeout)
+			defer cancel()
+		}
+	}
 	return core.ReadFrameCtxLimit(ctx, t.controlStr, t.limits())
 }
-
-// control stream 读超时统一用 core.DefaultReadTimeout。
 
 // RecvDataFrame 从聚合 data channel 读下一帧。
 // dataCh 关闭时非阻塞读 dataErr 拿真实错误（cap=1 非阻塞发送可能丢错误，空则返回 io.EOF）。
@@ -240,7 +271,8 @@ func (t *quicTransport) Multiplexing() protocol.MultiplexModel {
 	return protocol.MultiplexQuicMultiStream
 }
 
-// RemoteAddr 返回 QUIC 对端地址。连接尚未建立或已关闭时返回 nil。
+// RemoteAddr 返回 QUIC 对端地址（conn 为 nil 时返回 nil，属防御分支；
+// newQuicTransport 构造后 conn 恒非 nil）。
 func (t *quicTransport) RemoteAddr() net.Addr {
 	if t.conn == nil {
 		return nil

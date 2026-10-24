@@ -1,5 +1,4 @@
-// Package main demonstrates a minimal MBTA client that connects to a server
-// and sends a batch of signal events.
+// Package main 演示一个最小的 MBTA 客户端：连接服务端并发送一批信号事件。
 package main
 
 import (
@@ -23,11 +22,12 @@ func main() {
 		mbtago.WithServer("localhost:7400"),
 		mbtago.WithAgent("example-agent", "my-secret-token"),
 		// 生产路径：加载服务端 CA 做证书校验（ServerName 与证书 SAN 匹配）。
-		// CA 文件可用仓库内脚本生成：bash test/data/certificates/gen_certs.sh
-		//（服务端需用同一 CA 签发的 server.crt/server.key）。
-		// InsecureSkipVerify 仅限本地临时调试，绝不可用于生产。
+		// 证书用仓库脚本生成后引用（路径相对本示例目录，与 server 示例一致）：
+		//   bash ../../test/data/certificates/gen_certs.sh
+		// InsecureSkipVerify 仅限本地临时调试，绝不可用于生产——本示例用的是
+		// CA 校验路径。
 		mbtago.WithV1Credentials(v1.ClientCredentials{
-			CAFile:     "ca.crt",
+			CAFile:     "../../test/data/certificates/ca.crt",
 			ServerName: "localhost",
 		}),
 	)

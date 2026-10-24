@@ -32,7 +32,10 @@ type CoreClientConfig struct {
 
 // CoreClient 是客户端协议核心。
 type CoreClient struct {
-	tr      ClientTransport
+	// tr 经 atomic.Pointer 发布：SetTransport（Handshake 前由 binding 调用）与
+	// close/fatalTeardown（用户可并发触发）存在无同步交错——此前裸字段是数据
+	// 竞态（-race 可复现）。Handshake 前 MUST 完成注入，注入后运行期不再替换。
+	tr      atomic.Pointer[ClientTransport]
 	cfg     CoreClientConfig
 	metrics core.Metrics
 	sm      *core.StateMachine
@@ -56,6 +59,13 @@ type CoreClient struct {
 	commandHandler   atomic.Pointer[CommandHandler]
 	seenCmdMu        sync.Mutex
 	seenCommands     map[string]struct{}
+	seenCmdOrder     []string // seenCommands 的到达序（环形淘汰最旧，见 markSeenCommand）
+
+	// timedOut 记录已向应用派发 timeout 回调的 seq（AckReaperLoop 写、handleResult
+	// 消费即清除）：迟到的真实 RESULT 不再二次回调。durable 模式的 ACCEPTED（中间态）
+	// → DURABLE（终态）两次派发不受影响——抑制仅以本地 timeout 派发为依据。
+	timedOutMu sync.Mutex
+	timedOut   map[uint64]struct{}
 
 	sendMu sync.Mutex
 
@@ -67,9 +77,10 @@ type CoreClient struct {
 	ackQueue        chan resultNotify
 	ackWorkerDone   chan struct{}
 
-	drainCh   chan struct{}
-	closeOnce sync.Once
-	connErr   error
+	drainCh       chan struct{}
+	closeOnce     sync.Once
+	lifecycleOnce sync.Once // StartLifecycle 幂等：二次调用不得替换字段（旧 goroutine 的 ctx 将永不取消）
+	connErr       error
 
 	readControlFn   func(context.Context)
 	heartbeatLoopFn func(context.Context)
@@ -95,8 +106,7 @@ func NewCoreClient(tr ClientTransport, cfg CoreClientConfig) *CoreClient {
 		meta = map[string]string{}
 	}
 	cfg.Meta = meta
-	return &CoreClient{
-		tr:      tr,
+	cc := &CoreClient{
 		cfg:     cfg,
 		metrics: cfg.Metrics,
 		sm:      core.NewStateMachine(),
@@ -104,19 +114,32 @@ func NewCoreClient(tr ClientTransport, cfg CoreClientConfig) *CoreClient {
 		agentID: cfg.AgentID,
 		drainCh: make(chan struct{}, 1),
 	}
+	if tr != nil {
+		cc.tr.Store(&tr)
+	}
+	return cc
 }
 
 // SetTransport 注入客户端传输（binding 在 dial 成功后的 setupTransport 阶段调用）。
 // NewClientCore 构造 CoreClient 时传输尚未建立（先做纯配置校验），Handshake 前
 // MUST 完成注入——之后 lifecycle goroutine 并发读 tr，不再允许替换。
-func (c *CoreClient) SetTransport(tr ClientTransport) { c.tr = tr }
+func (c *CoreClient) SetTransport(tr ClientTransport) { c.tr.Store(&tr) }
+
+// transport 返回当前传输（nil = 未注入）。
+func (c *CoreClient) transport() ClientTransport {
+	if p := c.tr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 
 // --- 握手（1 RTT）---
 
 // Handshake 发送 HELLO 并处理 HELLO_ACK/NAK。成功后进入 Ready（StartLifecycle 由
 // binding 在此之后调用——lifecycle goroutine 启动前握手已完成，无 0-RTT 时序问题）。
 func (c *CoreClient) Handshake(ctx context.Context) error {
-	if c.tr == nil {
+	tr := c.transport()
+	if tr == nil {
 		return core.NewError(core.ErrCodeConfig, "transport not injected (binding must call SetTransport before Handshake)")
 	}
 	priv, pub, err := core.GenerateEphemeral(c.cfg.Profile)
@@ -140,11 +163,11 @@ func (c *CoreClient) Handshake(ctx context.Context) error {
 	if err != nil {
 		return core.WrapError(core.ErrCodeHandshake, "marshal hello", err)
 	}
-	if err := c.tr.WriteFrame(ctx, core.TypeHello, payload); err != nil {
+	if err := tr.WriteFrame(ctx, core.TypeHello, payload); err != nil {
 		return core.WrapError(core.ErrCodeHandshake, "write hello", err)
 	}
 
-	f, err := c.tr.ReadFrame(ctx)
+	f, err := tr.ReadFrame(ctx)
 	if err != nil {
 		return core.WrapError(core.ErrCodeHandshake, "read hello_ack", err)
 	}
@@ -185,13 +208,13 @@ func (c *CoreClient) Handshake(ctx context.Context) error {
 			int64(ack.GetCredits().GetBatches()), int64(ack.GetCredits().GetBytes()), 0, 0))
 		c.expiry.Store(ack.GetExpiryUnix())
 		// 协商帧上限接入后续读取（clamp 到本地 16MB 硬顶，防恶意服务端放大攻击面）。
-		if fl, ok := c.tr.(FrameLimitSetter); ok && ack.GetLimits().GetMaxFrameBytes() > 0 {
+		if fl, ok := tr.(FrameLimitSetter); ok && ack.GetLimits().GetMaxFrameBytes() > 0 {
 			fl.SetFrameLimit(min(ack.GetLimits().GetMaxFrameBytes(), core.MaxFrameBytes))
 		}
 		if err := c.sm.Transition(core.StateReady); err != nil {
 			return core.WrapError(core.ErrCodeSession, "transition ready", err)
 		}
-		if am, ok := c.tr.(AuthMarker); ok {
+		if am, ok := tr.(AuthMarker); ok {
 			am.MarkAuthed()
 		}
 		slog.Info("handshake completed", "agent", core.SanitizeForLog(c.agentID),
@@ -203,9 +226,10 @@ func (c *CoreClient) Handshake(ctx context.Context) error {
 	}
 }
 
-// deriveKeys 完成 ECDH → DeriveSessionKeys → dual_integrity 协商时的追加派生
-// selected 含该能力 → DeriveDualMACKey 填充 SessionKeys.DualMACKey；与服务端
-// handleHello 对称驱动，未协商时保持 nil）。
+// deriveKeys 完成客户端侧 ECDH 与会话密钥派生：ECDH 共享密钥 →
+// core.DeriveSessionKeysWithCaps（dual_integrity 协商选中时内部追加
+// DeriveDualMACKey 填充 SessionKeys.DualMACKey，与服务端 handleHello 对称驱动；
+// 未协商时保持 nil）。
 func (c *CoreClient) deriveKeys(priv *core.EphemeralKey, ack *core.HelloAck, thHello, tokenProof []byte) (*core.SessionKeys, error) {
 	zz, err := core.DeriveZZ(c.cfg.Profile, priv, ack.GetServerEph())
 	if err != nil {
@@ -271,7 +295,7 @@ func (c *CoreClient) encodeAndSeal(sb *core.SignalBatch, sc *core.SendConfig, fr
 	if err != nil {
 		return nil, 0, core.WrapError(core.ErrCodeBatch, "encode batch", err)
 	}
-	keys := c.ledgerKeys()
+	keys := c.sessionKeys()
 	if keys == nil {
 		return nil, 0, core.NewError(core.ErrCodeSession, "handshake incomplete")
 	}
@@ -311,7 +335,7 @@ func (c *CoreClient) SendBatch(ctx context.Context, sb *core.SignalBatch, opts .
 	}
 	c.sendMu.Unlock()
 
-	if werr := c.tr.WriteFrame(ctx, core.TypeBatch, envPayload); werr != nil {
+	if werr := c.transport().WriteFrame(ctx, core.TypeBatch, envPayload); werr != nil {
 		// 写失败 Rollback：服务端从未收到该帧、不会为此返还 CREDIT——
 		// 不补偿即单向泄漏（镜像缺陷曾在服务端 sem-full 路径存在）。
 		ledger.Rollback(seq)
@@ -335,7 +359,7 @@ func (c *CoreClient) SendDatagram(ctx context.Context, sb *core.SignalBatch, opt
 	if sb == nil {
 		return 0, core.NewError(core.ErrCodeBatch, "batch must not be nil")
 	}
-	dt, ok := c.tr.(ClientDatagramTransport)
+	dt, ok := c.transport().(ClientDatagramTransport)
 	if !ok || !dt.SupportsDatagram() || !slices.Contains(c.SelectedCapabilities(), core.CapDatagram) {
 		return c.SendBatch(ctx, sb, opts...) // 降级：可靠路径
 	}
@@ -354,7 +378,7 @@ func (c *CoreClient) SendDatagram(ctx context.Context, sb *core.SignalBatch, opt
 	return seq, nil
 }
 
-func (c *CoreClient) ledgerKeys() *core.SessionKeys { return c.keys.Load() }
+func (c *CoreClient) sessionKeys() *core.SessionKeys { return c.keys.Load() }
 
 func (c *CoreClient) getSessionID() []byte {
 	if v := c.sessionID.Load(); v != nil {
@@ -377,9 +401,13 @@ func (c *CoreClient) SetRedirectHandler(h func(ctx context.Context, payload []by
 	c.redirectHandler.Store(&h)
 }
 
-// SetReadControlLoop / SetHeartbeatLoop 由 binding 注入。
+// SetReadControlLoop 注入 control 读循环（binding 提供；StartLifecycle 把它启动为
+// 后台 goroutine。nil = binding 自行驱动读路径，lifecycle 不再代启）。
 func (c *CoreClient) SetReadControlLoop(fn func(context.Context)) { c.readControlFn = fn }
-func (c *CoreClient) SetHeartbeatLoop(fn func(context.Context))   { c.heartbeatLoopFn = fn }
+
+// SetHeartbeatLoop 注入心跳循环（binding 提供；启动方式同 SetReadControlLoop。
+// nil = 无应用层心跳，HeartbeatEnabled 据此报告）。
+func (c *CoreClient) SetHeartbeatLoop(fn func(context.Context)) { c.heartbeatLoopFn = fn }
 
 // HeartbeatEnabled 报告 binding 是否注入了应用层心跳。诊断/回归面：
 // QUIC binding 漏注入时连接仍能工作，但空闲会话会被 control 读超时
@@ -387,12 +415,18 @@ func (c *CoreClient) SetHeartbeatLoop(fn func(context.Context))   { c.heartbeatL
 // 显形——binding 测试用它做注入存在性断言。
 func (c *CoreClient) HeartbeatEnabled() bool { return c.heartbeatLoopFn != nil }
 
-// StartLifecycle 启动后台 goroutine（拒绝在已关闭实例上启动）。
+// StartLifecycle 启动后台 goroutine（拒绝在已关闭实例上启动；Once 保证幂等——
+// 二次调用会替换 lifecycleCtx/ackQueue 等字段，旧 goroutine 的 ctx 永不取消而
+// 泄漏，review F13 裁决）。
 func (c *CoreClient) StartLifecycle() {
 	if c.closed.Load() {
 		slog.Warn("StartLifecycle on closed client ignored")
 		return
 	}
+	c.lifecycleOnce.Do(c.startLifecycle)
+}
+
+func (c *CoreClient) startLifecycle() {
 	c.lifecycleCtx, c.lifecycleCancel = context.WithCancel(context.Background())
 	c.ackDone = make(chan struct{})
 	c.heartbeatDone = make(chan struct{})
@@ -429,8 +463,8 @@ func (c *CoreClient) close() {
 	closeMsg := &core.CloseMsg{Reason: "client closing"}
 	if payload, err := core.Encode(closeMsg); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if c.tr != nil {
-			if err := c.tr.WriteFrame(ctx, core.TypeClose, payload); err != nil {
+		if tr := c.transport(); tr != nil {
+			if err := tr.WriteFrame(ctx, core.TypeClose, payload); err != nil {
 				slog.Debug("write close frame", "error", err)
 			}
 		}
@@ -440,8 +474,8 @@ func (c *CoreClient) close() {
 		c.drain() // Draining 进入成功才等排空；失败（非 Ready 出发）直接收敛
 	}
 	c.teardownPhase("user close")
-	if c.tr != nil {
-		c.connErr = c.tr.CloseConn()
+	if tr := c.transport(); tr != nil {
+		c.connErr = tr.CloseConn()
 	}
 	c.waitGoroutines()
 }

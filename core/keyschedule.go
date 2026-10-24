@@ -1,6 +1,7 @@
 package core
 
-// keyschedule.go 实现 r3 密钥日程（docs/v2-design.md §4.2 + §18 H2/H3 裁决）：
+// keyschedule.go 实现 r3 密钥日程（字节级规范见 docs/mbta-core-spec.md §2.2，
+// 设计裁决见 docs/v2-design.md §18 H2/H3）：
 //
 //	zz        = ECDH(client_eph, server_eph)         // intl: X25519 32B；gm: SM2 x 坐标 32B 大端
 //	th_hello  = H(lp(profile) ‖ lp(canonical(HELLO, proof 置零)))
@@ -42,6 +43,10 @@ func ProfileName(p corepb.Profile) string {
 }
 
 // ProfileHash 返回 profile 的哈希构造器（intl=SHA-256 / gm=SM3）。
+//
+// 未知 profile 回退 SHA-256 而非报错——调用方 MUST 先行校验 profile（握手路径
+// 由 ValidateHello + 策略一致性检查保证；自建密码面直接传入未注册 profile 值
+// 会以错误哈希继续运算，两侧发散在最坏情况下表现为握手失败而非静默降级）。
 func ProfileHash(p corepb.Profile) func() hash.Hash {
 	if p == corepb.Profile_PROFILE_GM {
 		return sm3.New
@@ -230,7 +235,6 @@ func (k *SessionKeys) Wipe() {
 }
 
 // pskCK 计算密钥日程的中间链（ck → pskMix → pskCK）——DeriveSessionKeys 与
-// pskCK 计算密钥日程的中间链（ck → pskMix → pskCK）——DeriveSessionKeys 与
 // DeriveDualMACKey 共用（协商 dual_integrity 时不重算）。
 func pskCK(p corepb.Profile, zz, thHello, tokenProof []byte) ([]byte, error) {
 	h := ProfileHash(p)
@@ -243,6 +247,8 @@ func pskCK(p corepb.Profile, zz, thHello, tokenProof []byte) ([]byte, error) {
 }
 
 // DeriveSessionKeys 执行完整密钥日程（两侧调用相同函数）。
+// keyblock 按 spec §2.3 固定顺序切分：c2s_key ‖ s2c_key ‖ handshake_key
+// ‖ nonce_prefix_c ‖ nonce_prefix_s。
 func DeriveSessionKeys(p corepb.Profile, zz, thHello, tokenProof []byte) (*SessionKeys, error) {
 	h := ProfileHash(p)
 	pck, err := pskCK(p, zz, thHello, tokenProof)
@@ -316,8 +322,8 @@ func FinishedMAC(keys *SessionKeys, thFull []byte) []byte {
 	return m.Sum(nil)
 }
 
-// BuildNonce 构造确定性 nonce = prefix(4B) ‖ seq(8B BE)。全宽 seq：截断重用
-// （seq=k 与 k+2^64 同 nonce）在构造上不可表达。
+// BuildNonce 构造确定性 nonce = prefix(4B) ‖ seq(8B BE)。seq 以全 64 位宽度参与
+// nonce——截断重用（如 seq=k 与 k+2^32 共享 nonce 的 GCM 灾难）在构造上不可表达。
 func BuildNonce(prefix [4]byte, seq uint64) [12]byte {
 	var n [12]byte
 	copy(n[:4], prefix[:])
@@ -325,7 +331,7 @@ func BuildNonce(prefix [4]byte, seq uint64) [12]byte {
 	return n
 }
 
-// io_readFull 是 io/io.ReadFull 的本地别名（避免 frame.go 与本文件互引）。
+// io_readFull 循环读满 buf，语义等价 io.ReadFull（本文件的本地实现，不引入 io 依赖）。
 func io_readFull(r interface{ Read([]byte) (int, error) }, buf []byte) error {
 	total := 0
 	for total < len(buf) {

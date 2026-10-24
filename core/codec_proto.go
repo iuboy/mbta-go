@@ -10,18 +10,19 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// protoCodec 以 Protobuf wire 格式编解码 SignalBatch（core spec §6.3 baseline 默认）。
+// protoCodec 以 Protobuf wire 格式编解码 SignalBatch（默认 codec）。
 //
 // 这是唯一经 corepb AnyValue oneof 表达动态类型（attributes/body）的 codec：
-// wire 紧凑、跨语言代码生成、与 OTLP schema 直接互通。确定性编码由 proto wire
-// format + 字段号稳定性保证，HMAC canonical 形式见 envelope.canonicalMAC。
+// wire 紧凑、跨语言代码生成、与 OTLP schema 直接互通。Marshal 使用 Deterministic
+// 选项（map 按键排序序列化）——proto.Marshal 默认迭代序非确定，canonical 字节
+// 是未来 canonical HMAC 的前提（与 cbor 侧 CanonicalEncOptions 对称）。
 type protoCodec struct{}
 
 func (protoCodec) Codec() corepb.Codec { return corepb.Codec_CODEC_PROTO }
 
 func (protoCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 	pb := toProtoSignalBatch(sb)
-	return proto.Marshal(pb)
+	return proto.MarshalOptions{Deterministic: true}.Marshal(pb)
 }
 
 func (protoCodec) Unmarshal(data []byte) (*SignalBatch, error) {
@@ -29,8 +30,9 @@ func (protoCodec) Unmarshal(data []byte) (*SignalBatch, error) {
 	if err := proto.Unmarshal(data, &pb); err != nil {
 		return nil, WrapError(ErrCodeBatchInvalid, "unmarshal signal batch", err)
 	}
-	// signal_type 空检查由调用方的 sb.Validate() 统一负责（handler_batch.go:258 →
-	// validateSignalType），codec 层不重复（cbor/json codec 也无此检查，保持一致）。
+	// 内容合法性（signal_type 闭合枚举/条数/字段长度等）由调用方的 sb.Validate()
+	// 统一负责——生产路径在 internal/protocol handler_batch.decodeAndValidate
+	// 接线，codec 层不重复（cbor codec 同样无此检查，保持一致）。
 	return fromProtoSignalBatch(&pb), nil
 }
 
@@ -95,7 +97,7 @@ func toProtoSignalRecord(s *SignalRecord) *corepb.SignalRecord {
 			pb.MetricFields[k] = v
 		}
 	}
-	// W3C Trace Context（capability w3c_trace_context，§6.2.2）。
+	// W3C Trace Context（capability trace_context）。
 	pb.TraceFlags = s.TraceFlags
 	if len(s.TraceState) > 0 {
 		pb.TraceState = make([]*corepb.TraceStateEntry, len(s.TraceState))
@@ -103,7 +105,7 @@ func toProtoSignalRecord(s *SignalRecord) *corepb.SignalRecord {
 			pb.TraceState[i] = &corepb.TraceStateEntry{Key: e.Key, Value: e.Value}
 		}
 	}
-	// Histogram exponential / Profile 载荷（§6.2，附录 B）。
+	// Exponential histogram / Profile 载荷（OTLP 映射见规范附录 B）。
 	pb.ExpHistogram = s.ExpHistogram
 	pb.Profile = s.Profile
 	return pb
@@ -160,7 +162,7 @@ func fromProtoSignalRecord(s *corepb.SignalRecord) *SignalRecord {
 			r.MetricFields[k] = v
 		}
 	}
-	// W3C Trace Context（capability w3c_trace_context，§6.2.2）。
+	// W3C Trace Context（capability trace_context）。
 	r.TraceFlags = s.GetTraceFlags()
 	if ts := s.GetTraceState(); len(ts) > 0 {
 		r.TraceState = make([]*TraceStateEntry, len(ts))
@@ -168,7 +170,7 @@ func fromProtoSignalRecord(s *corepb.SignalRecord) *SignalRecord {
 			r.TraceState[i] = &TraceStateEntry{Key: e.GetKey(), Value: e.GetValue()}
 		}
 	}
-	// Histogram exponential / Profile 载荷（§6.2，附录 B）。
+	// Exponential histogram / Profile 载荷（OTLP 映射见规范附录 B）。
 	r.ExpHistogram = s.GetExpHistogram()
 	r.Profile = s.GetProfile()
 	return r

@@ -40,6 +40,7 @@ func NewFakeTransport() *FakeTransport {
 	}
 }
 
+// RecvControlFrame 从 ControlIn 取下一帧；通道关闭后返回 io.EOF，ctx 取消即返回。
 func (t *FakeTransport) RecvControlFrame(ctx context.Context) (core.Frame, error) {
 	select {
 	case f, ok := <-t.ControlIn:
@@ -52,6 +53,7 @@ func (t *FakeTransport) RecvControlFrame(ctx context.Context) (core.Frame, error
 	}
 }
 
+// RecvDataFrame 从 DataIn 取下一帧；语义与 RecvControlFrame 相同。
 func (t *FakeTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 	select {
 	case f, ok := <-t.DataIn:
@@ -89,8 +91,10 @@ func (t *FakeTransport) sendOnChannel(ctx context.Context, ch chan<- core.Frame,
 	}
 }
 
+// SupportsDatagram 恒为 false：FakeTransport 只模拟可靠通道，不模拟不可靠通道。
 func (t *FakeTransport) SupportsDatagram() bool { return false }
 
+// SendDatagram 恒返回 ErrDatagramUnsupported（与 SupportsDatagram=false 配套）。
 func (t *FakeTransport) SendDatagram(ctx context.Context, payload []byte) error {
 	_ = ctx
 	_ = payload

@@ -2,10 +2,10 @@ syntax = "proto3";
 
 package mbta.v1;
 
-option go_package = "github.com/iuboy/mbta-go/corepb;mbta";
+option go_package = "github.com/iuboy/mbta-go/corepb;corepb";
 
-// SignalBatch 对齐 OpenTelemetry 分层：Resource + InstrumentationScope + signals（§6）。
-// Server 侧 MUST 能无损映射到 OTLP Logs/Metrics/Traces/Profiles（附录 C）。
+// SignalBatch 对齐 OpenTelemetry 分层：Resource + InstrumentationScope + signals。
+// Server 侧 MUST 能无损映射到 OTLP Logs/Metrics/Traces/Profiles（附录 B）。
 message SignalBatch {
   string schema_url = 1;
   Resource resource = 2;
@@ -34,7 +34,7 @@ message AnyValue {
   }
 }
 
-// histogram signal 的 exponential bucket 表达（§6.2，OTel Exponential Histogram）。
+// histogram signal 的 exponential bucket 表达（OTel Exponential Histogram；OTLP 映射见附录 B）。
 message ExponentialHistogram {
   int32 scale = 1;
   int32 offset = 2;
@@ -46,7 +46,7 @@ message ExponentialHistogram {
   optional double max = 8;
 }
 
-// profile signal 载荷 + 与其他信号的双向关联（§6.2，OTLP v1.3.0+）。
+// profile signal 载荷 + 与其他信号的双向关联（OTLP v1.3.0+；映射见附录 B）。
 message ProfilePayload {
   string profile_type = 1;       // cpu / heap / mutex / goroutine ...
   bytes payload = 2;
@@ -56,14 +56,14 @@ message ProfilePayload {
   string log_record_ref = 6;
 }
 
-// W3C Trace Context tracestate 成员（有序键值对，§6.2.2 / W3C Trace Context）。
+// W3C Trace Context tracestate 成员（有序键值对 / W3C Trace Context）。
 // tracestate 是有序列表（最多 32 成员），不可用 map（map 不保序）。
 message TraceStateEntry {
   string key = 1;   // W3C key（vendor-allocated，≤ 256 字符）
   string value = 2; // W3C value（≤ 256 字符）
 }
 
-// Batch/stream 级 W3C trace 上下文继承点（§6.2.2，capability w3c_trace_context）。
+// Batch/stream 级 W3C trace 上下文继承点（capability trace_context）。
 // 同一 trace 的多个 signal 共享一份上下文，偏离时才在 SignalRecord 单独写
 // trace 字段（与逐信号冗余优化合并）。外部请求携带 traceparent/tracestate 进入
 // mbta 边界时由此协议级承载，而非逐 signal 塞 Attributes（保留 W3C 语义）。
@@ -103,6 +103,6 @@ message SignalRecord {
   string status_message = 22;
   ExponentialHistogram exp_histogram = 23;  // signal_type=histogram 且 aggregation=exponential
   ProfilePayload profile = 24;              // signal_type=profile
-  uint32 trace_flags = 25;                  // W3C traceparent trace-flags（capability w3c_trace_context）
-  repeated TraceStateEntry trace_state = 26; // W3C tracestate（有序，w3c_trace_context）
+  uint32 trace_flags = 25;                  // W3C traceparent trace-flags（capability trace_context）
+  repeated TraceStateEntry trace_state = 26; // W3C tracestate（有序，capability trace_context）
 }

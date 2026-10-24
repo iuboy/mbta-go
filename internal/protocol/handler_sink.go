@@ -47,10 +47,10 @@ func (h *CoreHandler) initSinkQueue() {
 }
 
 // enqueueSink 投递 task。返回 false = 队列满/收尾/字节超限（调用方 grant.Settle(released)）。
-func (h *CoreHandler) enqueueSink(ctx context.Context, grant *core.SettleGrant, batch *core.Batch, batchWire []byte, frameBytes int64, durable bool) bool {
+func (h *CoreHandler) enqueueSink(ctx context.Context, grant *core.SettleGrant, batch *core.Batch, sb *core.SignalBatch, batchWire []byte, frameBytes int64, durable bool) bool {
 	if h.sinkQueue == nil {
 		// 同步模式（测试）：直接调用。
-		ev := h.makeEvent(batch, batchWire)
+		ev := h.makeEvent(batch, sb, batchWire)
 		h.callHandler(ctx, ev, h.makeDone(grant, durable))
 		return true
 	}
@@ -60,7 +60,7 @@ func (h *CoreHandler) enqueueSink(ctx context.Context, grant *core.SettleGrant, 
 	default:
 	}
 	task := sinkTask{
-		ev:       h.makeEvent(batch, batchWire),
+		ev:       h.makeEvent(batch, sb, batchWire),
 		handler:  h.config.SinkHandler,
 		done:     h.makeDone(grant, durable),
 		bytes:    frameBytes,

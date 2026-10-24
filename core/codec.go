@@ -7,7 +7,7 @@ import (
 	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
-// SignalCodec 是 SignalBatch 的编码/解码契约（core spec §6.3）。
+// SignalCodec 是 SignalBatch 的编码/解码契约。
 //
 // 每种 wire Codec（PROTO/CBOR）实现一个，通过 RegisterCodec 注册到包级注册表。
 // 协议核心（internal/protocol）通过 MarshalSignalBatchCodec / UnmarshalSignalBatchCodec

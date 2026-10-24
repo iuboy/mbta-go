@@ -6,23 +6,23 @@ import (
 	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
-// TraceStateEntry 是 W3C tracestate 的有序键值对成员（core spec §6.2.2 / W3C Trace Context）。
+// TraceStateEntry 是 W3C tracestate 的有序键值对成员（W3C Trace Context 规范）。
 // 等价 corepb.TraceStateEntry。
 type TraceStateEntry = corepb.TraceStateEntry
 
-// TraceContext 是 batch/stream 级 W3C trace 上下文继承点（core spec §6.2.2，
-// capability w3c_trace_context）。等价 corepb.TraceContext。
+// TraceContext 是 batch 级 W3C trace 上下文继承点（capability trace_context，
+// 经 [WithTraceContext] 携带、置于 Batch.trace）。等价 corepb.TraceContext。
 type TraceContext = corepb.TraceContext
 
-// ExponentialHistogram 是 histogram signal 的 exponential bucket 表达（core spec §6.2）。
-// 等价 corepb.ExponentialHistogram。
+// ExponentialHistogram 是 histogram signal 的 exponential bucket 表达
+// （OTLP Exponential Histogram 映射）。等价 corepb.ExponentialHistogram。
 type ExponentialHistogram = corepb.ExponentialHistogram
 
-// ProfilePayload 是 profile signal 载荷 + 跨信号双向关联（core spec §6.2）。
-// 等价 corepb.ProfilePayload。
+// ProfilePayload 是 profile signal 载荷 + 跨信号双向关联
+// （OTLP Profiles 映射）。等价 corepb.ProfilePayload。
 type ProfilePayload = corepb.ProfilePayload
 
-// signal_type 取值（core spec §6.2 闭合枚举）。值发布后不可改（§1.4）。
+// signal_type 取值（闭合枚举，对齐 OTLP 信号类型）。值发布后不可改（append-only）。
 const (
 	SignalTypeLog       = "log"
 	SignalTypeGauge     = "gauge"
@@ -33,13 +33,13 @@ const (
 	SignalTypeProfile   = "profile"
 )
 
-// temporality 取值（OTel AggregationTemporality 映射，core spec §6.2）。
+// temporality 取值（OTel AggregationTemporality 映射）。
 const (
 	TemporalityDelta      = "delta"
 	TemporalityCumulative = "cumulative"
 )
 
-// span kind 取值（OTel SpanKind 映射，core spec §6.2）。
+// span kind 取值（OTel SpanKind 映射）。
 const (
 	SpanKindUnspecified = ""
 	SpanKindInternal    = "internal"
@@ -49,12 +49,12 @@ const (
 	SpanKindConsumer    = "consumer"
 )
 
-// validTemporalities 是 spec §6.2 允许的 temporality 值。
+// validTemporalities 是允许的 temporality 值集合。
 var validTemporalities = map[string]bool{
 	TemporalityDelta: true, TemporalityCumulative: true,
 }
 
-// validSpanKinds 是 spec §6.2 允许的 span kind 值（OTel 有界枚举）。
+// validSpanKinds 是允许的 span kind 值集合（OTel 有界枚举）。
 var validSpanKinds = map[string]bool{
 	SpanKindUnspecified: true,
 	SpanKindInternal:    true,
@@ -71,9 +71,9 @@ const MaxSignalAttrs = 128
 // MaxSignalAttrKeyLen 是 attribute key 的最大字节长度，抑制日志注入面。
 const MaxSignalAttrKeyLen = 256
 
-// validSignalTypes 是 spec §6.2 允许的 signal_type 闭合集合。
+// validSignalTypes 是允许的 signal_type 闭合集合。
 // 非法值（含历史误用的 "metric"）在 Validate 被拒——协议入口拦截，防止发出后
-// 被合规对端当未知 type 拒绝、且无法映射 OTLP（§15）。
+// 被合规对端当未知 type 拒绝、且无法映射 OTLP（附录 B）。
 // 注：此 map 仅在包初始化时赋值，运行时只读——并发安全。
 var validSignalTypes = map[string]bool{
 	SignalTypeLog: true, SignalTypeGauge: true, SignalTypeCounter: true,
@@ -81,7 +81,8 @@ var validSignalTypes = map[string]bool{
 	SignalTypeSpan: true, SignalTypeProfile: true,
 }
 
-// SignalBatch 是 BATCH payload 的规范结构，对齐协议文档 §6。
+// SignalBatch 是 BATCH payload 的规范结构（数据模型 = proto/signal.proto，
+// OTLP 映射见规范附录 B）。
 type SignalBatch struct {
 	SchemaURL string          `json:"schema_url"`
 	Resource  Resource        `json:"resource"`
@@ -90,14 +91,15 @@ type SignalBatch struct {
 }
 
 // signal wire 字段名常量：用于校验报错与 trace ID 格式校验，避免重复 magic string
-// （goconst）。这些是协议线路字段名，与 JSON tag 取值一致，发布后不可改（§1.4）。
+// （goconst）。这些是协议线路字段名，与 JSON tag 取值一致，发布后不可改。
 const (
 	fieldTraceID      = "trace_id"
 	fieldSpanID       = "span_id"
 	fieldParentSpanID = "parent_span_id"
 )
 
-// Validate 校验 SignalBatch 必填字段。
+// Validate 校验 SignalBatch：signals 非空、resource.attributes 合法，并逐条校验
+// 信号的 signal_type、类型特定必填字段、字段长度与 W3C trace 上下文。
 func (b *SignalBatch) Validate() error {
 	if len(b.Signals) == 0 {
 		return NewError(ErrCodeBatchInvalid, "signals must not be empty")
@@ -129,7 +131,7 @@ func validateSignal(i int, s *SignalRecord) error {
 	return validateSignalTraceContext(i, s)
 }
 
-// validateSignalType 校验 signal_type 必填、闭合枚举（§6.2，拦截 "metric" 等历史/非法值）
+// validateSignalType 校验 signal_type 必填、闭合枚举（拦截 "metric" 等历史/非法值）
 // 以及各 signal_type 的类型特定必填字段、合法枚举值（severity/temporality/kind）。
 func validateSignalType(i int, s *SignalRecord) error {
 	if s.SignalType == "" {
@@ -158,7 +160,7 @@ func validateSignalType(i int, s *SignalRecord) error {
 		if s.MetricName == "" {
 			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: metric_name is required for metric type", i))
 		}
-		// Histogram 必须携带 ExpHistogram 载荷（对标 Profile 的 Profile 必填校验）。
+		// Histogram 必须携带 ExpHistogram 载荷（与 profile 类型的 Profile 必填校验对称）。
 		if s.SignalType == SignalTypeHistogram && s.ExpHistogram == nil {
 			return NewError(ErrCodeBatchInvalid, fmt.Sprintf("signal[%d]: exp_histogram is required for histogram type", i))
 		}
@@ -229,7 +231,9 @@ func validateSignalFieldLengths(i int, s *SignalRecord) error {
 
 // validateAttrsMap 校验 attributes map 的条目数上限 + key 合法性（长度 + 严格控制字符）。
 // prefix 用于错误消息定位（如 "resource.attributes" 或 "signal[3]: attributes"）。
-// value 为 any 类型不做递归校验（嵌套深度与内容类型由 codec 层协议约束保证）。
+// value 为 any 类型不做递归校验：条目数/键长在协议入口（handler_batch
+// decodeAndValidate）拦截，嵌套深度由 CBOR 解码器 MaxNestedLevels 与 proto
+// wire 格式自然有界（此前注释声称的「codec 层协议约束」并无对应实现——审查裁决修正）。
 func validateAttrsMap(prefix, fieldName string, attrs map[string]any) error {
 	if len(attrs) > MaxSignalAttrs {
 		return NewError(ErrCodeBatchInvalid, fmt.Sprintf("%s%s exceeds max entries %d (got %d)", prefix, fieldName, MaxSignalAttrs, len(attrs)))
@@ -262,7 +266,8 @@ func validateMetricFields(prefix string, fields map[string]float64) error {
 	return nil
 }
 
-// validateSignalTraceContext 校验 W3C trace 上下文（spec §6.2.1/§6.2.2）：
+// validateSignalTraceContext 校验 signal 级 W3C trace 上下文（规范 §11.3 的
+// trace 字段校验规则）：
 // trace_id/span_id/parent_span_id 的 hex 格式、trace-flags 的 8 位范围、
 // tracestate 成员约束。空 trace ID 合法（表示该 signal 不参与 trace 关联）。
 func validateSignalTraceContext(i int, s *SignalRecord) error {
@@ -303,7 +308,8 @@ type Scope struct {
 	CollectorID string `json:"collector_id,omitempty"`
 }
 
-// SignalRecord 统一信号记录外壳。
+// SignalRecord 是统一信号记录外壳（log/gauge/counter/histogram/summary/span/profile
+// 七类信号共用一型，对齐 OTLP）。
 type SignalRecord struct {
 	SignalType     string         `json:"signal_type"` // 必填，禁止空字符串
 	EventID        string         `json:"event_id,omitempty"`
@@ -329,14 +335,14 @@ type SignalRecord struct {
 	EndTimeUnixNs   int64  `json:"end_time_unix_ns,omitempty"`
 	StatusCode      string `json:"status_code,omitempty"`
 	StatusMessage   string `json:"status_message,omitempty"`
-	// W3C Trace Context 字段（capability w3c_trace_context，core spec §6.2.2）。
+	// W3C Trace Context 字段（capability trace_context）。
 	// trace_flags 承载 traceparent 的采样位等（低 8 位有效）；
 	// trace_state 承载 W3C tracestate（有序键值对）。
 	// 这两个字段与 trace_id/span_id/parent_span_id 一起构成完整的 W3C traceparent 语义，
 	// 使外部请求携带的 traceparent 能在协议层无损承载，而非退化塞入 attributes。
 	TraceFlags uint32             `json:"trace_flags,omitempty"`
 	TraceState []*TraceStateEntry `json:"trace_state,omitempty"`
-	// Histogram / Profile 载荷（core spec §6.2）。
+	// Histogram / Profile 载荷（OTLP 映射见规范附录 B）。
 	// exp_histogram 用于 signal_type=histogram 且 aggregation=exponential；
 	// profile 用于 signal_type=profile（OTLP Profiles 映射，附录 B）。
 	ExpHistogram *ExponentialHistogram `json:"exp_histogram,omitempty"`

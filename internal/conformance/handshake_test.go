@@ -143,7 +143,8 @@ func startEnv(t *testing.T, cfg envConfig) *testEnv {
 		cancel()
 		_ = tr.Close()
 		select {
-		case <-env.handleErr:
+		case err := <-env.handleErr:
+			_ = err // cleanup 只关心退出，错误经其他断言覆盖
 		case <-time.After(5 * time.Second):
 			t.Logf("handler did not exit within budget")
 		}
@@ -588,7 +589,8 @@ func startHandlerOnly(t *testing.T, cfg envConfig) *testEnv {
 		cancel()
 		_ = tr.Close()
 		select {
-		case <-env.handleErr:
+		case err := <-env.handleErr:
+			_ = err // cleanup 只关心退出
 		case <-time.After(5 * time.Second):
 		}
 	})

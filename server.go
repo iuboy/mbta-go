@@ -17,12 +17,11 @@ import (
 	v1 "github.com/iuboy/mbta-go/v1"
 )
 
-// ServerOption configures a Server.
-// Follows the functional options pattern used in gRPC and Kubernetes.
+// ServerOption 配置 [Server]（函数式选项，gRPC/Kubernetes 同款模式）。
 type ServerOption func(*ServerConfig) error
 
-// Server supports multiple MBTA protocol versions simultaneously.
-// Each version runs on its own listener with appropriate ALPN configuration.
+// Server 同时托管多个 MBTA 协议版本。各版本运行在独立 listener 上，
+// 配置各自的 ALPN。
 type Server struct {
 	cfg        *ServerConfig
 	v1Server   *v1.Server
@@ -32,15 +31,14 @@ type Server struct {
 	started    bool
 }
 
-// ServerConfig holds the server configuration.
-// Shared settings are used across all versions, version-specific settings
-// are applied only to that version.
+// ServerConfig 是服务器配置。共享设置对所有启用版本生效，
+// 版本专属设置仅作用于对应版本。
 type ServerConfig struct {
-	// Version selection
+	// 版本开关。
 	EnableV1   bool
 	EnableNTLS bool
 
-	// Shared configuration (all versions)
+	// 共享配置（所有版本）。
 	Auth            core.TokenValidator
 	Policy          core.ServerPolicy // 零值 = 各版本按 ProfileFor 取默认（v1=intl、ntls=gm）
 	Metrics         core.Metrics
@@ -52,10 +50,8 @@ type ServerConfig struct {
 	SinkOpts    core.SinkOptions
 	SinkHandler core.BatchHandler
 
-	// V1 specific configuration
-	V1QUIC v1.QUICServerConfig
-
-	// NTLS specific configuration
+	// 版本专属配置。
+	V1QUIC  v1.QUICServerConfig
 	NTLSCfg ntls.ServerConfig
 
 	// MaxConcurrentConns 可选：并发连接上限（各版本共用）。0 = 使用各版本默认
@@ -76,12 +72,12 @@ type ServerConfig struct {
 	ZstdDictID uint32
 }
 
-// NewServer creates a multi-version MBTA server.
-// Returns an error if no versions are enabled or if configuration is invalid.
+// NewServer 创建多版本 MBTA 服务器（仅构造不启动；启动用 [Server.Start]）。
+// 未启用任何版本或配置非法时返回错误。
 func NewServer(opts ...ServerOption) (*Server, error) {
 	cfg := &ServerConfig{
-		// Apply defaults
-		EnableV1: true, // v1 is enabled by default for backward compatibility
+		// 默认值
+		EnableV1: true, // 兼容旧用法，默认启用 v1
 	}
 
 	for _, opt := range opts {
@@ -90,7 +86,7 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 		}
 	}
 
-	// Validate at least one version is enabled
+	// 至少启用一个版本
 	if !cfg.EnableV1 && !cfg.EnableNTLS {
 		return nil, core.NewError(core.ErrCodeConfig, "at least one version must be enabled")
 	}
@@ -102,20 +98,28 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 	if cfg.SinkHandler == nil {
 		return nil, core.NewError(core.ErrCodeConfig, "SinkHandler is required")
 	}
+	// EnableV1 默认开启且 V1QUIC.Address 必填：仅想启用 NTLS 的用户若忘记
+	// WithoutV1()，此前要到 Start() 才报出一条指向从未配置的 v1 的地址错误——
+	// 构造期 fail-fast 并提示关闭路径（同文件自述的 fail-fast 原则）。
+	if cfg.EnableV1 && cfg.V1QUIC.Address == "" {
+		return nil, core.NewError(core.ErrCodeConfig,
+			"EnableV1 (default on) requires V1QUIC.Address; configure it or disable v1 via the WithoutV1 option")
+	}
 
 	return &Server{cfg: cfg}, nil
 }
 
-// Start starts all enabled version servers concurrently.
-// Uses errgroup to manage goroutines and propagate errors.
-// Server init is done serially before the accept loops to avoid concurrent field writes.
+// Start 并发启动所有已启用版本的服务器，用 errgroup 管理 goroutine 并汇聚错误。
+// 各子服务器的初始化在锁内串行完成后再进入 accept 循环，避免并发写实例字段。
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
-	s.epochs = &protocol.EpochAllocator{}
 	if s.started {
 		s.mu.Unlock()
 		return core.NewError(core.ErrCodeSession, "server already started")
 	}
+	// epochs 分配器在 started 检查之后创建：被拒的 Start 不得替换运行中实例
+	// 持有的分配器字段。epoch 单调性以服务进程生命周期为界（重启清零）。
+	s.epochs = &protocol.EpochAllocator{}
 	s.started = true
 
 	// init 在锁内完成，与 Close 的锁内读同步（避免 data race）。
@@ -143,7 +147,7 @@ func (s *Server) Start(ctx context.Context) error {
 	ntlsSrv := s.ntlsServer
 	s.mu.Unlock()
 
-	// Launch accept loops concurrently.
+	// 并发启动各版本的 accept 循环。
 	g, ctx := errgroup.WithContext(ctx)
 
 	if v1srv != nil {
@@ -173,6 +177,13 @@ func (s *Server) Start(ctx context.Context) error {
 		return core.WrapError(core.ErrCodeTransport, "server accept loop", err)
 	}
 
+	// 优雅退出（ctx 取消驱动的正常返回）：复位 started 允许重启——此前此路径
+	// 保持 started=true，重启撞 "server already started"，调用方必须记得手动
+	// Close（review F6 裁决）。子服务器 listener 已随 ctx 取消关闭，引用在
+	// 下次 Start 的 init* 中被新实例覆盖（旧实例已无持有资源）。
+	s.mu.Lock()
+	s.started = false
+	s.mu.Unlock()
 	return nil
 }
 
@@ -190,7 +201,8 @@ func (s *Server) Addr() string {
 	return ""
 }
 
-// Close gracefully shuts down all version servers.
+// Close 优雅关闭所有版本的服务器并释放监听资源。
+// 各版本独立关闭，任一失败不影响其余；多个错误经 errors.Join 汇聚返回。
 func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -244,7 +256,7 @@ func withZstdDict(p core.ServerPolicy, dictID uint32, dict []byte) core.ServerPo
 	return p
 }
 
-// initV1Server initializes the V1 server.
+// initV1Server 构造 v1 子服务器（仅赋值字段，不启动；须在锁内调用）。
 func (s *Server) initV1Server() error {
 	profile, err := ProfileFor(Version1)
 	if err != nil {
@@ -275,9 +287,9 @@ func (s *Server) initV1Server() error {
 	return nil
 }
 
-// initNTLSServer initializes the NTLS server.
+// initNTLSServer 构造 ntls 子服务器（仅赋值字段，不启动；须在锁内调用）。
 func (s *Server) initNTLSServer() error {
-	profile := NTLSProfileFor(s.cfg.NTLSCfg.TLSMode)
+	profile := NTLSProfileFor(s.cfg.NTLSCfg.Mode)
 	cfg := s.cfg.NTLSCfg
 	cfg.Auth = s.cfg.Auth
 	cfg.Epochs = s.epochs // facade 双监听共享
@@ -291,6 +303,7 @@ func (s *Server) initNTLSServer() error {
 	cfg.MaxConcurrentConns = s.cfg.MaxConcurrentConns
 	cfg.SinkQueueSize = s.cfg.SinkQueueSize
 	cfg.SinkQueueMaxBytes = s.cfg.SinkQueueMaxBytes
+	cfg.Commands = s.cfg.Commands
 
 	server, err := ntls.NewServer(cfg)
 	if err != nil {
@@ -301,10 +314,10 @@ func (s *Server) initNTLSServer() error {
 	return nil
 }
 
-// Server Options (functional options pattern)
+// —— 服务端选项（函数式选项模式）——
 
-// WithoutV1 disables V1 (QUIC + TLS 1.3). V1 is enabled by default for backward
-// compatibility; use this option when only NTLS is needed, to avoid意外拉起 v1 listener。
+// WithoutV1 禁用 v1（QUIC + TLS 1.3）。v1 默认启用（兼容旧用法）；
+// 仅需 NTLS 时用本选项关闭，避免意外拉起 v1 listener。
 func WithoutV1() ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.EnableV1 = false
@@ -312,7 +325,7 @@ func WithoutV1() ServerOption {
 	}
 }
 
-// WithV1 enables V1 support with custom QUIC configuration.
+// WithV1 启用 v1 并指定 QUIC 配置（覆盖默认的 V1QUIC 零值）。
 func WithV1(cfg v1.QUICServerConfig) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.EnableV1 = true
@@ -321,7 +334,7 @@ func WithV1(cfg v1.QUICServerConfig) ServerOption {
 	}
 }
 
-// WithNTLS enables NTLS support with custom configuration.
+// WithNTLS 启用 ntls（TCP + TLCP/TLS1.3）并指定配置。
 func WithNTLS(cfg ntls.ServerConfig) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.EnableNTLS = true
@@ -330,7 +343,7 @@ func WithNTLS(cfg ntls.ServerConfig) ServerOption {
 	}
 }
 
-// WithAuth sets the token validator for all versions.
+// WithAuth 为所有版本设置 token 校验器（必填，见 [ServerConfig.Auth]）。
 func WithAuth(auth core.TokenValidator) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.Auth = auth
@@ -338,7 +351,7 @@ func WithAuth(auth core.TokenValidator) ServerOption {
 	}
 }
 
-// WithPolicy sets the server policy for all versions.
+// WithPolicy 为所有版本设置服务端策略（构造期校验，非法即报错）。
 // 零值 Policy（不调用本 option）时各版本按版本映射取默认 profile 的默认策略；
 // Profile 字段会被版本映射覆盖（v1=intl、ntls=gm），其余字段（ack_mode/credits/
 // limits/capabilities）按调用方声明生效。
@@ -352,9 +365,9 @@ func WithPolicy(policy core.ServerPolicy) ServerOption {
 	}
 }
 
-// WithSink registers the batch delivery handler for all versions（替代旧
-// WithEventSink）。opts 声明供给偏好（Raw/Durable/Async——Raw+Async 组合静默丢
-// 数据这类缺陷在结构上不可表达），handler 通过 done 报告投递结果。
+// WithSink 为所有版本注册批次投递回调（替代旧 WithEventSink）。
+// opts 声明供给偏好（Raw/Durable/Async——Raw+Async 组合静默丢数据这类缺陷
+// 在结构上不可表达），handler 通过 done 报告投递结果。
 func WithSink(opts core.SinkOptions, handler core.BatchHandler) ServerOption {
 	return func(sc *ServerConfig) error {
 		if handler == nil {
@@ -366,9 +379,8 @@ func WithSink(opts core.SinkOptions, handler core.BatchHandler) ServerOption {
 	}
 }
 
-// WithMaxConcurrentConns sets the concurrent connection limit (shared by all
-// enabled versions). n <= 0 uses the version default. At the limit, new
-// connections are back-pressured at accept rather than rejected.
+// WithMaxConcurrentConns 设置并发连接上限（所有启用版本共享）。
+// n <= 0 用各版本默认；达到上限时新连接在 accept 处背压而非拒绝。
 func WithMaxConcurrentConns(n int) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.MaxConcurrentConns = n
@@ -376,9 +388,9 @@ func WithMaxConcurrentConns(n int) ServerOption {
 	}
 }
 
-// WithSinkQueue sets the async sink delivery queue bounds (shared by all
-// enabled versions). size < 0 disables async delivery; maxBytes < 0 disables
-// the byte bound. See v1/ntls ServerConfig docs for semantics.
+// WithSinkQueue 设置 sink 异步投递队列边界（所有启用版本共享）。
+// size < 0 关闭异步投递；maxBytes < 0 取消字节上限。语义详见 v1/ntls 的
+// ServerConfig 文档。
 func WithSinkQueue(size int, maxBytes int64) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.SinkQueueSize = size
@@ -387,9 +399,8 @@ func WithSinkQueue(size int, maxBytes int64) ServerOption {
 	}
 }
 
-// WithSinkDeadline sets the sink handler done-call timeout (shared by all
-// enabled versions). 0 uses the default (60s); on timeout the protocol layer
-// synthesizes Outcome{Released} for the in-flight batch.
+// WithSinkDeadline 设置 sink handler 的 done 调用超时（所有启用版本共享）。
+// 0 用默认（60s）；超时后协议层为在途批次合成 Outcome{Released}。
 func WithSinkDeadline(d time.Duration) ServerOption {
 	return func(sc *ServerConfig) error {
 		if d < 0 {
@@ -427,7 +438,7 @@ func WithZstdDict(dictID uint32, dict []byte) ServerOption {
 	}
 }
 
-// WithMetrics sets the metrics collector for all versions.
+// WithMetrics 为所有版本设置指标收集器。
 // 接受 core.Metrics 接口（nil=NoOp）。New(reg) 返回的 *MBTAMetrics 自动满足接口。
 func WithMetrics(metrics core.Metrics) ServerOption {
 	return func(sc *ServerConfig) error {
@@ -436,11 +447,9 @@ func WithMetrics(metrics core.Metrics) ServerOption {
 	}
 }
 
-// WithRedirectChecker sets the HA redirect checker. After a client completes
-// the handshake, the server calls the checker; if it returns ok=true (this
-// replica is a follower, not the leader) the server sends a REDIRECT frame and
-// closes the connection, steering the client to the elected leader. Nil
-// (default) disables redirect.
+// WithRedirectChecker 设置 HA 重定向检查器。客户端完成握手后服务端调用
+// checker；返回 ok=true（本副本是从机、非 leader）时发送 REDIRECT 帧并关闭
+// 连接，把客户端引向当选 leader。nil（默认）= 禁用重定向。
 func WithRedirectChecker(checker core.RedirectChecker) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.RedirectChecker = checker
@@ -448,11 +457,9 @@ func WithRedirectChecker(checker core.RedirectChecker) ServerOption {
 	}
 }
 
-// WithOnSession sets the session lifecycle callback. The server fires
-// SessionConnected right after the handshake completes (before any BATCH), and
-// SessionDisconnected when the connection ends (only for connections that
-// authenticated successfully). Nil (default) disables lifecycle observation.
-// The callback runs on the connection goroutine; it must be non-blocking.
+// WithOnSession 设置会话生命周期回调。握手完成即（任何 BATCH 之前）触发
+// SessionConnected；连接结束时触发 SessionDisconnected（仅认证成功的连接）。
+// nil（默认）= 关闭生命周期观测。回调在连接 goroutine 上执行，不得阻塞。
 func WithOnSession(fn core.OnSession) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.OnSession = fn
@@ -462,7 +469,8 @@ func WithOnSession(fn core.OnSession) ServerOption {
 
 // WithCommandRegistry 启用运维命令通道（COMMAND/COMMAND_ACK 帧）：
 // 注册表按 agentID 寻址活动连接，调用方经 Registry.SendCommand 下发命令
-// 并等待 agent 的 ACK。nil（默认）= 关闭，agent 不注册、命令不可寻址。
+// 并等待 agent 的 ACK。v1/ntls 双 binding 均生效（协议层注册与分发是
+// binding 无关的）。nil（默认）= 关闭，agent 不注册、命令不可寻址。
 func WithCommandRegistry(reg *protocol.CommandRegistry) ServerOption {
 	return func(sc *ServerConfig) error {
 		sc.Commands = reg

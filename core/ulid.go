@@ -10,30 +10,33 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-// ChunkID 是全局唯一批次标识（ULID 16 字节，core spec §5.2 / §11.2）。
+// ChunkID 是 16 字节 ULID 全局唯一标识。r3 中主要用作服务端生成的会话 ID
+// （HELLO_ACK.session_id，入 Envelope AD、对客户端不透明）及 ServerID 等
+// 进程内唯一标识；v1 时代的批次去重/重试语义已改由 (epoch, seq) 承担。
 //
-// 全局唯一 + 时序（毫秒精度），用于去重、重试、抗重放。
-// wire 上传 raw 16 字节；map key / spool 文件名用文本编码（Crockford base32，26 字符），
-// 以最小化下游（文件系统）改动。
+// 全局唯一 + 时序（毫秒精度）。文本编码为 Crockford base32（26 字符），
+// 便于日志、map key 等文本场景使用。
 //
-// [16]byte 可比、可作 map key，满足 ReplayCache / spool 的键需求。
+// [16]byte 可比、可作 map key。
 type ChunkID [16]byte
 
 // chunkEntropy 是进程级共享的单调熵源：跨调用保持 ms/entropy 状态，同一毫秒内
-// 生成的 ULID 严格递增（毫秒内有序对 spool 文件名排序等场景有意义）。
+// 生成的 ULID 严格递增（对按时间排序/检索有意义）。
 // LockedMonotonicReader 保证并发安全。
 // 不能在 NewChunkID 内每次新建 Monotonic 实例——新实例无历史状态，毫秒内单调性
 // 完全失效，且每次调用额外分配一个 4KB bufio 缓冲（热路径：每个 batch 一次）。
 var chunkEntropy = &ulid.LockedMonotonicReader{MonotonicReader: ulid.Monotonic(rand.Reader, 0)}
 
 // NewChunkID 生成一个新的 ULID ChunkID（并发安全）。
-// MustNew panic（熵源失败/单调溢出）时降级为随机 ChunkID，保证进程不崩溃。
+// MustNew panic（熵源失败/单调溢出）时降级为本地时间戳构造的 ChunkID，
+// 保证进程不崩溃。
 func NewChunkID() ChunkID {
 	var u ulid.ULID
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				// 降级：保留前 6 字节 ULID 时间戳，后 10 字节填随机数。
+				// 降级：前 6 字节填纳秒时间戳（时间有序，但非 ULID 毫秒格式），
+				// 后 10 字节填随机数。
 				slog.Warn("ulid generation panicked, falling back to random entropy", "panic", r)
 				now := uint64(time.Now().UnixNano())
 				u[0] = byte(now >> 40)
@@ -56,7 +59,7 @@ func NewChunkID() ChunkID {
 	return ChunkID(u)
 }
 
-// String 返回 Crockford base32 文本（26 字符），用作 map key / spool 文件名。
+// String 返回 Crockford base32 文本形式（26 字符），用于日志、map key 等文本场景。
 func (c ChunkID) String() string {
 	return ulid.ULID(c).String()
 }
@@ -66,7 +69,7 @@ func (c ChunkID) IsZero() bool {
 	return c == ChunkID{}
 }
 
-// Bytes 返回 raw 16 字节切片（wire 传输用，core spec §5.2 chunk_id bytes 字段）。
+// Bytes 返回 raw 16 字节切片（如会话 ID 上 wire 传输用）。
 func (c ChunkID) Bytes() []byte { return c[:] }
 
 // ChunkIDFromBytes 从 16 字节构造 ChunkID。

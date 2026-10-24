@@ -16,18 +16,17 @@ import (
 )
 
 // TokenValidator 是服务端 token 认证的必选接口。
-//
-//   - ResolveToken：按 agentID 返回候选 token（确定性顺序）；空列表 = 无已知 token。
-//   - Validate：直接校验 token（保留给需要明文校验的部署面）。
 type TokenValidator interface {
+	// ResolveToken 按 agentID 返回候选 token 列表（确定性顺序）；空列表 = 无已知 token。
 	ResolveToken(agentID string) ([]string, error)
+	// Validate 直接校验 token 并返回对应 agentID（保留给需要明文校验的部署面）。
 	Validate(token string) (agentID string, err error)
 }
 
 // RedirectInfo 携带 leader 位置（HA 重定向）。
 type RedirectInfo struct {
-	LeaderAddr string
-	LeaderID   string
+	LeaderAddr string // leader 地址（host:port；非法值会被服务端拒绝、不发送 REDIRECT）
+	LeaderID   string // leader 副本标识（写入 REDIRECT.LeaderId）
 }
 
 // RedirectChecker 在握手完成后调用；返回 ok=true 时服务端发送 REDIRECT 帧并
@@ -64,12 +63,21 @@ func NewStaticTokenValidator(tokens map[string]string) *StaticTokenValidator {
 	return v
 }
 
+// ResolveToken 返回该 agent 的候选 token 列表（构造期按字典序注册；
+// 未知 agent 返回 nil）。
 func (v *StaticTokenValidator) ResolveToken(agentID string) ([]string, error) {
 	v.mu.RLock()
-	defer v.mu.RUnlock()
-	return v.agToTok[agentID], nil
+	toks := v.agToTok[agentID]
+	v.mu.RUnlock()
+	if len(toks) == 0 {
+		return nil, nil
+	}
+	// 防御性拷贝：返回值跨连接共享 validator——直接外泄内部 slice 时，调用方
+	// 写 backing array 会污染全部后续连接的候选表。
+	return append([]string(nil), toks...), nil
 }
 
+// Validate 查表校验 token；未知 token 返回 auth_failed 错误。
 func (v *StaticTokenValidator) Validate(token string) (string, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

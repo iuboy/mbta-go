@@ -49,12 +49,12 @@ profile（`corepb.Profile`：intl/gm）与传输层正交（`core/keyschedule.go
 
 ### ntls（TCP + TLCP / TLS 1.3，`mbta-ntls/1`、`mbta-tls/1`）
 
-`ntls/` 包。单 TCP 连接按帧 type 高位域 demux（control/data 逻辑通道，后台 readLoop 分发）；写经容量 1 的信号量（`writeSem`，支持 ctx 取消）。TLCP 用 pollux-go/tlcp + SM2 双证书；`mbta-tls/1` 是 TLSMode 分支走标准 TLS 1.3。
+`ntls/` 包。单 TCP 连接按帧 type 高位域 demux（control/data 逻辑通道，后台 readLoop 分发）；写经容量 1 的信号量（`writeSem`，支持 ctx 取消）。TLCP 用 pollux-go/tlcp + SM2 双证书；`mbta-tls/1` 是 `Mode: ModeTLS13` 分支走标准 TLS 1.3。
 
 | 方面 | v1 (QUIC) | ntls (TCP) |
 | ---- | --------- | ---------- |
 | 传输 | QUIC（UDP） | TCP 单连接 |
-| 证书 | 单 X.509 | 双 SM2（TLCP）/ X.509（TLSMode） |
+| 证书 | 单 X.509 | 双 SM2（TLCP）/ X.509（ModeTLS13） |
 | control/data | 分离 QUIC stream | 同连接帧多路复用（type 高位域） |
 | 不可靠通道 | QUIC DATAGRAM（可选） | 无（DGRAM 降级可靠 BATCH） |
 | 保活 | QUIC 内置 keepalive | PING/PONG（HeartbeatLoop，30s） |

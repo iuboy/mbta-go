@@ -35,8 +35,10 @@ import (
 // 复用 nonce，GCM 灾难）。从 1 起；0 为非法哨兵。
 type SeqGenerator struct{ seq atomic.Uint64 }
 
+// NewSeqGenerator 创建 seq 生成器（首个 Next 返回 1）。
 func NewSeqGenerator() *SeqGenerator { return &SeqGenerator{} }
 
+// Next 返回下一个 seq（原子自增，BATCH/DGRAM 共享同一实例）。
 func (g *SeqGenerator) Next() uint64 { return g.seq.Add(1) }
 
 // --- 客户端账本 ---
@@ -73,11 +75,11 @@ type CreditLedger struct {
 	violations int
 }
 
-// DefaultCreditClamp* 是客户端对协商/追加 credit 的本地钳制上限。
-const (
-	DefaultCreditClampBatches = 1 << 16
-	DefaultCreditClampBytes   = 1 << 32
-)
+// DefaultCreditClampBatches 是批数维的本地钳制上限（65536 批）。
+const DefaultCreditClampBatches = 1 << 16
+
+// DefaultCreditClampBytes 是字节维的本地钳制上限（4GiB）。
+const DefaultCreditClampBytes = 1 << 32
 
 // NewCreditLedger 以 HELLO_ACK 初始 credit 建账。clamp ≤0 = 默认钳制。
 func NewCreditLedger(initialB, initialY int64, clampB, clampY int64) *CreditLedger {
@@ -325,6 +327,12 @@ func (m *CreditManager) Admit(seq uint64) AdmitResult {
 	return AdmitResult{Decision: AdmitAccept, Grant: &SettleGrant{m: m, seq: seq}}
 }
 
+// acceptedCap 是 accepted 集合的上限（连接级去重窗口外的乱序终态存量）。
+// 常规顺序流量下 advanceLowLocked 使 accepted 趋近空集；上限只在「前缀空洞
+// 长期不闭合」时生效——持有有效 token 的对端刻意永不发送 low 指向的 seq、
+// 持续发送更高 seq 时，accepted 否则会无界增长（认证后内存 DoS，审查 F1）。
+const defaultAcceptedCap = 4096
+
 // SettleGrant 是一次准入的独占处置权。
 //
 // 生命周期：Admit 占位 → Consume 扣额度（或直拒路径跳过）→ Backfill 回填元数据
@@ -341,12 +349,19 @@ type SettleGrant struct {
 
 // Consume 扣减额度并登记帧字节数。额度不足返回错误并自动释放占位
 // （调用方应 ABORT：客户端在无额度下发送属协议违规）。
+// 负 frameBytes 是调用方 bug——守恒核心不接受反向记账（负值走
+// outstandingY-=frameBytes 会凭空造出额度），自动释放占位并报 Internal。
 func (g *SettleGrant) Consume(frameBytes int64) error {
 	m := g.m
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if g.done {
 		return NewError(ErrCodeInternal, "grant already settled")
+	}
+	if frameBytes < 0 {
+		m.releaseLocked(g.seq)
+		g.done = true
+		return NewError(ErrCodeInternal, fmt.Sprintf("negative frame bytes %d", frameBytes))
 	}
 	if m.outstandingB < 1 || m.outstandingY < frameBytes {
 		m.releaseLocked(g.seq)
@@ -440,6 +455,7 @@ func (g *SettleGrant) Settle(send func(*corepb.Result), level corepb.ResultLevel
 	m.recoveredB++
 	m.recoveredY += frameBytes
 	m.advanceLowLocked()
+	m.trimAcceptedLocked()
 	r := &corepb.Result{RefSeq: g.seq, Level: level, Code: code, RetryHintMs: retryMs, Correlation: corr}
 	m.mu.Unlock()
 	send(r)
@@ -538,6 +554,25 @@ func (m *CreditManager) advanceLowLocked() {
 		delete(m.accepted, m.low)
 		m.low++
 	}
+}
+
+// trimAcceptedLocked 在 accepted 超上限时沿最小 seq 跳过前缀空洞：把 low 推进到
+// 最小已接受 seq 后再沿连续段删除。被跳过空洞区间的 seq 此后命中 `seq < low` →
+// BelowUnknown released——与终态环淘汰同一降级语义（宁重发不吞数据，不重复投递）。
+// 每次 Settle 至少删除最小段的连续运行，故 len(accepted) 恒 ≤ cap+1（有界）。
+// 仅在超过上限时做 O(n) 扫描：常规流量下 accepted 趋近空集，零开销。
+func (m *CreditManager) trimAcceptedLocked() {
+	if len(m.accepted) <= defaultAcceptedCap {
+		return
+	}
+	minSeq := ^uint64(0)
+	for s := range m.accepted {
+		if s < minSeq {
+			minSeq = s
+		}
+	}
+	m.low = minSeq
+	m.advanceLowLocked()
 }
 
 // String 状态快照（日志）。

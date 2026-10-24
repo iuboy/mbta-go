@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: control.proto
 
-package mbta
+package corepb
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -1634,7 +1634,7 @@ const file_control_proto_rawDesc = "" +
 	"\x18COMMAND_ACK_CODE_APPLIED\x10\x01\x12\x1d\n" +
 	"\x19COMMAND_ACK_CODE_ACCEPTED\x10\x02\x12\x1d\n" +
 	"\x19COMMAND_ACK_CODE_REJECTED\x10\x03\x12\x1b\n" +
-	"\x17COMMAND_ACK_CODE_FAILED\x10\x04B&Z$github.com/iuboy/mbta-go/corepb;mbtab\x06proto3"
+	"\x17COMMAND_ACK_CODE_FAILED\x10\x04B(Z&github.com/iuboy/mbta-go/corepb;corepbb\x06proto3"
 
 var (
 	file_control_proto_rawDescOnce sync.Once

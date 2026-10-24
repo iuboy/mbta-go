@@ -160,6 +160,7 @@ func envelopeAD(frameType uint8, sessionID []byte, keyEpoch uint32, seq uint64, 
 	return ad
 }
 
+// appendLenPrefixed 向 dst 追加 4B 大端长度前缀 + b（AD 规范中的 lp 原语）。
 func appendLenPrefixed(dst, b []byte) []byte {
 	var lp [4]byte
 	binary.BigEndian.PutUint32(lp[:], uint32(len(b)))
@@ -173,7 +174,7 @@ var (
 	gzipReaderPool  = sync.Pool{New: func() any { return new(gzip.Reader) }}
 	zstdEncoderPool = sync.Pool{
 		New: func() any {
-			// 池化为逐调用实例：单并发最优，消除每次 NewWriter 的大额内部状态分配
+			// 池化为逐调用实例：单并发最优，消除每次 NewWriter 的大额内部状态分配。
 			// 未池化时 4KB seal 374µs / 13.5MB allocs。
 			enc, _ := zstd.NewWriter(nil,
 				zstd.WithEncoderConcurrency(1),
@@ -192,10 +193,11 @@ var (
 
 // --- zstd 字典（capability: zstd_dict，服务端 DICT 帧下发）---
 //
-// 进程级单例（简单优先，r3 裁决）：COMPRESSION_ZSTD_DICT 隐含"当前字典"
-// （dict_id 由 DICT 帧带外声明，Envelope 不重复携带）。服务端在配置字典时
-// ZstdDictCodec 是字典绑定的编解码器：池化 encoder（逐调用实例，单并发最优）
-// + 共享 decoder。共享的是池（性能——dict-bound encoder 构造昂贵），
+// 进程级注册表（简单优先，r3 裁决）：COMPRESSION_ZSTD_DICT 隐含"当前字典"
+// （dict_id 由 DICT 帧声明，Envelope 不重复携带）。
+
+// ZstdDictCodec 是绑定某个静态字典的 zstd 编解码器：池化 encoder（逐调用实例，
+// 单并发最优）+ 共享 decoder。共享的是池（性能——dict-bound encoder 构造昂贵），
 // 隔离的是选择权（正确性——连接持有指针引用，进程单例的覆盖污染不再可能）。
 type ZstdDictCodec struct {
 	ID      uint32
@@ -206,13 +208,16 @@ type ZstdDictCodec struct {
 
 // zstdDictRegistry 键控注册表：key = dict_id:sha256(raw) 前 16 字节 hex。
 // 上界 zstdDictRegistryCap（LRU 淘汰）防恶意服务端字典洪水。
+// 干扰面澄清（review 复核降级）：淘汰只移除注册表条目——活跃连接持有
+// *ZstdDictCodec 指针，编解码不受影响；受影响的仅是后续新会话需对端重发
+// DICT（握手后必发，自愈）。故跨会话 LRU 翻搅不构成实际 DoS。
 var (
 	zstdDictMu  sync.Mutex
 	zstdDictReg = map[string]*ZstdDictCodec{}
 	zstdDictOrd list.List
 )
 
-const zstdDictRegistryCap = 8
+const zstdDictRegistryCap = 8 // 注册表容量上界（LRU 淘汰防字典洪水）。
 
 // RegisterZstdDict 注册/获取字典 codec（幂等：同 (id, 内容) 返回同一实例）。
 // 超出注册表上界时淘汰最久未使用条目。
@@ -260,6 +265,8 @@ func RegisterZstdDict(id uint32, dict []byte) (*ZstdDictCodec, error) {
 	return c, nil
 }
 
+// touchZstdDictLocked 把 key 标记为最近使用：已存在则移到队列尾，否则入队
+// （队列首 = 最久未使用，淘汰时移除）。调用方须持有 zstdDictMu。
 func touchZstdDictLocked(key string, c *ZstdDictCodec) {
 	for e := zstdDictOrd.Back(); e != nil; e = e.Prev() {
 		if e.Value.(string) == key {
@@ -311,6 +318,7 @@ func decompressZstdDict(src []byte, dict *ZstdDictCodec) ([]byte, error) {
 	return out, nil
 }
 
+// compress 按算法压缩 src；ZSTD_DICT 需携带 dict（nil 即报错，fail-closed）。
 func compress(c corepb.Compression, src []byte, dict *ZstdDictCodec) ([]byte, error) {
 	switch c {
 	case corepb.Compression_COMPRESSION_GZIP:
@@ -324,7 +332,13 @@ func compress(c corepb.Compression, src []byte, dict *ZstdDictCodec) ([]byte, er
 		}
 		return buf.Bytes(), nil
 	case corepb.Compression_COMPRESSION_ZSTD:
-		enc := zstdEncoderPool.Get().(*zstd.Encoder)
+		v := zstdEncoderPool.Get()
+		enc, ok := v.(*zstd.Encoder)
+		if !ok {
+			// 池 New 返回 error 时 Get 得到 error 值（构造失败理论不可达，
+			// 与 compressZstdDict 同防御：断言失败报错而非 panic）。
+			return nil, NewError(ErrCodeInternal, "zstd encoder pool corrupted")
+		}
 		defer zstdEncoderPool.Put(enc)
 		return enc.EncodeAll(src, nil), nil
 	case corepb.Compression_COMPRESSION_ZSTD_DICT:

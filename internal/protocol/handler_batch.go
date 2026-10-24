@@ -80,8 +80,13 @@ func (h *CoreHandler) rejectAtCapacity(ctx context.Context, payload []byte) {
 		ar.Grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_RELEASED,
 			core.CodeServerDraining, 1000, int64(len(payload)))
 		h.maybeScheduleFlush()
-	case core.AdmitDuplicate, core.AdmitTerminalHit, core.AdmitBelowUnknown:
+	case core.AdmitDuplicate, core.AdmitTerminalHit:
 		// 常规回执路径已覆盖；capacity 直拒不重复处理。
+	case core.AdmitBelowUnknown:
+		// 与 processBatch 对齐（宁重发不吞数据）：环外旧 seq 也回执 released，
+		// 否则 sem-full 时到达的陈旧重发无任何应答，客户端白等满 AckTimeout。
+		h.sendResult(ctx, &core.Result{RefSeq: env.GetSeq(),
+			Level: corepb.ResultLevel_RESULT_LEVEL_RELEASED, Code: core.CodeInternal})
 	default:
 		h.abort(ctx, core.CodeWindowExceeded, "invalid seq")
 	}
@@ -121,38 +126,59 @@ func (h *CoreHandler) releaseStuck(ctx context.Context, code uint32, age time.Du
 // 返回错误码 0=通过；否则调用方按各自语义处置（BATCH=Settle(REJECTED)，DGRAM=静默丢）。
 // decodeAndValidate 接受调用方已解码的 Envelope（processBatch 需先拿 seq 做准入
 // 占位——占位先于解密是设计次序；此处不重复解析）。
-func (h *CoreHandler) decodeAndValidate(env *core.Envelope, frameType uint8) (*core.Batch, []byte, uint32) {
+//
+// SignalBatch 解码与 sb.Validate() 在此接线（P1-2 审查裁决）：signal_type 闭合
+// 枚举、属性条数/字段长度/控制字符、trace 上下文全部在协议入口拦截——不可信
+// 数据不再直达 sink；实际解码条数上限（非客户端自报 events_count）在此收紧。
+// 解码结果贯穿返回，makeEvent 不再二次解码（此前的静默吞错使 Decoded=nil
+// 仍回 accepted——数据丢失伪装成投递成功）。
+func (h *CoreHandler) decodeAndValidate(env *core.Envelope, frameType uint8) (*core.Batch, *core.SignalBatch, []byte, uint32) {
 	keys := h.keys.Load()
 	if keys == nil {
-		return nil, nil, core.CodeInternal // 未握手（防御；binding 保证 Ready 前不投递）
+		return nil, nil, nil, core.CodeInternal // 未握手（防御；binding 保证 Ready 前不投递）
 	}
 	if exp := h.expiresAt.Load(); exp > 0 && time.Now().Unix() > exp {
-		return nil, nil, core.CodeServerDraining // 会话过期：客户端应重连
+		return nil, nil, nil, core.CodeServerDraining // 会话过期：客户端应重连
 	}
 	batchWire, err := core.OpenEnvelope(frameType, h.getSessionID(), keys, h.config.Zdict, env)
 	if err != nil {
+		// 解压超限（decompress_limit）与解密失败分开归因：统一计入
+		// DecryptFailures 会把「合法大批超解压天花板」误导向密钥/会话排查方向。
+		if core.CodeNumOf(err) == core.CodeDecompressLimit {
+			return nil, nil, nil, core.CodeDecompressLimit
+		}
 		h.metrics.DecryptFailures().Inc()
-		return nil, nil, core.CodeEnvelopeOpenFail
+		return nil, nil, nil, core.CodeEnvelopeOpenFail
 	}
 	if int64(len(batchWire)) > int64(h.config.Policy.MaxBatchBytes) {
-		return nil, nil, core.CodeBatchTooLarge
+		return nil, nil, nil, core.CodeBatchTooLarge
 	}
 	var batch core.Batch
 	if err := core.Decode(batchWire, &batch); err != nil {
-		return nil, nil, core.CodeBatchInvalid
+		return nil, nil, nil, core.CodeBatchInvalid
 	}
 	if batch.GetSeq() != env.GetSeq() {
-		return nil, nil, core.CodeBatchInvalid
+		return nil, nil, nil, core.CodeBatchInvalid
 	}
 	if int(batch.GetEventsCount()) > maxBatchEvents {
-		return nil, nil, core.CodeBatchInvalid
+		return nil, nil, nil, core.CodeBatchInvalid
+	}
+	sb, err := h.decodeSignalBatch(batch.GetPayload())
+	if err != nil {
+		return nil, nil, nil, core.CodeBatchInvalid
+	}
+	if len(sb.Signals) > maxBatchEvents {
+		return nil, nil, nil, core.CodeBatchInvalid
+	}
+	if err := sb.Validate(); err != nil {
+		return nil, nil, nil, core.CodeBatchInvalid
 	}
 	if tc := batch.GetTrace(); tc != nil {
 		if err := core.ValidateBatchTraceContext(tc); err != nil {
-			return nil, nil, core.CodeBatchInvalid
+			return nil, nil, nil, core.CodeBatchInvalid
 		}
 	}
-	return &batch, batchWire, 0
+	return &batch, sb, batchWire, 0
 }
 
 // processBatch 处理可靠 BATCH。
@@ -194,7 +220,7 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	}
 
 	// 共享解码校验管线（Envelope 已在准入阶段解码，不重复解析）。
-	batch, batchWire, code := h.decodeAndValidate(&env, core.TypeBatch)
+	batch, sb, batchWire, code := h.decodeAndValidate(&env, core.TypeBatch)
 	if code != 0 {
 		if code == core.CodeInternal {
 			grant.Release() // 未定夺内容：占位释放，无 wire 动作
@@ -211,13 +237,13 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 	}
 	grant.Backfill(batch.GetCorrelation())
 
-	h.deliver(ctx, grant, batch, batchWire, frameBytes)
+	h.deliver(ctx, grant, batch, sb, batchWire, frameBytes)
 }
 
 // deliver 投递到 sink 并完成 RESULT 生命周期。
 // 两个分支统一为 enqueue-then-settle：入队成功才发终态 accepted——
 // 「先 ACK 后入队、队列满静默丢数据」在顺序上不可再发生。
-func (h *CoreHandler) deliver(ctx context.Context, grant *core.SettleGrant, batch *core.Batch, batchWire []byte, frameBytes int64) {
+func (h *CoreHandler) deliver(ctx context.Context, grant *core.SettleGrant, batch *core.Batch, sb *core.SignalBatch, batchWire []byte, frameBytes int64) {
 	send := h.sender(ctx)
 
 	if h.config.SinkHandler == nil {
@@ -227,7 +253,7 @@ func (h *CoreHandler) deliver(ctx context.Context, grant *core.SettleGrant, batc
 	}
 
 	durable := h.config.Policy.AckMode == corepb.AckMode_ACK_MODE_DURABLE
-	if !h.enqueueSink(ctx, grant, batch, batchWire, frameBytes, durable) {
+	if !h.enqueueSink(ctx, grant, batch, sb, batchWire, frameBytes, durable) {
 		// 队列满/收尾：released（客户端以新 seq 重投）。
 		grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_RELEASED, core.CodeServerDraining, 1000, frameBytes)
 		h.maybeScheduleFlush()
@@ -263,12 +289,12 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 	if core.Decode(payload, &denv) != nil {
 		return
 	}
-	batch, batchWire, code := h.decodeAndValidate(&denv, core.TypeDgram)
+	batch, sb, batchWire, code := h.decodeAndValidate(&denv, core.TypeDgram)
 	if code != 0 {
 		return // DGRAM 失败一律静默丢弃
 	}
 	if h.config.SinkHandler != nil {
-		ev := h.makeEvent(batch, batchWire)
+		ev := h.makeEvent(batch, sb, batchWire)
 		h.callHandler(ctx, ev, func(core.Outcome) {}) // at-most-once：done 无 wire 语义
 	}
 }
@@ -316,12 +342,23 @@ func (h *CoreHandler) makeDone(grant *core.SettleGrant, durable bool) func(core.
 	return func(o core.Outcome) {
 		once.Do(func() {
 			if !durable {
+				if o.Level == core.OutcomeUnspecified {
+					// 零值在 accepted_only 下同样无 wire 效果，但漏设是 handler
+					// 缺陷信号——告警而非静默（与 durable 分支同因）。
+					slog.Warn("sink done called with unspecified Outcome level (accepted_only; no wire effect)")
+				}
 				return // accepted_only：done 无 wire 效果（终态已在 deliver 完成）
 			}
 			send := h.sender(context.Background())
 			switch o.Level {
 			case core.OutcomeDurable, core.OutcomeAccepted:
 				grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_DURABLE, 0, 0, 0)
+			case core.OutcomeUnspecified:
+				// 漏设 Level：按 handler 缺陷处置为 released(internal)——
+				// 此前零值=Accepted 会静默合成 DURABLE 终态（数据未落盘却回执
+				// 已持久化，语义倒挂）。告警 + released 让客户端按可重试路径收敛。
+				slog.Warn("sink done called with unspecified Outcome level; synthesizing released(internal)")
+				grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_RELEASED, core.CodeInternal, 1000, 0)
 			case core.OutcomeReleased, core.OutcomeRejected:
 				code := o.Code
 				if code == 0 {
@@ -341,8 +378,10 @@ func (h *CoreHandler) makeDone(grant *core.SettleGrant, durable bool) func(core.
 }
 
 // makeEvent 构造 BatchEvent（按 SinkOptions 供给 Raw/Decoded）。
+// sb 由 decodeAndValidate 解码并校验后贯穿传入——本函数不再解码，
+// 消除「解码失败静默得 Decoded=nil 仍回 accepted」的数据丢失伪装路径。
 // raw 是解密后的 batch 消息编码（Batch wire）。
-func (h *CoreHandler) makeEvent(batch *core.Batch, raw []byte) core.BatchEvent {
+func (h *CoreHandler) makeEvent(batch *core.Batch, sb *core.SignalBatch, raw []byte) core.BatchEvent {
 	ev := core.BatchEvent{
 		Agent: h.getAgentID(),
 		Meta: core.BatchMeta{
@@ -356,10 +395,7 @@ func (h *CoreHandler) makeEvent(batch *core.Batch, raw []byte) core.BatchEvent {
 	if h.config.SinkOpts.Raw {
 		ev.Raw = raw
 	} else {
-		// batch 形参已由 decodeAndValidate 解出，直接取 payload 不重复解析。
-		if sb, err := h.decodeSignalBatch(batch.GetPayload()); err == nil {
-			ev.Decoded = sb
-		}
+		ev.Decoded = sb
 	}
 	return ev
 }

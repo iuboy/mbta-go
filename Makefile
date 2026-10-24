@@ -62,12 +62,15 @@ bench-int:
 fmt:
 	gofmt -s -w .
 
+fmt-check:
+	@out=$$(gofmt -s -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+
 ## tidy: Tidy module dependencies (separate from fmt to keep formatting side-effect-free)
 tidy:
 	$(GOCMD) mod tidy
 
-## check: Run all checks (fmt + vet + lint + test)
-check: fmt vet lint test
+## check: Run all checks（fmt-check 只列出违规，不写文件——检查目标不应有修改副作用）
+check: fmt-check vet lint test
 
 ## clean: Remove generated files
 clean:

@@ -1,5 +1,5 @@
-// Package main demonstrates a minimal MBTA server that accepts agent connections
-// and delivers event batches to a registered BatchHandler.
+// Package main 演示一个最小的 MBTA 服务端：接收 agent 连接，把事件批次投递给
+// 注册的 BatchHandler。
 package main
 
 import (

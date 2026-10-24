@@ -4,7 +4,7 @@ package mbta.v1;
 
 import "signal.proto";
 
-option go_package = "github.com/iuboy/mbta-go/corepb;mbta";
+option go_package = "github.com/iuboy/mbta-go/corepb;corepb";
 
 // MBTA 协议消息集（r3 重设计）。
 //

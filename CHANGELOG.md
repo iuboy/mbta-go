@@ -2,6 +2,27 @@
 
 本文件记录 mbta-go 的显著变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [Unreleased]
+
+> 本节聚合 2026-10 全面代码审查（docs/code-review-2026-10-22.md）的修复成果。
+
+### 破坏性变更
+
+- **ntls `TLSMode bool` → `Mode` 枚举**（无兼容别名）：`ServerConfig`/`ClientCredentials` 删除 `TLSMode bool` 字段，改用 `Mode`（`ModeTLCP` 零值缺省 / `ModeTLS13`；未注册值构造期 fail-fast）。一个 bool 同时切换 ALPN/密码栈/证书形态的设计无法扩展第三种模式。`NTLSProfileFor` 签名同步改为 `func(mode ntls.Mode) corepb.Profile`。迁移：`TLSMode: true` → `Mode: ntls.ModeTLS13`；`TLSMode: false` → 删除字段或 `Mode: ntls.ModeTLCP`。
+- **`core.Outcome` 零值语义**：零值由 `OutcomeAccepted` 改为 `OutcomeUnspecified`——sink done 漏设 Level 时协议层按 released(internal) 处置并告警（此前静默合成 accepted，durable 模式下数据未落盘却回执已持久化）。handler MUST 显式设置 `Level`。
+- **corepb 生成代码 package 名 `mbta` → `corepb`**：与目录一致（`go_package` 的 `;corepb`）。未起别名的 `import "github.com/iuboy/mbta-go/corepb"` 调用方需把 `mbta.` 前缀改为 `corepb.`；带别名的调用方不受影响。
+- **`ServerPolicy` 部分配置 fail-fast**：`IsZero` 修复后，仅配置个别字段的策略不再被静默丢弃回退默认（此前单独配置 `DatagramRateBytes` 会被覆盖为不限速），改为 NewServer 构造期报错。存量调用方需补全字段或显式传零值结构。
+
+### 新特性
+
+- **运维命令通道扩展至 ntls binding**：`ntls.ServerConfig` 增 `Commands` 字段（此前仅 v1 支持，facade 对 ntls-only 部署静默失效）——双 binding 均可经 `WithCommandRegistry` + `Registry.SendCommand` 寻址 agent。
+
+### 修复
+
+- **安全**：ntls TLCP 服务端配置 `CAFile` 即启用 mTLS（此前 `ClientAuth` 缺省 NoClientCert，mTLS 静默失效）；服务端去重 `accepted` 集合加上限（认证后内存 DoS）；SignalBatch 校验层接入接收管线（signal_type/条数/控制字符/trace 格式此前不设防直达 sink）；CBOR 解码上限收紧（默认 131072 → 256/10000/16 层）；QUIC 认证前帧读 30s 上限（此前 control 5min、data 无界）；`guardedCounter` 拦截 NaN/+Inf；认证失败日志不再打印攻击者可控的原始 capabilities。
+- **正确性**：客户端写失败拆连接（流去同步防护对齐服务端）；CREDIT 单零维度不再误拆连接；reaper 超时回收后迟到 RESULT 不再二次回调（durable 的 ACCEPTED→DURABLE 双派发保留）；命令幂等窗口满时环形淘汰（此前整体清空致重发窗口内重复执行）；命令 pending 按 (agentID, commandId) 隔离（跨 agent 同 ID 不再串线）；DGRAM 默认限速 8MB/s（此前 0=不限）；服务端停机路径 released 回执不再被已取消 ctx 静默丢弃。
+- **行为修正**：facade Server ctx 取消正常退出后 `started` 复位（可直接重启）；binding `starting` 态 Close 等待收敛后再关闭（此前返回 nil 但服务器继续监听）；`SessionDisconnected` 仅对已认证连接派发。
+
 ## [0.7.0] - 2026-10-19
 
 ### 破坏性变更

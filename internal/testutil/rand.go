@@ -2,7 +2,8 @@
 //
 // 生成的值满足 core 包校验约束（validateAgentID / validateHexID / validateTextField，
 // 详见 core/validation.go）；格式约束（长度、控制字符、W3C hex）由格式化层保证，
-// 不依赖熵强度——故使用 math/rand/v2 而非 crypto/rand。
+// 不依赖熵强度——主体使用 math/rand/v2。例外：randHexID 主路径按 W3C 习惯用
+// crypto/rand，失败时静默降级 mathrand（仅测试用途，不做安全承诺）。
 package testutil
 
 import (

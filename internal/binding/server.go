@@ -7,14 +7,38 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
 	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
+// safeClose 带 recover 的连接关闭：closeConn 闭包（binding 注入）若对零值
+// conn panic，会发生在 recover 分支内——recover 期间的 panic 不再被捕获，
+// 直接击穿进程（review F16 裁决：防御链不允许在恢复层断掉）。
+func safeClose[C any](closeConn func(C), conn C) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("closeConn panicked during cleanup", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	if closeConn != nil {
+		closeConn(conn)
+	}
+}
+
 // DefaultMaxConcurrentConns 是并发连接上限默认值。
 const DefaultMaxConcurrentConns = 10000
+
+// EpochAlloc 归一化纪元分配器（nil = 新建独立分配器）。v1/ntls 的 NewServer
+// 各自需要同一逻辑——此前两处逐字重复（review P3 裁决上提）。
+func EpochAlloc(e *protocol.EpochAllocator) *protocol.EpochAllocator {
+	if e != nil {
+		return e
+	}
+	return &protocol.EpochAllocator{}
+}
 
 // HandlerConfig 是 binding 层共享的 handler 配置。
 type HandlerConfig struct {
@@ -50,7 +74,9 @@ func ResolveHandlerConfig(hcfg *HandlerConfig) error {
 	return nil
 }
 
-// AcceptLoop 是泛型 accept 循环骨架。
+// AcceptLoop 是泛型 accept 循环骨架。无返回值：accept 级错误经 backoff 循环
+// 消化，循环只随 ctx 取消/listener 关闭退出（此前签名承诺 error 但全部路径
+// 返回 nil，误导读者寻找「致命错误」分支——review F15 裁决）。
 func AcceptLoop[C any](
 	ctx context.Context,
 	connSem chan struct{},
@@ -58,28 +84,28 @@ func AcceptLoop[C any](
 	newTransport func(context.Context, C) (protocol.Transport, error),
 	closeConn func(C),
 	hcfg HandlerConfig,
-) error {
+) {
 	var backoff time.Duration
 	for {
 		select {
 		case connSem <- struct{}{}:
 		case <-ctx.Done():
-			return nil
+			return
 		}
 		conn, err := accept(ctx)
 		if err != nil {
 			<-connSem
 			if ctx.Err() != nil {
-				return nil //nolint:nilerr // ctx 取消属优雅关闭
+				return // ctx 取消属优雅关闭
 			}
 			if errors.Is(err, net.ErrClosed) {
 				slog.Debug("listener closed, accept loop exiting")
-				return nil //nolint:nilerr // listener 关闭属正常停止路径
+				return // listener 关闭属正常停止路径
 			}
 			slog.Warn("accept error", "error", err)
 			backoff = nextBackoff(backoff)
 			if !sleepCtx(ctx, backoff) {
-				return nil
+				return
 			}
 			continue
 		}
@@ -122,25 +148,20 @@ func handleConn[C any](
 	defer func() { <-connSem }()
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("handler panic recovered", "panic", r)
-			if closeConn != nil {
-				closeConn(conn)
-			}
+			// panic 值之外记录完整堆栈（线上排查靠它定位 panic 源）。
+			slog.Error("handler panic recovered", "panic", r, "stack", string(debug.Stack()))
+			safeClose(closeConn, conn)
 		}
 	}()
 	tr, err := newTransport(ctx, conn)
 	if err != nil {
 		slog.Error("transport setup", "error", err)
-		if closeConn != nil {
-			closeConn(conn)
-		}
+		safeClose(closeConn, conn)
 		return
 	}
 	if tr == nil {
 		slog.Error("transport setup returned nil transport")
-		if closeConn != nil {
-			closeConn(conn)
-		}
+		safeClose(closeConn, conn)
 		return
 	}
 	defer func() {

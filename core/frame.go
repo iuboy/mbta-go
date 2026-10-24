@@ -61,10 +61,11 @@ func ReadFrameCtxLimit(ctx context.Context, r DeadlineReader, lim FrameLimits) (
 	return f, err
 }
 
+// 帧格式常量。
 const (
-	FixedHeaderSz        = 2 // type(1) + flags(1)
-	MaxFrameBytes uint64 = 16 << 20
-	maxVarintLen         = 10 // uint64 varint 上限
+	FixedHeaderSz        = 2        // 固定帧头字节数：type(1) + flags(1)。
+	MaxFrameBytes uint64 = 16 << 20 // 默认单帧字节上限（16MB）。
+	maxVarintLen         = 10       // uint64 varint 最长字节数。
 )
 
 // Header 表示帧头。帧格式：[type(1)][flags(1)][varint Length][Payload]。
@@ -75,6 +76,7 @@ type Header struct {
 	Length uint64
 }
 
+// Frame 表示一帧已解码的协议帧。
 type Frame struct {
 	Header  Header
 	Payload []byte
@@ -83,6 +85,15 @@ type Frame struct {
 // DefaultLimits 返回接收端默认上限。
 func DefaultLimits() FrameLimits {
 	return FrameLimits{MaxFrameBytes: MaxFrameBytes}
+}
+
+// LimitsFor 返回协商帧上限（0 = 回退默认）——binding 读取路径的 0=默认语义
+// 此前四处手抄（review P3 裁决收敛单点）。
+func LimitsFor(maxFrameBytes uint64) FrameLimits {
+	if maxFrameBytes == 0 {
+		return DefaultLimits()
+	}
+	return FrameLimits{MaxFrameBytes: maxFrameBytes}
 }
 
 // Write 编码并写入单个帧。version/channel 域已删除（r3：ALPN 管版本、type 高位管通道）。
@@ -127,6 +138,9 @@ func writeFull(w io.Writer, p []byte) error {
 	return nil
 }
 
+// FrameLimits 是帧接收上限集合。MaxFrameBytes 为单帧 payload 最大字节数
+// （上限校验先于 make 分配，防声明式 varint 长度直接 OOM）；0 = 使用
+// [MaxFrameBytes] 默认。
 type FrameLimits struct {
 	MaxFrameBytes uint64
 }

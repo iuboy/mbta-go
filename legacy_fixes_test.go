@@ -1,6 +1,6 @@
 package mbta
 
-// legacy_fixes_test.go：facade 层遗留修复的回归测试——ntls TLSMode→profile 推导
+// legacy_fixes_test.go：facade 层遗留修复的回归测试——ntls Mode→profile 推导
 //（mbta-tls/1 通道默认 intl、mbta-ntls/1 默认 gm，防"TLS1.3 上跑 SM2/SM4"静默错配）。
 
 import (
@@ -14,14 +14,14 @@ import (
 )
 
 // deriveNTLSProfileForTest 复现 facade 的推导路径并返回 ntls.Server 的策略 profile：
-// 构造 ServerConfig → initNTLSServer（含 derivePolicy 的 TLSMode 分支）→ 读取子服务器。
-func deriveNTLSProfileForTest(t *testing.T, tlsMode bool) corepb.Profile {
+// 构造 ServerConfig → initNTLSServer（含 derivePolicy 的 Mode 分支）→ 读取子服务器。
+func deriveNTLSProfileForTest(t *testing.T, mode ntls.Mode) corepb.Profile {
 	t.Helper()
 	s := &Server{cfg: &ServerConfig{
 		EnableV1: false,
-		// TLSMode=true 走 TLS1.3 单证书路径；false 需双 SM2 证书——用占位路径
+		// ModeTLS13 走 TLS1.3 单证书路径；TLCP 需双 SM2 证书——用占位路径
 		// 通过 NewServer 校验（profile 推导在 Listen 之前完成，不触证书加载）。
-		NTLSCfg: ntlsServerCfgFor(t, tlsMode),
+		NTLSCfg: ntlsServerCfgFor(t, mode),
 		Auth:    core.NewStaticTokenValidator(map[string]string{"t": "a"}),
 		SinkHandler: func(ctx context.Context, ev core.BatchEvent, done func(core.Outcome)) {
 			done(core.Outcome{Level: core.OutcomeAccepted})
@@ -33,23 +33,26 @@ func deriveNTLSProfileForTest(t *testing.T, tlsMode bool) corepb.Profile {
 	return s.ntlsServer.Config().Policy.Profile
 }
 
-// TestNTLSProfileFollowsTLSMode 验证 profile 跟随传输模式：
-// TLSMode=false（TLCP 通道）→ gm；TLSMode=true（TLS1.3 通道）→ intl。
-func TestNTLSProfileFollowsTLSMode(t *testing.T) {
+// TestNTLSProfileFollowsMode 验证 profile 跟随传输模式：
+// ModeTLCP（TLCP 通道）→ gm；ModeTLS13（TLS1.3 通道）→ intl；零值缺省 = TLCP。
+func TestNTLSProfileFollowsMode(t *testing.T) {
 	t.Parallel()
-	if got := deriveNTLSProfileForTest(t, false); got != corepb.Profile_PROFILE_GM {
+	if got := deriveNTLSProfileForTest(t, ntls.ModeTLCP); got != corepb.Profile_PROFILE_GM {
 		t.Errorf("TLCP channel profile = %v, want gm", got)
 	}
-	if got := deriveNTLSProfileForTest(t, true); got != corepb.Profile_PROFILE_INTL {
+	if got := deriveNTLSProfileForTest(t, ""); got != corepb.Profile_PROFILE_GM {
+		t.Errorf("empty mode (default) profile = %v, want gm", got)
+	}
+	if got := deriveNTLSProfileForTest(t, ntls.ModeTLS13); got != corepb.Profile_PROFILE_INTL {
 		t.Errorf("TLS1.3 channel profile = %v, want intl", got)
 	}
 }
 
 // ntlsServerCfgFor 构造能通过 NewServer 校验的最小配置（证书路径仅校验非空）。
-func ntlsServerCfgFor(t *testing.T, tlsMode bool) ntls.ServerConfig {
+func ntlsServerCfgFor(t *testing.T, mode ntls.Mode) ntls.ServerConfig {
 	t.Helper()
-	cfg := ntls.ServerConfig{Address: "127.0.0.1:0", TLSMode: tlsMode}
-	if tlsMode {
+	cfg := ntls.ServerConfig{Address: "127.0.0.1:0", Mode: mode}
+	if mode.IsTLS13() {
 		cfg.CertFile, cfg.KeyFile = "placeholder.crt", "placeholder.key"
 	} else {
 		cfg.SignCertFile, cfg.SignKeyFile = "s.pem", "s.key"

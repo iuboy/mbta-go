@@ -60,8 +60,11 @@ func serial() *big.Int {
 	return s
 }
 
-// selfSignCA 生成自签名 SM2 CA。
-func selfSignCA() (*x509.Certificate, *sm2.PrivateKey) {
+// selfSignCA 生成自签名 SM2 CA，返回 (证书, 私钥, 签名 der)——der 由调用方
+// 直接写盘。此前 main 对同一模板二次 CreateCertificate：SM2 签名随机数使两次
+// DER 不同，写盘的 CA 与签发叶子所用的 caCert 不是同一签名字节（链验证同公钥
+// 同 subject 仍通过，但冗余且困惑——review P3-11 裁决消除）。
+func selfSignCA() (*x509.Certificate, *sm2.PrivateKey, []byte) {
 	priv := genSM2()
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial(),
@@ -76,7 +79,7 @@ func selfSignCA() (*x509.Certificate, *sm2.PrivateKey) {
 	must(err)
 	cert, err := polluxSmx509.ParseCertificate(der)
 	must(err)
-	return cert, priv
+	return cert, priv, der
 }
 
 // issueCert 由 CA 签发一张终端证书。
@@ -112,9 +115,7 @@ func main() {
 		panic(fmt.Sprintf("output dir %s not accessible: %v", dir, err))
 	}
 
-	caCert, caKey := selfSignCA()
-	caDER, err := polluxSmx509.CreateCertificate(caCert, caCert, &caKey.PublicKey, caKey)
-	must(err)
+	caCert, caKey, caDER := selfSignCA()
 
 	signKey := genSM2()
 	encKey := genSM2()

@@ -11,7 +11,7 @@ import (
 	"github.com/iuboy/mbta-go/internal/protocol"
 )
 
-// ServerConfig holds configuration for an MBTA server.
+// ServerConfig 是 v1 服务端配置。
 //
 // Policy 零值时 NewServer 回填 core.DefaultServerPolicy(PROFILE_INTL)——v1 binding
 // 即国际密码组合（X25519+AES-GCM），默认策略与 binding 语义一致；显式配置则原样
@@ -41,11 +41,9 @@ type ServerConfig struct {
 	// Epochs 可选：连接纪元分配器（facade 双监听时共享一份，保证同 agent
 	// 跨 v1/ntls 的纪元单调；nil = 本 server 独立分配）。
 	Epochs *protocol.EpochAllocator
-	// Commands 启用运维命令通道（按 agentID 寻址下发 COMMAND 帧）。nil =
-	// 关闭（不注册会话，不响应命令 API）。
 }
 
-// Server accepts and handles MBTA agent connections.
+// Server 接受并处理 MBTA agent 连接（QUIC）。
 // 内嵌 binding.Server（消除与 ntls 的服务端外壳重复），
 // 自身仅保留 QUIC 专属的 Start/Addr/Close 入口。
 type Server struct {
@@ -63,7 +61,7 @@ func (s *Server) SendCommand(ctx context.Context, agentID string, cmd *corepb.Co
 	return s.config.Commands.SendCommand(ctx, agentID, cmd)
 }
 
-// NewServer creates a new MBTA server.
+// NewServer 创建 v1 服务器（仅构造不启动；启动用 [Server.Start]）。
 func NewServer(cfg ServerConfig) (*Server, error) {
 	if err := core.ValidateListenAddr(cfg.Transport.Address); err != nil {
 		return nil, core.WrapError(core.ErrCodeConfig, "Transport.Address", err)
@@ -80,7 +78,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		SinkQueueSize: cfg.SinkQueueSize, SinkQueueMaxBytes: cfg.SinkQueueMaxBytes,
 		// epoch 必须服务端级共享分配（r2 审查裁决）：票据丢失的 agent 也要拿到
 		// 单调递增的 epoch，否则被围栏死锁。每个 Server 一份，跨连接复用。
-		Epochs: epochAlloc(cfg.Epochs),
+		Epochs: binding.EpochAlloc(cfg.Epochs),
 	}
 	if err := binding.ResolveHandlerConfig(&hcfg); err != nil {
 		return nil, err
@@ -91,9 +89,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}, nil
 }
 
-// Start begins listening for QUIC connections and runs the accept loop.
-// Blocks until the context is cancelled. Each accepted connection is handled
-// in its own goroutine via CoreHandler.Handle.
+// Start 监听 QUIC 连接并运行 accept 循环，阻塞直至 ctx 取消。
+// 每个被接受的连接经 CoreHandler.Handle 在独立 goroutine 中处理。
 func (s *Server) Start(ctx context.Context) error {
 	return s.Run(ctx, binding.RunSpec[*Listener, *Conn]{
 		Listen: func(ctx context.Context) (*Listener, error) {
@@ -119,15 +116,7 @@ func (s *Server) Addr() string {
 	return s.Server.Addr(func(l *Listener) net.Addr { return l.Addr() })
 }
 
-// Close shuts down the server.
+// Close 关闭服务器并释放监听资源。
 func (s *Server) Close() error {
 	return s.Server.Close(func(l *Listener) error { return l.Close() })
-}
-
-// epochAlloc 返回共享分配器或独立新实例。
-func epochAlloc(e *protocol.EpochAllocator) *protocol.EpochAllocator {
-	if e != nil {
-		return e
-	}
-	return &protocol.EpochAllocator{}
 }

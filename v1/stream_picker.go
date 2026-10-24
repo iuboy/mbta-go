@@ -2,13 +2,13 @@ package v1
 
 import "io"
 
-// DataStream represents an opened QUIC data stream with an integer index.
+// DataStream 表示一条已打开的 QUIC data stream 及其整数索引。
 type DataStream interface {
 	io.Writer
 	Index() int
 }
 
-// StreamPicker selects which data stream a batch should be sent on.
+// StreamPicker 为待发送的 data 帧选择目标 data stream。
 type StreamPicker interface {
 	Pick() (DataStream, error)
 }
@@ -27,4 +27,5 @@ func NewSingleStream(ds DataStream) StreamPicker {
 	return &singleStream{ds: ds}
 }
 
+// Pick 返回固定的单条数据流（恒成功，不产生错误）。
 func (s *singleStream) Pick() (DataStream, error) { return s.ds, nil }

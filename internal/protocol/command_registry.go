@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	core "github.com/iuboy/mbta-go/core"
+	"github.com/iuboy/mbta-go/core"
 	corepb "github.com/iuboy/mbta-go/corepb"
 )
 
@@ -34,8 +34,11 @@ var (
 
 // CommandRegistry 维护 agentID → 活动连接的映射，并提供命令下发 + ACK 等待。
 type CommandRegistry struct {
-	mu       sync.RWMutex
-	byAgent  map[string]*CoreHandler
+	mu      sync.RWMutex
+	byAgent map[string]*CoreHandler
+	// pending 的 key 是 (agentID, commandId) 复合键：CommandId 是调用方生成的
+	// 幂等键，作用域是单个 agent——全局键会让对 agentA/B 并发下发的同 ID 命令
+	// 互相覆盖 pending 条目，A 的 ACK resolve 到 B 的等待者（审查 F7 裁决）。
 	pending  map[string]chan *corepb.ControlCommandAck
 	timeouts func() time.Duration // ACK 等待窗口（可测；nil = DefaultCommandAckTimeout）
 }
@@ -77,15 +80,22 @@ func (r *CommandRegistry) get(agentID string) (*CoreHandler, bool) {
 	return h, ok
 }
 
-// resolve 唤醒等待中的 ACK 等待者；无人等待则丢弃。
-func (r *CommandRegistry) resolve(ack *corepb.ControlCommandAck) {
+// pendingKey 构造 pending 表的 (agentID, commandId) 复合键。
+func pendingKey(agentID, commandID string) string {
+	return agentID + "\x1f" + commandID
+}
+
+// resolve 唤醒指定 agent 等待中的 ACK 等待者；无人等待则丢弃。
+// agentID 来自回传 ACK 的连接（handler 自身），与服务端下发时的寻址维度一致。
+func (r *CommandRegistry) resolve(agentID string, ack *corepb.ControlCommandAck) {
 	if r == nil || ack == nil || ack.CommandId == "" {
 		return
 	}
+	key := pendingKey(agentID, ack.CommandId)
 	r.mu.Lock()
-	ch, ok := r.pending[ack.CommandId]
+	ch, ok := r.pending[key]
 	if ok {
-		delete(r.pending, ack.CommandId)
+		delete(r.pending, key)
 	}
 	r.mu.Unlock()
 	if ok {
@@ -95,7 +105,8 @@ func (r *CommandRegistry) resolve(ack *corepb.ControlCommandAck) {
 }
 
 // SendCommand 向指定 agent 下发命令并等待 ACK（同步语义，含超时）。
-// 返回 agent 的应答；REJECTED/FAILED 转为可判定错误（AckError）。
+// 返回 agent 的应答；REJECTED/FAILED 转为 *AckError（errors.Is 命中
+// ErrCommandRejected/ErrCommandFailed，errors.As 可取完整应答）。
 func (r *CommandRegistry) SendCommand(ctx context.Context, agentID string, cmd *corepb.ControlCommand) (*corepb.ControlCommandAck, error) {
 	if r == nil {
 		return nil, ErrAgentNotConnected
@@ -115,13 +126,14 @@ func (r *CommandRegistry) SendCommand(ctx context.Context, agentID string, cmd *
 	if r.timeouts != nil {
 		timeout = r.timeouts()
 	}
+	key := pendingKey(agentID, cmd.CommandId)
 	ackCh := make(chan *corepb.ControlCommandAck, 1)
 	r.mu.Lock()
-	r.pending[cmd.CommandId] = ackCh
+	r.pending[key] = ackCh
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
-		delete(r.pending, cmd.CommandId)
+		delete(r.pending, key)
 		r.mu.Unlock()
 	}()
 
@@ -138,9 +150,9 @@ func (r *CommandRegistry) SendCommand(ctx context.Context, agentID string, cmd *
 			corepb.CommandAckCode_COMMAND_ACK_CODE_ACCEPTED:
 			return ack, nil
 		case corepb.CommandAckCode_COMMAND_ACK_CODE_REJECTED:
-			return ack, ErrCommandRejected
+			return ack, &AckError{Ack: ack, err: ErrCommandRejected}
 		default:
-			return ack, ErrCommandFailed
+			return ack, &AckError{Ack: ack, err: ErrCommandFailed}
 		}
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -149,14 +161,28 @@ func (r *CommandRegistry) SendCommand(ctx context.Context, agentID string, cmd *
 	}
 }
 
-// AckError 携带 agent 应答细节的命令失败（errors.As 可取）。
+// AckError 携带 agent 应答细节的命令失败：errors.Is 命中对应哨兵
+// （ErrCommandRejected/ErrCommandFailed），errors.As 可取完整应答。
 type AckError struct {
 	Ack *corepb.ControlCommandAck
+	err error
 }
 
+// Error 返回命令失败的描述：类别（rejected/failed）加 agent 应答消息。
 func (e *AckError) Error() string {
-	if e.Ack == nil {
-		return "command ack error"
+	code := "command failed"
+	if errors.Is(e.err, ErrCommandRejected) {
+		code = "command rejected"
 	}
-	return "command " + e.Ack.CommandId + ": " + e.Ack.Message
+	msg := ""
+	if e.Ack != nil {
+		msg = ": " + e.Ack.Message
+	}
+	return code + msg
 }
+
+// Is 报告是否命中错误哨兵（供 errors.Is 判别，实现见 Unwrap）。
+func (e *AckError) Is(target error) bool { return target == e.err }
+
+// Unwrap 返回内部哨兵错误（ErrCommandRejected/ErrCommandFailed）。
+func (e *AckError) Unwrap() error { return e.err }

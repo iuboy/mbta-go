@@ -13,7 +13,7 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// ClientConfig holds configuration for an MBTA client.
+// ClientConfig 是 v1 客户端配置。
 type ClientConfig struct {
 	Transport    QUICClientConfig  // QUIC 连接配置
 	AgentID      string            // agent ID
@@ -27,7 +27,7 @@ type ClientConfig struct {
 	DrainTimeout time.Duration // Close 时等待未终态 batch 的上限。0=默认(30s)
 }
 
-// Client is an MBTA agent that connects to a server and sends event batches.
+// Client 是 v1 binding 的 MBTA 客户端：连接服务端并发送信号批次。
 //
 // Client 是薄包装：协议逻辑（状态机/握手/RESULT/drain/heartbeat）全部委托给
 // protocol.CoreClient；传输帧 I/O 下沉到 v1ClientTransport（QUIC 多流适配）。
@@ -60,18 +60,15 @@ type v1ClientTransport struct {
 	controlMu  sync.Mutex                   // 串行化 control stream 写
 }
 
-// frameLimit 原子存储协商帧上限（0=默认）。HELLO_ACK 后经 FrameLimitSetter 注入。
+// SetFrameLimit 原子写入协商帧上限（0=默认）。HELLO_ACK 后经 FrameLimitSetter 注入。
 func (t *v1ClientTransport) SetFrameLimit(maxBytes uint64) { t.frameLimit.Store(maxBytes) }
 
+// ReadFrame 从 control stream 读下一帧。ctx 无 deadline 时落到
+// core.DefaultReadTimeout（5min）；长连接活性由应用层 PING/PONG 心跳维持
+// （否则空闲连接会被读超时断开）。
 func (t *v1ClientTransport) ReadFrame(ctx context.Context) (core.Frame, error) {
-	fl := t.frameLimit.Load()
-	if fl == 0 {
-		return core.ReadFrameCtx(ctx, t.controlStr)
-	}
-	return core.ReadFrameCtxLimit(ctx, t.controlStr, core.FrameLimits{MaxFrameBytes: fl})
+	return core.ReadFrameCtxLimit(ctx, t.controlStr, core.LimitsFor(t.frameLimit.Load()))
 }
-
-// 读超时统一用 core.DefaultReadTimeout。
 
 // MarkAuthed 实现 protocol.AuthMarker：握手完成后协议层调用，开放 data stream
 // 门禁（Conn.OpenDataStream 的 authed 检查）。时序上先于 postAuth 的 openDataStream，
@@ -99,7 +96,14 @@ func (t *v1ClientTransport) WriteFrame(ctx context.Context, typ uint8, payload [
 			return core.WrapError(core.ErrCodeStream, "set write deadline", err)
 		}
 		defer func() { _ = t.controlStr.SetWriteDeadline(time.Time{}) }()
-		return core.Write(t.controlStr, typ, 0, payload)
+		if err := core.Write(t.controlStr, typ, 0, payload); err != nil {
+			// 写失败（含部分写/短写）时拆除连接：control stream 半帧残留会使后续
+			// 控制帧全部错位（流去同步）——对齐服务端 quicTransport.SendFrame 语义，
+			// CloseWithError 迫使读侧出错、上层走重连。
+			_ = t.conn.Close()
+			return err
+		}
+		return nil
 	}
 	// data 通道：picker 选流，ctx 感知写。
 	// picker 经 atomic 读取（postAuth 在 c.mu 下用 atomic.Pointer.Store 写）。
@@ -112,12 +116,21 @@ func (t *v1ClientTransport) WriteFrame(ctx context.Context, typ uint8, payload [
 	if err != nil {
 		return core.WrapError(core.ErrCodeBatch, "pick stream", err)
 	}
-	if w, ok := ds.(*quicStreamWrapper); ok {
-		return w.writeFrameCtx(ctx, typ, payload)
+	w, ok := ds.(*quicStreamWrapper)
+	if !ok {
+		// 非 wrapper 的自定义 DataStream 无法提供写 deadline 保护（慢速对端下
+		// Write 永久阻塞 → goroutine 泄漏）——拒绝而非裸写（review P3-13 裁决）。
+		return core.NewError(core.ErrCodeStream,
+			"data stream must originate from NewSingleStream (deadline-aware wrapper)")
 	}
-	return core.Write(ds, typ, 0, payload)
+	if werr := w.writeFrameCtx(ctx, typ, payload); werr != nil {
+		_ = t.conn.Close() // data stream 半帧残留：同 control 路径拆连（流去同步）
+		return werr
+	}
+	return nil
 }
 
+// CloseConn 关闭底层 QUIC 连接（error code 1，见 [Conn.Close]）。
 func (t *v1ClientTransport) CloseConn() error {
 	return t.conn.Close()
 }
@@ -150,7 +163,7 @@ func (t *v1ClientTransport) SendDatagram(ctx context.Context, payload []byte) er
 	return nil
 }
 
-// quicStreamWrapper adapts *quic.Stream to the DataStream interface.
+// quicStreamWrapper 将 *quic.Stream 适配为 DataStream 接口。
 //
 // mu 串行化 SetWriteDeadline/Write/恢复 三步，使调用方 ctx 能安全绑定到写。
 type quicStreamWrapper struct {
@@ -159,7 +172,10 @@ type quicStreamWrapper struct {
 	mu     sync.Mutex
 }
 
-func (w *quicStreamWrapper) Index() int                  { return w.idx }
+// Index 返回流索引（v1 单 data stream 模型下恒为 0）。
+func (w *quicStreamWrapper) Index() int { return w.idx }
+
+// Write 写入流（实现 io.Writer，直接透传底层 QUIC 流）。
 func (w *quicStreamWrapper) Write(p []byte) (int, error) { return w.stream.Write(p) }
 
 // writeFrameCtx 写一帧并受调用方 ctx 约束。
@@ -181,7 +197,7 @@ func (w *quicStreamWrapper) writeFrameCtx(ctx context.Context, typ uint8, payloa
 	return core.Write(w, typ, 0, payload)
 }
 
-// NewClient creates a new MBTA client.
+// NewClient 创建 v1 客户端（仅构造不连接；连接用 [Client.Connect]）。
 func NewClient(cfg ClientConfig) (*Client, error) {
 	if err := core.ValidateHostPort(cfg.Transport.Server); err != nil {
 		return nil, core.WrapError(core.ErrCodeConfig, "Transport.Server", err)
@@ -213,7 +229,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	return &Client{core: cc, cfg: cfg}, nil
 }
 
-// Connect dials the server and completes the HELLO handshake (1-RTT).
+// Connect 拨号服务端并完成 HELLO 握手（1-RTT）。
 //
 // ctx 仅控制握手阶段（Dial、开 stream、HELLO）的超时与取消。握手成功后，
 // 后台 goroutine 运行在独立的 lifecycle ctx 上，不随 ctx 取消而退出；client 生命周期
@@ -307,7 +323,7 @@ func openDataStream(ctx context.Context, conn *Conn) (StreamPicker, error) {
 	return NewSingleStream(&quicStreamWrapper{stream: ds, idx: 0}), nil
 }
 
-// SendBatch sends a SignalBatch through the MBTA protocol, 返回分配的 seq。
+// SendBatch 通过 MBTA 协议发送 SignalBatch，返回分配的 seq。
 //
 // opts 携带 per-call 发送选项（如 core.WithTraceContext），透传给协议核心。
 func (c *Client) SendBatch(ctx context.Context, signalBatch *core.SignalBatch, opts ...core.SendOption) (uint64, error) {
@@ -327,8 +343,6 @@ func (c *Client) SetResultHandler(h func(seq uint64, level string, code uint32, 
 	c.core.SetResultHandler(h)
 }
 
-// SetRedirectHandler registers a callback invoked when the server sends a
-// REDIRECT frame (S→C cluster redirect to the HA leader).
 // SetCommandHandler 注册运维命令执行回调（capability: control_commands）。
 // 回调以独立 goroutine 运行（5min 超时 + panic 防护），完成后自动回
 // COMMAND_ACK（applied/failed）。
@@ -336,19 +350,23 @@ func (c *Client) SetCommandHandler(h func(context.Context, *corepb.ControlComman
 	c.core.SetCommandHandler(h)
 }
 
+// SetRedirectHandler 注册 REDIRECT 回调：服务端发送 REDIRECT 帧（S→C 集群
+// 重定向到 HA leader）时调用，payload 由应用层自行解码。
 func (c *Client) SetRedirectHandler(h func(context.Context, []byte)) {
 	c.core.SetRedirectHandler(h)
 }
 
-// Close sends a CLOSE frame, drains pending results, and shuts down.
+// Close 优雅关闭：发送 CLOSE 帧、等待在途 batch 达终态（drain）并释放资源。
 func (c *Client) Close() error {
 	return c.core.Close()
 }
 
+// State 返回当前连接状态（见 [core.State]）。
 func (c *Client) State() core.State {
 	return c.core.State()
 }
 
+// SessionID 返回当前会话 ID（握手成功前返回空串）。
 func (c *Client) SessionID() string {
 	return c.core.SessionID()
 }

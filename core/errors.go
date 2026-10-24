@@ -11,26 +11,26 @@ const (
 	CodeOK uint32 = 0
 
 	CodeAuthFailed            uint32 = 10 // 未认证维度唯一码（防 agent/token 枚举 oracle）
-	CodeUnsupportedProfile    uint32 = 12
-	CodeUnsupportedCapability uint32 = 13
-	CodeBadHandshakeMessage   uint32 = 14
+	CodeUnsupportedProfile    uint32 = 12 // profile 不在注册表
+	CodeUnsupportedCapability uint32 = 13 // 能力不被支持
+	CodeBadHandshakeMessage   uint32 = 14 // 握手消息非法（解码/校验失败、HELLO 重复）
 
 	CodeBatchTooLarge     uint32 = 20 // 解压后 payload 超 limits.max_batch_bytes
-	CodeBatchInvalid      uint32 = 21 // 含 Envelope.seq ≠ Batch.seq
-	CodeDecompressLimit   uint32 = 22
-	CodeEnvelopeOpenFail  uint32 = 23
+	CodeBatchInvalid      uint32 = 21 // Batch 非法（含 Envelope.seq ≠ Batch.seq）
+	CodeDecompressLimit   uint32 = 22 // 解压超上限
+	CodeEnvelopeOpenFail  uint32 = 23 // AEAD 开启失败（AD/nonce/key_epoch/解密）
 	CodeWindowExceeded    uint32 = 24 // 协议违规，配合 ABORT
 	CodeStaleEpoch        uint32 = 25 // 预留（票据演进项）
 	CodeLedgerDivergence  uint32 = 26 // 预留（连接级致命）
 	CodeResultLevelBad    uint32 = 27 // RESULT level 非法
 	CodeAckModeBad        uint32 = 28 // HelloAck.ack_mode 非法
-	CodeCreditInvalid     uint32 = 29 // CREDIT 帧非法
+	CodeCreditInvalid     uint32 = 29 // 初始 credit / CREDIT 帧非法
 	CodeHelloEphInvalid   uint32 = 30 // 临时公钥格式/长度非法
 	CodeHelloProofInvalid uint32 = 31 // token_proof 验证失败（对外与 10 同面，仅日志区分）
 
-	CodeServerDraining uint32 = 32
+	CodeServerDraining uint32 = 32 // 服务端排空/收尾（released 携带）
 	CodeInternal       uint32 = 40 // 服务端 reaper 合成 released 时使用
-	CodeUnavailable    uint32 = 41
+	CodeUnavailable    uint32 = 41 // 服务端不可用
 	CodeProtocolError  uint32 = 42 // 通用协议违规（未知 flags/类型错域等）
 )
 
@@ -40,6 +40,7 @@ type ErrCode struct {
 	Name string
 }
 
+// ErrCode* 常量是错误码注册表的名称化视图（Num = 同名 Code*；Name 仅供日志）。
 var (
 	ErrCodeOK                 = ErrCode{CodeOK, "ok"}
 	ErrCodeAuthFailed         = ErrCode{CodeAuthFailed, "auth_failed"}
@@ -62,7 +63,8 @@ var (
 	ErrCodeInternal           = ErrCode{CodeInternal, "internal"}
 	ErrCodeUnavailable        = ErrCode{CodeUnavailable, "unavailable"}
 	ErrCodeProtocolError      = ErrCode{CodeProtocolError, "protocol_error"}
-	ErrCodeUnknown            = ErrCode{^uint32(0), "unknown"}
+	// ErrCodeUnknown 是未注册/非标准错误的哨兵（Num 与注册表值域隔离）。
+	ErrCodeUnknown = ErrCode{^uint32(0), "unknown"}
 )
 
 // CodeName 反查错误码名称（日志用；未注册返回 "unknown"）。
@@ -73,6 +75,7 @@ func CodeName(c uint32) string {
 	return ErrCodeUnknown.Name
 }
 
+// codeRegistry 是 Num → ErrCode 反查表（init 时由 ErrCode* 常量填充）。
 var codeRegistry = map[uint32]ErrCode{}
 
 func init() {
@@ -109,8 +112,10 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.Err }
 
-// NewError / WrapError 构造标准错误。
+// NewError 按错误码构造标准错误。
 func NewError(c ErrCode, msg string) *Error { return &Error{Code: c, Message: msg} }
+
+// WrapError 包装底层 err 为标准错误（保留 Unwrap 链）。
 func WrapError(c ErrCode, msg string, err error) *Error {
 	return &Error{Code: c, Message: msg, Err: err}
 }
@@ -124,7 +129,7 @@ func CodeNumOf(err error) uint32 {
 	return ErrCodeUnknown.Num
 }
 
-// CodeOf 保留名称提取（内部用途）。非 *Error 返回空串。
+// CodeOf 提取错误码名称（日志/诊断用；数字码见 [CodeNumOf]）。非 *Error 返回空串。
 func CodeOf(err error) string {
 	var e *Error
 	if errors.As(err, &e) {

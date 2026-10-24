@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: signal.proto
 
-package mbta
+package corepb
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -21,8 +21,8 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// SignalBatch 对齐 OpenTelemetry 分层：Resource + InstrumentationScope + signals（§6）。
-// Server 侧 MUST 能无损映射到 OTLP Logs/Metrics/Traces/Profiles（附录 C）。
+// SignalBatch 对齐 OpenTelemetry 分层：Resource + InstrumentationScope + signals。
+// Server 侧 MUST 能无损映射到 OTLP Logs/Metrics/Traces/Profiles（附录 B）。
 type SignalBatch struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SchemaUrl     string                 `protobuf:"bytes,1,opt,name=schema_url,json=schemaUrl,proto3" json:"schema_url,omitempty"`
@@ -326,7 +326,7 @@ func (*AnyValue_BytesValue) isAnyValue_Value() {}
 
 func (*AnyValue_BoolValue) isAnyValue_Value() {}
 
-// histogram signal 的 exponential bucket 表达（§6.2，OTel Exponential Histogram）。
+// histogram signal 的 exponential bucket 表达（OTel Exponential Histogram；OTLP 映射见附录 B）。
 type ExponentialHistogram struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Scale           int32                  `protobuf:"varint,1,opt,name=scale,proto3" json:"scale,omitempty"`
@@ -427,7 +427,7 @@ func (x *ExponentialHistogram) GetMax() float64 {
 	return 0
 }
 
-// profile signal 载荷 + 与其他信号的双向关联（§6.2，OTLP v1.3.0+）。
+// profile signal 载荷 + 与其他信号的双向关联（OTLP v1.3.0+；映射见附录 B）。
 type ProfilePayload struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ProfileType   string                 `protobuf:"bytes,1,opt,name=profile_type,json=profileType,proto3" json:"profile_type,omitempty"` // cpu / heap / mutex / goroutine ...
@@ -512,7 +512,7 @@ func (x *ProfilePayload) GetLogRecordRef() string {
 	return ""
 }
 
-// W3C Trace Context tracestate 成员（有序键值对，§6.2.2 / W3C Trace Context）。
+// W3C Trace Context tracestate 成员（有序键值对 / W3C Trace Context）。
 // tracestate 是有序列表（最多 32 成员），不可用 map（map 不保序）。
 type TraceStateEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -566,7 +566,7 @@ func (x *TraceStateEntry) GetValue() string {
 	return ""
 }
 
-// Batch/stream 级 W3C trace 上下文继承点（§6.2.2，capability w3c_trace_context）。
+// Batch/stream 级 W3C trace 上下文继承点（capability trace_context）。
 // 同一 trace 的多个 signal 共享一份上下文，偏离时才在 SignalRecord 单独写
 // trace 字段（与逐信号冗余优化合并）。外部请求携带 traceparent/tracestate 进入
 // mbta 边界时由此协议级承载，而非逐 signal 塞 Attributes（保留 W3C 语义）。
@@ -675,8 +675,8 @@ type SignalRecord struct {
 	StatusMessage      string                `protobuf:"bytes,22,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
 	ExpHistogram       *ExponentialHistogram `protobuf:"bytes,23,opt,name=exp_histogram,json=expHistogram,proto3" json:"exp_histogram,omitempty"` // signal_type=histogram 且 aggregation=exponential
 	Profile            *ProfilePayload       `protobuf:"bytes,24,opt,name=profile,proto3" json:"profile,omitempty"`                               // signal_type=profile
-	TraceFlags         uint32                `protobuf:"varint,25,opt,name=trace_flags,json=traceFlags,proto3" json:"trace_flags,omitempty"`      // W3C traceparent trace-flags（capability w3c_trace_context）
-	TraceState         []*TraceStateEntry    `protobuf:"bytes,26,rep,name=trace_state,json=traceState,proto3" json:"trace_state,omitempty"`       // W3C tracestate（有序，w3c_trace_context）
+	TraceFlags         uint32                `protobuf:"varint,25,opt,name=trace_flags,json=traceFlags,proto3" json:"trace_flags,omitempty"`      // W3C traceparent trace-flags（capability trace_context）
+	TraceState         []*TraceStateEntry    `protobuf:"bytes,26,rep,name=trace_state,json=traceState,proto3" json:"trace_state,omitempty"`       // W3C tracestate（有序，capability trace_context）
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -996,7 +996,7 @@ const file_signal_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\x11.mbta.v1.AnyValueR\x05value:\x028\x01\x1a?\n" +
 	"\x11MetricFieldsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x01R\x05value:\x028\x01B&Z$github.com/iuboy/mbta-go/corepb;mbtab\x06proto3"
+	"\x05value\x18\x02 \x01(\x01R\x05value:\x028\x01B(Z&github.com/iuboy/mbta-go/corepb;corepbb\x06proto3"
 
 var (
 	file_signal_proto_rawDescOnce sync.Once

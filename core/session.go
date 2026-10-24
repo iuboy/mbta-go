@@ -9,6 +9,7 @@ import (
 
 // --- 客户端状态机（4 态；Closed 是任意状态的一等出边）---
 
+// State 是客户端会话状态（4 态；Closed 是任意状态的一等出边）。
 type State int
 
 const (
@@ -29,6 +30,7 @@ const (
 	stateStrClosed   = "CLOSED"
 )
 
+// String 返回状态名（IDLE/READY/DRAINING/CLOSED；未知值返回 UNKNOWN(n)）。
 func (s State) String() string {
 	switch s {
 	case StateIdle:
@@ -59,14 +61,17 @@ type StateMachine struct {
 	state State
 }
 
+// NewStateMachine 创建初始态为 Idle 的客户端状态机。
 func NewStateMachine() *StateMachine { return &StateMachine{state: StateIdle} }
 
+// State 返回当前状态。
 func (sm *StateMachine) State() State {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	return sm.state
 }
 
+// Transition 迁移到目标状态；迁移不在 clientTransitions 允许表中时返回协议错误。
 func (sm *StateMachine) Transition(next State) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -86,6 +91,7 @@ func (sm *StateMachine) ForceClosed() {
 
 // --- 服务端状态机（3 态）---
 
+// ServerState 是服务端连接状态（3 态；Draining 无出边，连接终结）。
 type ServerState int
 
 const (
@@ -97,6 +103,7 @@ const (
 	ServerStateDraining
 )
 
+// String 返回状态名（HANDSHAKING/READY/DRAINING；未知值返回 UNKNOWN(n)）。
 func (s ServerState) String() string {
 	switch s {
 	case ServerStateHandshaking:
@@ -116,14 +123,18 @@ type ServerMachine struct {
 	state ServerState
 }
 
+// NewServerMachine 创建初始态为 Handshaking 的服务端状态机。
 func NewServerMachine() *ServerMachine { return &ServerMachine{state: ServerStateHandshaking} }
 
+// State 返回当前状态。
 func (sm *ServerMachine) State() ServerState {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	return sm.state
 }
 
+// Transition 迁移到目标状态；仅允许 Handshaking→Ready 与 Ready→Draining，
+// 其余组合返回协议错误。
 func (sm *ServerMachine) Transition(next ServerState) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

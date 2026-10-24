@@ -119,7 +119,7 @@ func TestRegistry_AckLifecycle(t *testing.T) {
 		if err := core.Decode(fr.Payload, &sent); err != nil {
 			t.Fatalf("decode sent command: %v", err)
 		}
-		r.resolve(&corepb.ControlCommandAck{
+		r.resolve("a1", &corepb.ControlCommandAck{
 			CommandId: sent.CommandId,
 			Code:      corepb.CommandAckCode_COMMAND_ACK_CODE_APPLIED,
 			Message:   "restarted",
@@ -149,7 +149,7 @@ func TestRegistry_SendCommand_FailedAck(t *testing.T) {
 	case fr := <-ft.written:
 		var sent corepb.ControlCommand
 		_ = core.Decode(fr.Payload, &sent)
-		r.resolve(&corepb.ControlCommandAck{
+		r.resolve("a1", &corepb.ControlCommandAck{
 			CommandId: sent.CommandId,
 			Code:      corepb.CommandAckCode_COMMAND_ACK_CODE_FAILED,
 			Message:   "disk full",
@@ -173,8 +173,8 @@ func TestRegistry_PendingTimeout(t *testing.T) {
 	// 已注册；为避免真实帧写，注册表测试里把 handler 换成带 tr 的不可行——
 	// 这里验证 resolve 的去重语义 + pending 清理。
 	ack := &corepb.ControlCommandAck{CommandId: "gone", Code: corepb.CommandAckCode_COMMAND_ACK_CODE_FAILED}
-	r.resolve(ack) // 无人等待：不 panic、不阻塞
-	r.resolve(ack) // 二次 resolve 同一 ACK：channel 已关闭，必须安全
+	r.resolve("a1", ack) // 无人等待：不 panic、不阻塞
+	r.resolve("a1", ack) // 二次 resolve 同一 ACK：channel 已关闭，必须安全
 }
 
 func TestRegistry_Unregister_PreservesNewConnection(t *testing.T) {

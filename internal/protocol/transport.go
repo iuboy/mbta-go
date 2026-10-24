@@ -1,5 +1,3 @@
-// Package protocol 承载 MBTA 服务端/客户端的共享协议核心（r3 重设计）。
-// 仅依赖 core 与 Transport 接口，不感知 quic.Stream/net.Conn。
 package protocol
 
 import (
@@ -7,9 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/iuboy/mbta-go/core"
 )
+
+// controlWriteTimeout 是协议层内部直写 transport（PONG/COMMAND_ACK/命令下发）
+// 的写超时上限——无调用方 ctx 可绑定时兜底，防慢速对端永久阻塞写 goroutine。
+const controlWriteTimeout = 10 * time.Second
 
 // MultiplexModel 描述 binding 的多路复用模型。
 type MultiplexModel int
@@ -71,6 +74,12 @@ func SendControlFrame(ctx context.Context, tr Transport, typ uint8, payload []by
 // --- 客户端传输（binding 提供）---
 
 // ClientTransport 是客户端侧的最小传输接口。
+//
+// 并发契约（实现 MUST 满足）：WriteFrame MUST 支持多 goroutine 并发调用——
+// CoreClient 至少 4 个 goroutine 并发写（SendBatch 用户 goroutine、心跳、
+// PONG 应答、COMMAND_ACK），帧交错防护由实现内部串行化（v1 用 controlMu +
+// per-stream mu，ntls 用 writeSem 信号量）。新增 binding 漏加锁即产生帧级
+// 数据竞争（流去同步，难复现）。
 type ClientTransport interface {
 	ReadFrame(ctx context.Context) (core.Frame, error)
 	WriteFrame(ctx context.Context, typ uint8, payload []byte) error

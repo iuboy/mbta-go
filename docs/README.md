@@ -33,7 +33,7 @@
 |------|------|------|------|------|
 | `mbta/1` | QUIC | TLS 1.3 | （quic-binding 待编写） | ✅ 实现（`v1/`） |
 | `mbta/2` | QUIC | RFC 8998 | （quic-binding 待编写） | 🔲 计划中 |
-| `mbta-tls/1` | TCP | TLS 1.3 | [mbta-tcp-binding.md](./mbta-tcp-binding.md) | ✅ 实现（`ntls/`，TLSMode） |
+| `mbta-tls/1` | TCP | TLS 1.3 | [mbta-tcp-binding.md](./mbta-tcp-binding.md) | ✅ 实现（`ntls/`，`Mode: ModeTLS13`） |
 | `mbta-ntls/1` | TCP | TLCP | [mbta-tcp-binding.md](./mbta-tcp-binding.md) | ✅ 实现（`ntls/`） |
 | `mbta-wt/1` | WebTransport | TLS 1.3 | — | 🔲 预留（r3 未定义） |
 

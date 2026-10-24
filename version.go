@@ -13,6 +13,7 @@ import (
 	"fmt"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
+	"github.com/iuboy/mbta-go/ntls"
 )
 
 // ProtocolVersion 是 MBTA 协议版本标识。类型化（而非裸 string）让 WithVersion /
@@ -26,17 +27,17 @@ const (
 )
 
 // NTLSProfileFor 是 ntls profile 推导的唯一权威（服务端/客户端共用——
-// 两侧各自实现已实际漂移过一次：TLSMode=true 组合经 facade 永不互通）。
-// tlsMode=true（mbta-tls/1，TLS1.3 通道）→ intl；false（mbta-ntls/1，TLCP）→ gm。
-func NTLSProfileFor(tlsMode bool) corepb.Profile {
-	if tlsMode {
+// 两侧各自实现已实际漂移过一次，经此单点收敛）。
+// ntls.ModeTLS13（mbta-tls/1 通道）→ intl；ModeTLCP（mbta-ntls/1 通道）→ gm。
+func NTLSProfileFor(mode ntls.Mode) corepb.Profile {
+	if mode.IsTLS13() {
 		return corepb.Profile_PROFILE_INTL // mbta-tls/1（TLS1.3 通道）
 	}
 	return corepb.Profile_PROFILE_GM // mbta-ntls/1（TLCP 通道）
 }
 
 // ProfileFor 返回版本对应的默认应用层密码 profile（v1=intl、ntls=gm；
-// ntls 的 TLSMode 分支经 NTLSProfileFor 单点推导）。
+// ntls 的 Mode 分支经 NTLSProfileFor 单点推导）。
 // profile 决定 ECDH/KDF/AEAD 组合（X25519+AES-GCM 或 SM2+SM4-GCM），与传输层
 // 选择正交；未显式配置 Profile/Policy 时 facade 按此映射取默认。
 func ProfileFor(v ProtocolVersion) (corepb.Profile, error) {

@@ -3,6 +3,7 @@ package ntls
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -46,11 +47,13 @@ func newTCPTransport(conn net.Conn, maxFrame uint64) *tcpTransport {
 	sem := make(chan struct{}, 1)
 	sem <- struct{}{}
 	t := &tcpTransport{
-		conn:      conn,
-		maxFrame:  maxFrame,
-		writeSem:  sem,
-		controlCh: make(chan core.Frame, 16),
-		dataCh:    make(chan core.Frame, 64),
+		conn:     conn,
+		maxFrame: maxFrame,
+		writeSem: sem,
+		// 容量收紧（control 8 / data 8）：消费阻塞时 readLoop 阻塞在读 socket，
+		// TCP 背压天然生效——64×16MB 帧上限的囤积驻留是 OOM 面（review P2-6）。
+		controlCh: make(chan core.Frame, 8),
+		dataCh:    make(chan core.Frame, 8),
 		done:      make(chan struct{}),
 	}
 	go t.readLoop()
@@ -59,10 +62,7 @@ func newTCPTransport(conn net.Conn, maxFrame uint64) *tcpTransport {
 
 // limits 返回帧上限（0=默认）。
 func (t *tcpTransport) limits() core.FrameLimits {
-	if t.maxFrame == 0 {
-		return core.DefaultLimits()
-	}
-	return core.FrameLimits{MaxFrameBytes: t.maxFrame}
+	return core.LimitsFor(t.maxFrame)
 }
 
 // readLoop 单连接读帧 → 按 type 高位通道域分发（control/data）。
@@ -85,6 +85,9 @@ func (t *tcpTransport) readLoop() {
 		}
 		f, err := core.Read(t.conn, t.limits())
 		if err != nil {
+			// 静默 return 曾使连接异常断开无从排查（review P3-16）；Debug 级
+			// 避免对端主动断开的高频噪音。
+			slog.Debug("tcp read loop ended", "error", err)
 			return
 		}
 		ch := t.dataCh
@@ -134,10 +137,13 @@ func (t *tcpTransport) RecvDataFrame(ctx context.Context) (core.Frame, error) {
 // 写操作设 SetWriteDeadline：ctx 有 Deadline 用之，否则用 core.DefaultWriteTimeout（30s），
 // 防止半开对端让写永久阻塞（sink worker 的 durable RESULT 尤其受影响）。
 func (t *tcpTransport) SendFrame(ctx context.Context, f core.Frame) error {
-	// 获取写信号量（或响应 ctx 取消）。
+	// 获取写信号量（或响应 ctx 取消/传输关闭）：Close 已 drain 且不归还 token，
+	// 携带无取消 ctx 的写若只等信号量会永久挂起——done 分支快速失败。
 	select {
 	case <-t.writeSem:
 		// 获取到 token，继续写操作
+	case <-t.done:
+		return core.NewError(core.ErrCodeStream, "transport closed")
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -161,22 +167,24 @@ func (t *tcpTransport) SendFrame(ctx context.Context, f core.Frame) error {
 	return nil
 }
 
-// SupportsDatagram：TCP 无不可靠通道。
+// SupportsDatagram 报告是否支持不可靠通道：TCP 无，恒返回 false。
 func (t *tcpTransport) SupportsDatagram() bool { return false }
 
-// SendDatagram：接口占位——服务端不发送 DGRAM（DGRAM 只进不出），无生产调用方。
+// SendDatagram 占位实现：服务端不发送 DGRAM（协议中 DGRAM 仅 C→S 方向），
+// 恒返回 protocol.ErrDatagramUnsupported。
 func (t *tcpTransport) SendDatagram(ctx context.Context, payload []byte) error {
 	_ = ctx
 	_ = payload
 	return protocol.ErrDatagramUnsupported
 }
 
-// Multiplexing：TCP 单连接帧多路复用。
+// Multiplexing 报告多路复用模型：TCP 单连接帧多路复用。
 func (t *tcpTransport) Multiplexing() protocol.MultiplexModel {
 	return protocol.MultiplexTCPSingleConn
 }
 
-// RemoteAddr 返回 TCP 对端地址。连接已关闭时返回 nil。
+// RemoteAddr 返回 TCP 对端地址（conn 为 nil 时返回 nil，属防御分支；
+// newTCPTransport 构造后 conn 恒非 nil）。
 func (t *tcpTransport) RemoteAddr() net.Addr {
 	if t.conn == nil {
 		return nil

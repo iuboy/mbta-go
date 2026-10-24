@@ -79,13 +79,14 @@ type CoreHandler struct {
 	tr     Transport
 	config HandlerConfig
 
-	sm          *core.ServerMachine
-	metrics     core.Metrics
-	agentID     string
-	sessionID   []byte
-	handshakeMu sync.RWMutex
-	authed      atomic.Bool
-	expiresAt   atomic.Int64
+	sm            *core.ServerMachine
+	metrics       core.Metrics
+	agentID       string
+	sessionID     []byte
+	handshakeMu   sync.RWMutex
+	authed        atomic.Bool
+	expiresAt     atomic.Int64
+	helloFailures atomic.Int32
 
 	keys    atomic.Pointer[core.SessionKeys]
 	negCaps atomic.Value // []string selected capabilities
@@ -93,7 +94,7 @@ type CoreHandler struct {
 
 	// credit 模型 B（服务端权威）。
 	credit        *core.CreditManager // 准入/去重/守恒单一真相（根治版：grant 令牌化）
-	flushArmed    atomic.Bool         // 懒 flush：首个 Settle 后 arm 一次 100ms 定时器（无常驻 tick
+	flushArmed    atomic.Bool         // 懒 flush：首个 Settle 后 arm 一次 100ms 定时器（无常驻 tick）
 	dgramTokens   chan struct{}       // datagram 并发槽
 	dgramBucketMu sync.Mutex
 	dgramRate     int64 // bytes/s；0 = 不限
@@ -173,7 +174,10 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 		if h.config.Commands != nil && h.authed.Load() {
 			h.config.Commands.unregister(h.getAgentID(), h)
 		}
-		if h.config.OnSession != nil {
+		// DISCONNECTED 仅对已认证连接派发（SessionEvent 契约：表示「已认证
+		// agent」的连接结束）——pre-auth 扫描器的空 agentID 事件会污染消费方
+		// 的连接表/告警统计，与上方 unregister 的 authed 守卫对称。
+		if h.config.OnSession != nil && h.authed.Load() {
 			h.config.OnSession(core.SessionEvent{
 				Type:       core.SessionDisconnected,
 				AgentID:    h.getAgentID(),
@@ -203,8 +207,11 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 		slog.Warn("data goroutines did not exit in drain timeout; abandoning", "session", string(h.getSessionID()))
 	}
 
-	// 服务端排空：对放弃的 inflight 项发 released（禁止沉默——否则客户端白等满超时）。
-	h.releaseStuck(ctx, core.CodeServerDraining, 0)
+	// 服务端排空：对放弃的 inflight 项发 released（禁止沉默——否则客户端白等满
+	// 超时）。使用 WithoutCancel：Handle 收尾时 ctx 通常已取消（停机/读错误路径），
+	// 直接透传会让 binding SendFrame 的 ctx.Err() 预检把全部 released RESULT
+	// 静默丢弃，同时下方 WARN 仍谎报已释放——观测与实际相反。
+	h.releaseStuck(context.WithoutCancel(ctx), core.CodeServerDraining, 0)
 
 	// sink 排空（有界）：超时取消 sinkCtx 放弃等待（防卡死 sink 钉死 connSem 槽位）。
 	if h.sinkQueue != nil {
@@ -276,7 +283,9 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			if err := core.Decode(f.Payload, &ack); err != nil {
 				slog.Warn("decode command ack failed", "error", err)
 			} else {
-				h.resolveAck(&ack)
+				// agentID 取自本连接：ACK 按下发维度 (agentID, commandId) 精确
+				// resolve，跨 agent 同 ID 命令不串线。
+				h.resolveAck(h.getAgentID(), &ack)
 			}
 		case core.TypeClose:
 			h.handleClose(f.Payload)
@@ -354,20 +363,8 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 		return err
 	}
 	if verr := core.VerifyTokenProof(h.config.Auth, hello.GetProfile(), hello.GetAgentId(), thHello, hello.GetTokenProof()); verr != nil {
-		// 候选诊断字段：candidates 数量/首候选指纹直接区分「候选缺失
-		// （服务端未纳管该 token 类别）」与「候选在但证明不匹配」两类故障。
-		// first_fingerprint 是候选 token 的 SHA-256 指纹前缀（tokenFingerprint），
-		// 不是 token 原文的任何片段——日志聚合系统不得累积部分秘密。
-		cands, _ := h.config.Auth.ResolveToken(hello.GetAgentId())
-		slog.Warn("token proof verification failed", "agent", core.SanitizeForLog(hello.GetAgentId()),
-			"candidates", len(cands), "first_fingerprint", func() string {
-				if len(cands) > 0 {
-					return tokenFingerprint(cands[0])
-				}
-				return ""
-			}(), "hello_caps", fmt.Sprint(hello.GetCapabilities()))
-		h.sendNak(ctx, core.CodeAuthFailed, true, 1000) // 单一代码 + retryable + 退避提示
-		return nil                                      //nolint:nilerr // 握手失败不拆传输层（NAK 已回）
+		h.handleAuthFailure(ctx, &hello)
+		return nil //nolint:nilerr // 握手失败不拆传输层（NAK 已回）
 	}
 
 	// ECDH + 密钥派生（失败即 NAK，见 deriveServerKeys）。
@@ -427,6 +424,7 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 		return core.WrapError(core.ErrCodeProtocolError, "transition READY", terr)
 	}
 	h.authed.Store(true)
+	h.helloFailures.Store(0)
 	if am, ok := h.tr.(AuthMarker); ok {
 		am.MarkAuthed()
 	}
@@ -461,6 +459,48 @@ func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
 	}
 	h.metrics.AuthSuccess().Inc()
 	return nil
+}
+
+// handleAuthFailure 处理 token proof 验证失败：诊断日志（候选指纹，零原文暴露；
+// caps 只打 sanitize 样本防日志放大）→ 残留清理（negCaps/codec 验证前已 Store，
+// 防半初始化状态泄漏到重试，review F28）→ 渐进退避（无成本暴力尝试逐次变慢，
+// 阻塞的只是本连接 goroutine）→ retryable NAK。
+func (h *CoreHandler) handleAuthFailure(ctx context.Context, hello *core.Hello) {
+	// 候选诊断字段：candidates 数量/首候选指纹直接区分「候选缺失（服务端未纳管
+	// 该 token 类别）」与「候选在但证明不匹配」两类故障。first_fingerprint 是
+	// 候选 token 的 SHA-256 指纹前缀（tokenFingerprint），不是 token 原文的任何
+	// 片段——日志聚合系统不得累积部分秘密。
+	cands, _ := h.config.Auth.ResolveToken(hello.GetAgentId())
+	// capabilities 已在 ValidateHello 做条数/长度/控制字符校验（认证前面），
+	// 此处仅取前几条做样本，超长截断——防日志放大（未认证输入不整段入日志）。
+	capSample := hello.GetCapabilities()
+	if len(capSample) > 3 {
+		capSample = capSample[:3]
+	}
+	slog.Warn("token proof verification failed", "agent", core.SanitizeForLog(hello.GetAgentId()),
+		"candidates", len(cands), "first_fingerprint", func() string {
+			if len(cands) > 0 {
+				return tokenFingerprint(cands[0])
+			}
+			return ""
+		}(), "caps_count", len(hello.GetCapabilities()), "caps_sample", core.SanitizeForLog(fmt.Sprint(capSample)))
+	// 残留清理：negCaps/codec 在验证前已 Store——认证失败后清空，防半初始化
+	// 状态泄漏到后续 HELLO 重试（review F28）。
+	h.negCaps.Store([]string(nil))
+	h.codec.Store(corepb.Codec(0))
+	// 渐进退避：认证失败可无限重试（retryable NAK），但无成本暴力尝试应逐次
+	// 变慢——阻塞的是本连接 goroutine，不影响其他连接。
+	if n := h.helloFailures.Add(1); n > 3 {
+		d := time.Duration(n) * 100 * time.Millisecond
+		if d > 2*time.Second {
+			d = 2 * time.Second
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(d):
+		}
+	}
+	h.sendNak(ctx, core.CodeAuthFailed, true, 1000) // 单一代码 + retryable + 退避提示
 }
 
 // deriveServerKeys 执行服务端侧 ECDH 与会话密钥派生（r3 §5.1）：
@@ -556,7 +596,7 @@ func (h *CoreHandler) sendCommand(cmd *corepb.ControlCommand) error {
 	if err != nil {
 		return core.WrapError(core.ErrCodeInternal, "encode command", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), controlWriteTimeout)
 	defer cancel()
 	return SendControlFrame(ctx, h.tr, core.TypeCommand, payload)
 }
@@ -564,9 +604,9 @@ func (h *CoreHandler) sendCommand(cmd *corepb.ControlCommand) error {
 // resolveAck 将命令应答分发给等待中的发送方（controlLoop COMMAND_ACK case
 // 调用）。等待管道的单一真相在 CommandRegistry.pending——handler 侧不持有
 // 第二套（此前双管道导致 ACK 永远无人等待，测试暴露后修正）。
-func (h *CoreHandler) resolveAck(ack *corepb.ControlCommandAck) {
+func (h *CoreHandler) resolveAck(agentID string, ack *corepb.ControlCommandAck) {
 	if h.config.Commands != nil {
-		h.config.Commands.resolve(ack)
+		h.config.Commands.resolve(agentID, ack)
 	}
 }
 
@@ -693,9 +733,10 @@ func (h *CoreHandler) dataLoop(ctx context.Context) {
 
 // reaper：服务端闭环。两职责：
 //   - inflight 超时回收（stuckInflightAge）→ released + 额度回收；
-//   - CREDIT 定时攒批发 放（creditFlushInterval）：低吞吐连接上回收量长期达不到
-//     阈值（初始窗/4）时，客户端额度被拖死——定时器兜底任何 >0 的回收量。
-//     同时消除"服务端阈值 > 客户端钳制"配置组合下的饿死路径。
+//   - CREDIT 定时攒批发放：回收量先入攒批缓冲（core.CreditManager），由
+//     maybeScheduleFlush 的 100ms 懒定时统一下发（creditFlushInterval）——
+//     任何 >0 的回收量都能按时送达客户端，不会滞留缓冲（spec §5.4 的
+//     「回收批数 ≥ max(1, 初始窗/4)」阈值发放未实现，实现仅取定时器方案）。
 func (h *CoreHandler) reaper(ctx context.Context, stop <-chan struct{}) {
 	reap := time.NewTicker(core.DefaultReapInterval)
 	defer reap.Stop()

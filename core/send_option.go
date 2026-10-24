@@ -7,10 +7,11 @@ import (
 // SendConfig 承载 per-call 发送选项，是变参 SendOption 的聚合目标。
 // 仅含可选字段，零值即「不启用任何选项」，与不传 opts 的旧行为完全一致。
 type SendConfig struct {
-	// TraceContext 是 batch 级 W3C trace 上下文（capability w3c_trace_context，
-	// spec §6.2.2）。非 nil 时由 CoreClient 设到 BatchMessage.TraceContext（field 7），
-	// 不进入 SignalBatch 的 marshal 字节。nil 表示该 batch 不携带 batch 级 trace
-	// （混装多 trace 场景应保持 nil，改用 SignalRecord 的 per-signal trace 字段）。
+	// TraceContext 是 batch 级 W3C trace 上下文（capability trace_context）。
+	// 非 nil 时由发送路径设到 Batch.Trace（proto field 3，随 Batch 编码进入
+	// Envelope 密文），不进入 SignalBatch payload 的 marshal 字节。nil 表示该
+	// batch 不携带 batch 级 trace（混装多 trace 场景应保持 nil，改用 SignalRecord
+	// 的 per-signal trace 字段）。
 	TraceContext *TraceContext
 }
 
@@ -26,11 +27,12 @@ type SendOption func(*SendConfig)
 // TraceFlags/TraceState），下游按 trace_id 重组。batch 级 TraceContext 与 per-signal
 // trace 是协同设计：前者是整批基线，后者是偏离覆盖。
 //
-// 需对端握手协商 w3c_trace_context，否则发送端在门控阶段显式报错（不静默丢弃）。
+// 服务端对携带的 TraceContext 做 W3C 格式校验（ValidateBatchTraceContext），
+// 非法判 batch_invalid。
 func WithTraceContext(tc *TraceContext) SendOption {
-	// 防御性拷贝：TraceContext 经 ApplySendOptions → SendBatch → reserveInflight 最终
-	// 设到 BatchMessage.TraceContext（protobuf 字段）。在 QUIC streams/goroutines 高并发
-	// 环境下，若共享调用方的指针，调用方并发修改字段会造成 data race 与语义错误。
+	// 防御性拷贝：TraceContext 经 ApplySendOptions → SendBatch/SendDatagram 的
+	// encodeAndSeal 设到 Batch.Trace（protobuf 字段）。若共享调用方的指针，
+	// 调用方在发送并发期间修改字段会与编码构成 data race 与语义错误。
 	return func(sc *SendConfig) {
 		if tc == nil {
 			sc.TraceContext = nil

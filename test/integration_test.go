@@ -347,6 +347,95 @@ func TestIntegration_NTLS_TLCP_GM(t *testing.T) {
 	}
 }
 
+// TestIntegration_NTLS_MTLS_RejectsCertlessClient P0 审查裁决回归：服务端配置
+// CAFile 即启用 mTLS——无客户端证书的连接必须在 TLCP 握手期被拒。修复前
+// pollux ClientAuth 默认 NoClientCert 且 LoadRootCAs 不设置 mTLS 字段，
+// mTLS 静默失效、任意客户端可完成握手。
+func TestIntegration_NTLS_MTLS_RejectsCertlessClient(t *testing.T) {
+	sink := &batchRecorder{}
+	tok, agentID := randToken(), randAgentID()
+	srv := startServer(t,
+		mbtago.WithoutV1(),
+		mbtago.WithNTLS(ntls.ServerConfig{
+			Address:      "127.0.0.1:0",
+			SignCertFile: "data/ntls/sm2_sign_cert.pem",
+			SignKeyFile:  "data/ntls/sm2_sign_key.pem",
+			EncCertFile:  "data/ntls/sm2_enc_cert.pem",
+			EncKeyFile:   "data/ntls/sm2_enc_key.pem",
+			CAFile:       "data/ntls/sm2_ca.pem", // mTLS：要求并校验客户端证书
+		}),
+		mbtago.WithAuth(core.NewStaticTokenValidator(map[string]string{tok: agentID})),
+		mbtago.WithSink(core.SinkOptions{}, sink.handler),
+	)
+
+	// 无客户端证书（仅 CA 信任锚）：修复前可正常完成 TLCP 握手。
+	client, err := mbtago.NewClient(
+		mbtago.WithServer(srv.Addr()),
+		mbtago.WithAgent(agentID, tok),
+		mbtago.WithVersion(mbtago.VersionNTLS),
+		mbtago.WithNTLSCredentials(ntls.ClientCredentials{CAFile: "data/ntls/sm2_ca.pem"}),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := client.Connect(context.Background()); err == nil {
+		_ = client.Close()
+		t.Fatal("certless client completed TLCP handshake against mTLS server; want rejection")
+	}
+}
+
+// TestIntegration_NTLS_MTLS_AcceptsCertedClient 正例：持有 CA 签发双 SM2 证书的
+// 客户端在 mTLS 服务端上完成完整链路（mTLS 修复不得误伤合法部署）。
+func TestIntegration_NTLS_MTLS_AcceptsCertedClient(t *testing.T) {
+	sink := &batchRecorder{}
+	tok, agentID := randToken(), randAgentID()
+	srv := startServer(t,
+		mbtago.WithoutV1(),
+		mbtago.WithNTLS(ntls.ServerConfig{
+			Address:      "127.0.0.1:0",
+			SignCertFile: "data/ntls/sm2_sign_cert.pem",
+			SignKeyFile:  "data/ntls/sm2_sign_key.pem",
+			EncCertFile:  "data/ntls/sm2_enc_cert.pem",
+			EncKeyFile:   "data/ntls/sm2_enc_key.pem",
+			CAFile:       "data/ntls/sm2_ca.pem",
+		}),
+		mbtago.WithAuth(core.NewStaticTokenValidator(map[string]string{tok: agentID})),
+		mbtago.WithSink(core.SinkOptions{}, sink.handler),
+	)
+
+	client, err := mbtago.NewClient(
+		mbtago.WithServer(srv.Addr()),
+		mbtago.WithAgent(agentID, tok),
+		mbtago.WithVersion(mbtago.VersionNTLS),
+		mbtago.WithNTLSCredentials(ntls.ClientCredentials{
+			SignCertFile: "data/ntls/sm2_sign_cert.pem",
+			SignKeyFile:  "data/ntls/sm2_sign_key.pem",
+			EncCertFile:  "data/ntls/sm2_enc_cert.pem",
+			EncKeyFile:   "data/ntls/sm2_enc_key.pem",
+			CAFile:       "data/ntls/sm2_ca.pem",
+		}),
+		mbtago.WithDrainTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	results := newResultCollector()
+	client.SetResultHandler(results.handler)
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("certed client rejected by mTLS server: %v", err)
+	}
+	defer client.Close()
+
+	seq, err := client.SendBatch(context.Background(), smallBatch(2, 32))
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	results.waitLevel(t, seq, corepb.ResultLevel_RESULT_LEVEL_ACCEPTED.String(), 5*time.Second)
+	if !sink.waitCount(1, 5*time.Second) {
+		t.Fatalf("sink count = %d, want 1", sink.count.Load())
+	}
+}
+
 // TestIntegration_Concurrent_MultiClient 验证多客户端并发：N 个 client 连同一
 // server，各发 M 个 batch。断言：sink 收到 N*M；每 client 的 seq 从 1 单调递增；
 // 全部 batch 收到 accepted RESULT。

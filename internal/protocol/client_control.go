@@ -22,7 +22,7 @@ func (c *CoreClient) ReadControlLoop(ctx context.Context) {
 			return
 		default:
 		}
-		f, err := c.tr.ReadFrame(ctx)
+		f, err := c.transport().ReadFrame(ctx)
 		if err != nil {
 			if isTemporaryError(err) && ctx.Err() == nil {
 				continue
@@ -78,12 +78,23 @@ func (c *CoreClient) handleResult(payload []byte) {
 		slog.Debug("invalid result level", "level", r.GetLevel())
 		return
 	}
+	if r.GetRefSeq() == 0 {
+		slog.Debug("result without ref_seq; ignoring")
+		return
+	}
 	l := c.ledger.Load()
 	if l == nil {
 		return
 	}
-	l.Terminal(r.GetRefSeq()) // RESULT 不隐含返还 credit（模型 B：返还经 CREDIT）
+	// RESULT 不隐含返还 credit（模型 B：返还经 CREDIT）；slot 移出后仍按帧派发——
+	// durable 模式下 ACCEPTED（中间态）与 DURABLE（终态）都要到达应用。
+	l.Terminal(r.GetRefSeq())
 	c.notifyDrainIfEmpty()
+	// 该 seq 的 timeout 回调已由 AckReaper 派发：迟到的真实 RESULT 不再二次回调
+	// （同一 seq 此前会先收 timeout 再收真实结果，重复投递契约未声明）。
+	if c.clearTimedOut(r.GetRefSeq()) {
+		return
+	}
 	c.dispatchResult(resultNotify{
 		seq: r.GetRefSeq(), level: r.GetLevel().String(), code: r.GetCode(), correlation: r.GetCorrelation(),
 	})
@@ -93,20 +104,24 @@ func (c *CoreClient) handleResult(payload []byte) {
 	}
 }
 
-// handleCredit 处理 CREDIT 增量。校验规则（r3 §6.3）：
-// 双零 delta 忽略；任一维为 0 且另一维 >0 = 协议违规（功能性冻结）→ ABORT；
-// 负值/回绕/超钳制由账本钳制消化（非致命）。
+// handleCredit 处理 CREDIT 增量（r3 §6.3 修订）：
+// 双零 delta 忽略；单零维度不再视为协议违规——服务端合法路径可产生
+// CREDIT{b>0, y=0}（占位未 Consume 的 reaper ForceSettle 只回收批数、不回收
+// 字节，见 handler_batch.releaseStuck），此前的 fatalTeardown 会把合法服务端
+// 状态误判为违规并拆连接。各维交由 CreditLedger.OnCredit 独立钳制消化：
+// 双零忽略 / 负值回绕丢弃计违规 / 超钳制部分吸收，均非致命。
 func (c *CoreClient) handleCredit(payload []byte) {
 	var cr core.Credit
 	if err := core.Decode(payload, &cr); err != nil {
 		slog.Debug("invalid credit payload", "error", err)
 		return
 	}
+	if cr.GetBatches() == 0 && cr.GetBytes() == 0 {
+		return // 双零 delta 忽略
+	}
 	if cr.GetBatches() == 0 || cr.GetBytes() == 0 {
-		slog.Warn("invalid CREDIT (single-zero dimension); aborting",
+		slog.Debug("single-zero credit dimension; ledger clamps per-dimension",
 			"batches", cr.GetBatches(), "bytes", cr.GetBytes())
-		c.fatalTeardown("credit protocol violation")
-		return
 	}
 	l := c.ledger.Load()
 	if l == nil {
@@ -171,8 +186,8 @@ func (c *CoreClient) runResultWorker(ctx context.Context) {
 func (c *CoreClient) fatalTeardown(cause string) {
 	c.closed.Store(true) // 与 close 共享终态语义（IsClosed 立即真；StartLifecycle 被拒）
 	c.teardownPhase(cause)
-	if c.tr != nil {
-		if err := c.tr.CloseConn(); err != nil {
+	if tr := c.transport(); tr != nil {
+		if err := tr.CloseConn(); err != nil {
 			slog.Debug("fatal teardown close conn", "cause", cause, "error", err)
 		}
 	}
@@ -222,7 +237,7 @@ func (c *CoreClient) handlePing(ctx context.Context, payload []byte) {
 	if err != nil {
 		return
 	}
-	if err := c.tr.WriteFrame(ctx, core.TypePong, p); err != nil {
+	if err := c.transport().WriteFrame(ctx, core.TypePong, p); err != nil {
 		slog.Debug("write pong failed", "error", err)
 	}
 }
@@ -244,7 +259,7 @@ func (c *CoreClient) HeartbeatLoop(ctx context.Context) {
 				continue
 			}
 			wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			if err := c.tr.WriteFrame(wctx, core.TypePing, p); err != nil {
+			if err := c.transport().WriteFrame(wctx, core.TypePing, p); err != nil {
 				cancel()
 				slog.Debug("heartbeat write failed; exiting", "error", err)
 				return
@@ -308,11 +323,34 @@ func (c *CoreClient) AckReaperLoop(ctx context.Context) {
 			}
 			for _, s := range l.ReapExpired(time.Now()) {
 				slog.Warn("batch result timed out", "seq", s.Seq, "age", time.Since(s.SentAt).Round(time.Second))
+				c.markTimedOut(s.Seq)
 				c.dispatchResult(resultNotify{seq: s.Seq, level: "timeout", code: core.CodeInternal})
 			}
 			c.notifyDrainIfEmpty()
 		}
 	}
+}
+
+// markTimedOut 登记已派发 timeout 回调的 seq（handleResult 消费即清除）。
+// 条目仅由本地 reaper 创建（上限 = 在途 credit 窗口），对端无法远程注入。
+func (c *CoreClient) markTimedOut(seq uint64) {
+	c.timedOutMu.Lock()
+	defer c.timedOutMu.Unlock()
+	if c.timedOut == nil {
+		c.timedOut = make(map[uint64]struct{}, 64)
+	}
+	c.timedOut[seq] = struct{}{}
+}
+
+// clearTimedOut 报告并清除 seq 的 timeout 派发标记。
+func (c *CoreClient) clearTimedOut(seq uint64) bool {
+	c.timedOutMu.Lock()
+	defer c.timedOutMu.Unlock()
+	if _, ok := c.timedOut[seq]; !ok {
+		return false
+	}
+	delete(c.timedOut, seq)
+	return true
 }
 
 // isTemporaryError 报告可恢复临时 I/O 错误。
@@ -353,27 +391,24 @@ func (c *CoreClient) dispatchCommand(ctx context.Context, payload []byte) {
 		slog.Warn("decode command failed", "error", err)
 		return
 	}
+	// 协商校验（与 handleDict 对称的纵深防御）：未协商 control_commands 而收到
+	// COMMAND = 对端越权，拒绝处理（命令方向是可信服务端，但两侧校验不对称
+	// 会削弱防线——review F30 裁决）。
+	if !slices.Contains(c.SelectedCapabilities(), core.CapControlCommands) {
+		slog.Warn("unsolicited COMMAND frame (control_commands not negotiated); ignoring")
+		return
+	}
 	if cmd.CommandId == "" {
 		slog.Warn("command without id; ignoring")
 		return
 	}
-	// 幂等：记录已见 command_id（有界防膨胀；成功命令会从服务端移除，重发
-	// 窗口有限，256 条环形足够）。
-	c.seenCmdMu.Lock()
-	if c.seenCommands == nil {
-		c.seenCommands = make(map[string]struct{}, 64)
-	}
-	if _, dup := c.seenCommands[cmd.CommandId]; dup {
-		c.seenCmdMu.Unlock()
+	// 幂等簿记：记录已见 command_id（有界防膨胀）。满时环形淘汰最旧条目——
+	// 整体清空会把刚插入的 ID 一并遗忘，服务端重发窗口内的重复命令将重复执行
+	// （RESTART 类有实际危害），恰好击穿本机制唯一的防御目的。
+	if c.markSeenCommand(cmd.CommandId) {
 		slog.Warn("duplicate command id; ignoring", "command_id", cmd.CommandId)
 		return
 	}
-	c.seenCommands[cmd.CommandId] = struct{}{}
-	if len(c.seenCommands) > 256 {
-		// 简单防膨胀：超过上限清空（重发窗口远小于此界）。
-		c.seenCommands = make(map[string]struct{}, 64)
-	}
-	c.seenCmdMu.Unlock()
 
 	handler := *h
 	go func() {
@@ -390,6 +425,31 @@ func (c *CoreClient) dispatchCommand(ctx context.Context, payload []byte) {
 	}()
 }
 
+// maxSeenCommands 是命令幂等窗口容量（重发窗口远小于此界）。
+const maxSeenCommands = 256
+
+// markSeenCommand 登记命令 ID 并报告是否重复（true=重复，调用方忽略该命令）。
+// 容量满时按到达序环形淘汰最旧条目：刚插入的 ID 必须仍在窗口内——
+// clear-on-full 会让重发窗口内的最新命令重复执行。
+func (c *CoreClient) markSeenCommand(commandId string) bool {
+	c.seenCmdMu.Lock()
+	defer c.seenCmdMu.Unlock()
+	if c.seenCommands == nil {
+		c.seenCommands = make(map[string]struct{}, 64)
+	}
+	if _, dup := c.seenCommands[commandId]; dup {
+		return true
+	}
+	c.seenCommands[commandId] = struct{}{}
+	c.seenCmdOrder = append(c.seenCmdOrder, commandId)
+	if len(c.seenCmdOrder) > maxSeenCommands {
+		oldest := c.seenCmdOrder[0]
+		c.seenCmdOrder = c.seenCmdOrder[1:]
+		delete(c.seenCommands, oldest)
+	}
+	return false
+}
+
 // sendCommandAck 回传命令应答（control stream 串行锁复用）。
 func (c *CoreClient) sendCommandAck(commandId string, code corepb.CommandAckCode, msg string) {
 	ack := &corepb.ControlCommandAck{CommandId: commandId, Code: code, Message: msg}
@@ -398,12 +458,12 @@ func (c *CoreClient) sendCommandAck(commandId string, code corepb.CommandAckCode
 		slog.Warn("encode command ack failed", "error", err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), controlWriteTimeout)
 	defer cancel()
 	// 与 handlePing 同路径：CoreClient 内部直写 transport（controlMu 串行
 	// 由 v1 包装层对外的 WriteFrame 负责，core 内部各帧由 control stream
 	// 单读单写模型天然串行）。
-	if err := c.tr.WriteFrame(ctx, core.TypeCommandAck, p); err != nil {
+	if err := c.transport().WriteFrame(ctx, core.TypeCommandAck, p); err != nil {
 		slog.Warn("write command ack failed", "error", err)
 	}
 }

@@ -13,7 +13,7 @@ import (
 	"github.com/iuboy/pollux-go/sm4"
 )
 
-// 各 profile 密钥长度（r3：profile 一次选定 ECDH+KDF+AEAD 组合）。
+// 各 profile 密钥长度（字节；r3：profile 一次选定 ECDH+KDF+AEAD 组合）。
 const (
 	HMACKeyLenIntl = 32 // HMAC-SHA-256
 	HMACKeyLenGM   = 32 // HMAC-SM3

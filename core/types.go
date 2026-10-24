@@ -10,7 +10,7 @@ const (
 	TypeCredit   uint8 = 0x21 // S→C 唯一流控发放帧
 	TypeDict     uint8 = 0x22 // S→C zstd 字典下发（zstd_dict 能力协商后，HELLO_ACK 之后立即发送）
 	TypePing     uint8 = 0x30 // 双向保活（仅 TCP binding）
-	TypePong     uint8 = 0x31
+	TypePong     uint8 = 0x31 // 双向保活应答（回显 time_unix_ns 与 nonce；仅 TCP binding）
 	TypeClose    uint8 = 0x40 // 双向优雅关闭（drain 超时提示）
 	TypeRedirect uint8 = 0x41 // S→C HA 重定向
 	TypeAbort    uint8 = 0x50 // 双向立即拆除（写失败/协议违规/账本漂移）
@@ -29,8 +29,9 @@ func IsControlType(t uint8) bool { return t&0x80 == 0 }
 // IsDataType 报告 type 是否落在 data 域（type 高位 = 1）。
 func IsDataType(t uint8) bool { return t&0x80 != 0 }
 
-// Frame flags：v1(r3) 全部位为保留位——压缩标识移入 Envelope（载荷属性，
-// 须在 AEAD 覆盖内）。接收端对任何非零 flags MUST ABORT（frame.go Read/Write 校验）。
+// Frame flags：r3 全部 8 位为保留位（冻结面）——压缩标识位于 Envelope（载荷属性，
+// 必须在 AEAD 覆盖内），不在帧层。接收端对任何非零 flags MUST 判协议违规
+// （frame.go 的 Read/Write 均拒绝）。
 
 // Stream roles（QUIC binding 的 stream 放置语义）。
 const (
