@@ -8,7 +8,7 @@ package conformance
 //   - 零 delta 忽略、超钳制、负值违规丢弃；
 //   - reaper 只标记失败不回补（防与服务端视图发散）。
 //
-// AdmissionWindow（服务端准入）：
+// CreditManager（服务端准入，原 AdmissionWindow 已并入）：
 //   - 乱序窗内接受、duplicate 幂等、窗外 violation；
 //   - 终态环回执（RESULT 丢失后同 seq 重发可答）；
 //   - BelowUnknown（环未命中 → 宁重发不吞数据）；

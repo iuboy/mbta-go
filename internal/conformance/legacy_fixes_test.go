@@ -76,12 +76,12 @@ func TestClient_TTLExpiryRejectsSend(t *testing.T) {
 	}
 }
 
-// TestCredit_TimerFlushLowRecovery 验证 CREDIT 定时攒批：单批回收（远低于
-// 阈值 初始窗/4）也会在定时器到期后发放——低吞吐连接不被额度拖死。
+// TestCredit_TimerFlushLowRecovery 验证 CREDIT 定时攒批：单批回收也会在
+// 定时器到期后发放（无发放阈值，spec §5.4）——低吞吐连接不被额度拖死。
 func TestCredit_TimerFlushLowRecovery(t *testing.T) {
-	env := startEnv(t, envConfig{initialCreditBatches: 256}) // 阈值 = 64
+	env := startEnv(t, envConfig{initialCreditBatches: 256})
 
-	// 单个 batch：accepted（accepted_only 即终态）→ 回收 1 批（<< 阈值 64）。
+	// 单个 batch：accepted（accepted_only 即终态）→ 回收 1 批。
 	env.sendBatch(t, 1, "single", "")
 	AwaitResult(t, env.tr.Sent, 1, 5*time.Second)
 

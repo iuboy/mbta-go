@@ -1,7 +1,7 @@
 package protocol
 
 // client_control.go：客户端 control loop（RESULT/CREDIT/PING/PONG/CLOSE/REDIRECT/
-// ABORT/COMMAND）+ 结果回调 worker + 心跳（仅 TCP binding）。
+// ABORT/COMMAND）+ 结果回调 worker + 心跳（双 binding 注入）。
 
 import (
 	"context"

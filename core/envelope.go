@@ -233,7 +233,7 @@ func RegisterZstdDict(id uint32, dict []byte) (*ZstdDictCodec, error) {
 	zstdDictMu.Lock()
 	defer zstdDictMu.Unlock()
 	if c, ok := zstdDictReg[key]; ok {
-		touchZstdDictLocked(key, c)
+		touchZstdDictLocked(key)
 		return c, nil
 	}
 	raw := append([]byte(nil), dict...)
@@ -256,7 +256,7 @@ func RegisterZstdDict(id uint32, dict []byte) (*ZstdDictCodec, error) {
 	}
 	c.dec = dec
 	zstdDictReg[key] = c
-	touchZstdDictLocked(key, c)
+	touchZstdDictLocked(key)
 	for zstdDictOrd.Len() > zstdDictRegistryCap {
 		front := zstdDictOrd.Front()
 		delete(zstdDictReg, front.Value.(string))
@@ -267,7 +267,7 @@ func RegisterZstdDict(id uint32, dict []byte) (*ZstdDictCodec, error) {
 
 // touchZstdDictLocked 把 key 标记为最近使用：已存在则移到队列尾，否则入队
 // （队列首 = 最久未使用，淘汰时移除）。调用方须持有 zstdDictMu。
-func touchZstdDictLocked(key string, c *ZstdDictCodec) {
+func touchZstdDictLocked(key string) {
 	for e := zstdDictOrd.Back(); e != nil; e = e.Prev() {
 		if e.Value.(string) == key {
 			zstdDictOrd.MoveToBack(e)
@@ -275,7 +275,6 @@ func touchZstdDictLocked(key string, c *ZstdDictCodec) {
 		}
 	}
 	zstdDictOrd.PushBack(key)
-	_ = c
 }
 
 // ResetZstdDicts 清空注册表。测试隔离专用（生产静态字典部署不轮换）；

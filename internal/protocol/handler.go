@@ -735,8 +735,8 @@ func (h *CoreHandler) dataLoop(ctx context.Context) {
 //   - inflight 超时回收（stuckInflightAge）→ released + 额度回收；
 //   - CREDIT 定时攒批发放：回收量先入攒批缓冲（core.CreditManager），由
 //     maybeScheduleFlush 的 100ms 懒定时统一下发（creditFlushInterval）——
-//     任何 >0 的回收量都能按时送达客户端，不会滞留缓冲（spec §5.4 的
-//     「回收批数 ≥ max(1, 初始窗/4)」阈值发放未实现，实现仅取定时器方案）。
+//     任何 >0 的回收量都能按时送达客户端，不会滞留缓冲（spec §5.4 已
+//     同步废止阈值发放，与本实现收敛）。
 func (h *CoreHandler) reaper(ctx context.Context, stop <-chan struct{}) {
 	reap := time.NewTicker(core.DefaultReapInterval)
 	defer reap.Stop()

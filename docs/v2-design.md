@@ -17,7 +17,7 @@
 - H2（字节级规范）：transcript 段拼接 = 每段 4B BE 长度前缀；profile 用注册名字符串（"intl"/"gm"）；`token_proof ≡ HMAC(profileHash, key=token, msg=th_hello)`（与 psk_ck 的 ikm 同值）；AD = `type(1B) ‖ flags(1B) ‖ lenPrefix(session_id) ‖ key_epoch(1B 固定宽) ‖ seq(8B BE) ‖ compression(1B) ‖ lenPrefix(profile_name)`。
 - H3：split 长度表——intl `L=104`：c2s(32)‖s2c(32)‖handshake(32)‖pre_c(4)‖pre_s(4)；gm `L=72`：c2s(16)‖s2c(16)‖handshake(32)‖pre_c(4)‖pre_s(4)。s2c_key 首版预留不使用。
 - H4：REDIRECT 唯一载体 = 0x41 帧，时序 = HELLO_ACK 之后任意时刻（服务端发出后关闭连接）；客户端回调后断连；RESULT 码表删除 31。
-- H5（默认值）：CREDIT 攒批 = 回收批数 ≥ max(1, 初始窗/4) 或 100ms 定时（SHOULD）；服务端 reaper 扫描 10s、stuck T=60s（配置 `SinkDeadline`）；DGRAM per-conn 并发槽 64 + 令牌桶速率默认 32MB/s（配置 `DatagramRateLimit`）。
+- H5（默认值）：CREDIT 攒批 = 100ms 懒定时器发放任意 >0 回收量（实现收敛：未采用「回收批数 ≥ max(1, 初始窗/4)」阈值发放，spec §5.4 同步修订）；服务端 reaper 扫描 10s、stuck T=60s（配置 `SinkDeadline`）；DGRAM per-conn 并发槽 64 + 令牌桶速率默认 32MB/s（配置 `DatagramRateLimit`）。
 - H6：Draining 中收到 BATCH——已见 seq 幂等回执；新 seq → `RESULT(released, server_draining)`。
 
 **Low 裁决**：OnBatch 单注册（冲突启动期报错）；`Batch.events_count` 保留（Raw 路径需要）；Envelope.seq ≠ Batch.seq → `rejected(batch_invalid)`；`stale_epoch`/`ledger_divergence` 首版预留不可达；CREDIT 回绕/超钳制 = 钳制生效 + 日志计数（非致命）。**Transport 接口保持 v1 形状**（RecvControlFrame/RecvDataFrame/SendFrame…），SendFrame 由 binding 按 type 高位路由——语义同 r2 的 Control/Data 抽象，减小改动面；AuthMarker（pre-auth 读超时切换）作为 binding 内部机制保留。
@@ -85,7 +85,7 @@ v2 的每个核心决策都锚定一个经过大规模验证的开源/标准设�
 | 0x03 | HELLO_NAK | s→c | control | 握手拒绝（含 retryable/retry_hint） |
 | 0x20 | RESULT | s→c | control | 对某 seq 的反馈（唯一反馈帧） |
 | 0x21 | CREDIT | s→c | control | credit 发放（**唯一流控发放帧**；返还一律经它） |
-| 0x30/0x31 | PING/PONG | 双向 | control | 仅 TCP binding（QUIC 内置保活） |
+| 0x30/0x31 | PING/PONG | 双向 | control | 双 binding 应用层心跳（v0.7.0 起注入，废止 QUIC 仅传输层保活的原案） |
 | 0x40 | CLOSE | 双向 | control | drain 超时提示 |
 | 0x41 | REDIRECT | s→c | control | HA 重定向（proto 载荷；地址经校验） |
 | 0x50 | ABORT | 双向 | control | 立即拆除（写失败/协议违规/账本漂移） |
@@ -93,6 +93,8 @@ v2 的每个核心决策都锚定一个经过大规模验证的开源/标准设�
 | 0x91 | BATCH | c→s | data | 可靠批次（envelope 加密，消耗 credit） |
 
 删除：WINDOW、THROTTLE、ACK、NACK、AUTH、AUTH_OK、AUTH_FAIL、ERROR、PARTIAL_ACK。
+
+> 本表为设计期快照（12 个）；现行注册表以 spec §1.2 为准（append-only，其后已追加 COMMAND/COMMAND_ACK，共 15 个）。
 
 ## 4. 密码与密钥日程
 

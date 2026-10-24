@@ -9,8 +9,8 @@ const (
 	TypeResult   uint8 = 0x20 // S→C 唯一反馈帧（accepted/durable/rejected/released）
 	TypeCredit   uint8 = 0x21 // S→C 唯一流控发放帧
 	TypeDict     uint8 = 0x22 // S→C zstd 字典下发（zstd_dict 能力协商后，HELLO_ACK 之后立即发送）
-	TypePing     uint8 = 0x30 // 双向保活（仅 TCP binding）
-	TypePong     uint8 = 0x31 // 双向保活应答（回显 time_unix_ns 与 nonce；仅 TCP binding）
+	TypePing     uint8 = 0x30 // 双向保活（ntls MUST；v1 亦注入应用层心跳）
+	TypePong     uint8 = 0x31 // 双向保活应答（回显 time_unix_ns 与 nonce；同 PING）
 	TypeClose    uint8 = 0x40 // 双向优雅关闭（drain 超时提示）
 	TypeRedirect uint8 = 0x41 // S→C HA 重定向
 	TypeAbort    uint8 = 0x50 // 双向立即拆除（写失败/协议违规/账本漂移）

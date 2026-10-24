@@ -190,12 +190,12 @@ func NewMetrics(reg prometheus.Registerer) *MBTAMetrics {
 		sinkFailuresTotal: newCounter(reg, prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "sink_failures_total",
-			Help:      "Total sink delivery failures (handler error or panic after terminal result)",
+			Help:      "Total sink delivery failures (server: sink handler panic; client: rejected/released terminal RESULT)",
 		}),
 		batchLatencySeconds: newHistogram(reg, prometheus.HistogramOpts{
 			Namespace: namespace,
 			Name:      "batch_latency_seconds",
-			Help:      "Latency from SendBatch to ACK in seconds",
+			Help:      "Latency from SendBatch to terminal RESULT in seconds",
 			Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10},
 		}),
 		creditsOutstandingGauge: newGauge(reg, prometheus.GaugeOpts{

@@ -22,6 +22,8 @@
 - **安全**：ntls TLCP 服务端配置 `CAFile` 即启用 mTLS（此前 `ClientAuth` 缺省 NoClientCert，mTLS 静默失效）；服务端去重 `accepted` 集合加上限（认证后内存 DoS）；SignalBatch 校验层接入接收管线（signal_type/条数/控制字符/trace 格式此前不设防直达 sink）；CBOR 解码上限收紧（默认 131072 → 256/10000/16 层）；QUIC 认证前帧读 30s 上限（此前 control 5min、data 无界）；`guardedCounter` 拦截 NaN/+Inf；认证失败日志不再打印攻击者可控的原始 capabilities。
 - **正确性**：客户端写失败拆连接（流去同步防护对齐服务端）；CREDIT 单零维度不再误拆连接；reaper 超时回收后迟到 RESULT 不再二次回调（durable 的 ACCEPTED→DURABLE 双派发保留）；命令幂等窗口满时环形淘汰（此前整体清空致重发窗口内重复执行）；命令 pending 按 (agentID, commandId) 隔离（跨 agent 同 ID 不再串线）；DGRAM 默认限速 8MB/s（此前 0=不限）；服务端停机路径 released 回执不再被已取消 ctx 静默丢弃。
 - **行为修正**：facade Server ctx 取消正常退出后 `started` 复位（可直接重启）；binding `starting` 态 Close 等待收敛后再关闭（此前返回 nil 但服务器继续监听）；`SessionDisconnected` 仅对已认证连接派发。
+- **注释审查遗留修复**：`ChunkID` 降级路径两次 `PutUint64` 写入区间重叠（`u[8:16]` 覆盖 `u[6:14]` 的字节 8..13，与注释意图不符），改为时间戳 + 取反 XOR 折叠的非重叠布局；`sink_failures_total`/`batch_latency_seconds` 的 prometheus Help 文案对齐 r3 语义（v1 的 "ACK"/"handler error" 措辞）；`touchZstdDictLocked` 清理未使用参数。
+- **文档对齐**：spec 与实现收敛——§1.2 帧注册表补 COMMAND/COMMAND_ACK（13→15 个）、§8.2 能力表补 `control_commands`、§5.4 credit 攒批改为「100ms 懒定时发放任意 >0 回收量」（阈值方案废止，v2-design H5 同步）、PING/PONG 与 §9.2 更新为双 binding 应用层心跳（废止 QUIC「MUST NOT 发 PING」初版裁决，随 0.7.0 心跳特性）。
 
 ## [0.7.0] - 2026-10-19
 

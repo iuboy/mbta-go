@@ -46,11 +46,14 @@ func NewChunkID() ChunkID {
 				u[4] = byte(now >> 8)
 				u[5] = byte(now)
 				if _, err := rand.Read(u[6:]); err != nil {
-					// crypto/rand 不可用：用纳秒时间戳及其按位取反填充剩余字节。
+					// crypto/rand 不可用：u[6:14] 填纳秒时间戳，u[14:16] 填其
+					// 取反值的 XOR 折叠——非重叠填满剩余 10 字节（唯一性尽力
+					// 而为的最后防线，本路径现实几乎不可达）。
 					slog.Error("crypto/rand unavailable, using weak timestamp-based ChunkID", "error", err)
 					nowNs := uint64(time.Now().UnixNano())
 					binary.LittleEndian.PutUint64(u[6:14], nowNs)
-					binary.LittleEndian.PutUint64(u[8:16], ^nowNs)
+					fold := uint16(^nowNs) ^ uint16(^nowNs>>16) ^ uint16(^nowNs>>32) ^ uint16(^nowNs>>48)
+					binary.LittleEndian.PutUint16(u[14:16], fold)
 				}
 			}
 		}()

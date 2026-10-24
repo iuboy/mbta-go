@@ -68,7 +68,7 @@ r3 是**直接在 v1 代码库上的原地破坏性重构**，不引入新的线
 - 每帧开销 2B + varint（典型 1–3B）。
 - 最小帧 = 3B（type + flags + length=0，空 payload）。
 
-### 1.2 帧类型注册表（append-only，13 个）
+### 1.2 帧类型注册表（append-only，15 个）
 
 | type | 名称 | 方向 | 通道 | 载荷消息 | 说明 |
 |---|---|---|---|---|---|
@@ -78,8 +78,10 @@ r3 是**直接在 v1 代码库上的原地破坏性重构**，不引入新的线
 | 0x20 | RESULT | S→C | control | `Result` | 对某 seq 的反馈（唯一反馈帧） |
 | 0x21 | CREDIT | S→C | control | `Credit` | credit 发放（唯一流控发放帧） |
 | 0x22 | DICT | S→C | control | `ZstdDict` | zstd 静态字典下发（`zstd_dict` 能力协商后，HELLO_ACK 之后立即发送；见 §8.2/§8.4） |
-| 0x30 | PING | 双向 | control | `Ping` | 保活（仅 TCP binding，§9） |
-| 0x31 | PONG | 双向 | control | `Pong` | 保活应答（仅 TCP binding） |
+| 0x23 | COMMAND | S→C | control | `ControlCommand` | 运维命令下发（`control_commands` 能力协商后；服务端按 agentID 寻址活动连接，未协商 MUST NOT 下发） |
+| 0x24 | COMMAND_ACK | C→S | control | `ControlCommandAck` | 命令应答（applied / failed / rejected） |
+| 0x30 | PING | 双向 | control | `Ping` | 保活（ntls MUST，§9.2；v1 亦注入应用层心跳） |
+| 0x31 | PONG | 双向 | control | `Pong` | 保活应答（同 PING） |
 | 0x40 | CLOSE | 双向 | control | `Close` | 优雅关闭（drain 超时提示） |
 | 0x41 | REDIRECT | S→C | control | `Redirect` | HA 重定向（地址经校验） |
 | 0x50 | ABORT | 双向 | control | `Abort` | 立即拆除（写失败 / 协议违规 / 账本漂移） |
@@ -423,7 +425,7 @@ available = granted − consumed + returned          （批数、字节两维独
 ### 5.4 服务端发放（攒批策略）
 
 - 回收额度不逐批发放（高 RTT 链路上逐批 RESULT+CREDIT 双帧会重演 HTTP/2 BDP 空转）。
-- 服务端 SHOULD 按攒批发放到点发放：**回收批数 ≥ max(1, 初始窗/4)** 即发 CREDIT；SHOULD 辅以短定时器兜底小流量场景。
+- 服务端 SHOULD 攒批发放：回收量先入攒批缓冲，由短定时器（实现取 100ms，首个回收后懒 arm）统一发放任意 >0 的回收量。不设发放量阈值——初版「回收批数 ≥ max(1, 初始窗/4)」阈值方案已废止：定时器已天然完成攒批，阈值只会让小流量场景的回收量滞留服务端。
 - 每次发放同步推进去重窗口上界（§6.1 的 cap）。
 
 ### 5.5 服务端 reaper（MUST）
@@ -595,6 +597,7 @@ Result{ ref_seq, level, code, detail, retry_hint_ms, correlation(echo) }
 | `trace_context` | 启用 Batch.trace 承载 W3C trace 上下文（§11.3） |
 | `datagram` | binding 提供不可靠通道，DGRAM 可用 |
 | `cbor` | SignalBatch payload 可用 CBOR 编码（§8.4） |
+| `control_commands` | 运维命令通道可用：协商选中后服务端可发 COMMAND（0x23），agent MUST 回 COMMAND_ACK（0x24）；未选中时服务端 MUST NOT 下发命令。注册表默认策略含此能力，facade 经 `WithCommandRegistry` 启用注册面 |
 | `dual_integrity` | Envelope 追加外层 HMAC（Envelope.mac，§4.3）：`HMAC(profileHash, DualMACKey, AD‖ciphertext)`，DualMACKey 由 psk_ck 追加 Expand（info=`"mbta/dual"`，长度 HMACKeyLen），**不改 §2.3 split 布局**。默认关闭：注册进 KnownCaps（客户端可合法宣告），但 DefaultServerPolicy.SupportedCapabilities 不含——服务端以策略显式加入才协商启用。启用是连接级整体开关：双方由 selected_capabilities 对称驱动派生与 Seal/Open；任一侧判定不对称（mac 非空但未启用 / 启用但 mac 空 / 校验失败）= `envelope_open_failed`（fail-closed） |
 | `zstd_dict` | 服务端静态 zstd 字典下发：协商选中时服务端在 HELLO_ACK 之后立即发 DICT 帧（0x22，`ZstdDict{dict_id, dict}`），客户端激活后可逐帧选用 `COMPRESSION_ZSTD_DICT`（§8.4）。边界（r3 裁决，修订 §12.5 原案）：字典内容**不入 transcript**——HELLO_ACK 的 finished 已签发后无法追加入链；字典经传输层 AEAD（TLS/TLCP）通道保护，被篡改最坏导致解压失败（fail-closed），无安全降级。服务端未配置字典时 MUST NOT 选中该能力（即使 SupportedCapabilities 含它）；字典尺寸有界（≤ 1MB）；解压上限规则（§12）同样适用于字典模式 |
 
@@ -635,7 +638,7 @@ Multiplexing / Close / RemoteAddr
 
 ### 9.2 保活
 
-- **QUIC**：使用 QUIC 传输层 keepalive；MUST NOT 发 PING（应用层保活与传输层重复）。
+- **QUIC**：MUST 同时启用传输层 keepalive 与应用层心跳（PING/PONG 周期收发）——传输层 keepalive 不刷新应用层读侧活性，QUIC control stream 长空闲会被 idle timeout 断连（初版「MUST NOT 发 PING」裁决已废止，v0.7.0 起双 binding 统一注入应用层心跳）。
 - **TCP 系**：MUST 用 PING/PONG 保活——客户端周期发送 PING（默认 30s 间隔、5s 写超时），服务端 MUST 回 PONG（回显 time_unix_ns 与 nonce，status="ok"）。读侧空闲超时依赖 PING 维持。 <!-- 2026-09-22 破坏性升级：毫秒→纳秒（无存量兼容）；UTC epoch -->
 
 ### 9.3 pre-auth 策略（binding 内建职责）
