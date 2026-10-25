@@ -24,6 +24,7 @@
 - **行为修正**：facade Server ctx 取消正常退出后 `started` 复位（可直接重启）；binding `starting` 态 Close 等待收敛后再关闭（此前返回 nil 但服务器继续监听）；`SessionDisconnected` 仅对已认证连接派发。
 - **注释审查遗留修复**：`ChunkID` 降级路径两次 `PutUint64` 写入区间重叠（`u[8:16]` 覆盖 `u[6:14]` 的字节 8..13，与注释意图不符），改为时间戳 + 取反 XOR 折叠的非重叠布局；`sink_failures_total`/`batch_latency_seconds` 的 prometheus Help 文案对齐 r3 语义（v1 的 "ACK"/"handler error" 措辞）；`touchZstdDictLocked` 清理未使用参数。
 - **文档对齐**：spec 与实现收敛——§1.2 帧注册表补 COMMAND/COMMAND_ACK（13→15 个）、§8.2 能力表补 `control_commands`、§5.4 credit 攒批改为「100ms 懒定时发放任意 >0 回收量」（阈值方案废止，v2-design H5 同步）、PING/PONG 与 §9.2 更新为双 binding 应用层心跳（废止 QUIC「MUST NOT 发 PING」初版裁决，随 0.7.0 心跳特性）。
+- **ctx/_ 审查修复**：`CoreClient.teardownPhase` 的 cause 死参数改为 Debug 观测日志（close 路径的 "user close" 此前无痕）；binding 在 ctx 取消时关闭 listener 失败不再静默吞错；QUIC DATAGRAM 接收循环改用连接自身 ctx（退出语义不再单一依赖 ReceiveDatagram 报错）；`Transport.SendFrame` 的无 deadline 写超时兜底契约与 `SendControlFrame` 的分离 ctx 语义写入接口文档（防新 binding 漏写兜底导致拆除期写永久阻塞）。
 
 ## [0.7.0] - 2026-10-19
 

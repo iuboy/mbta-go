@@ -576,7 +576,9 @@ func hmacEqual(a, b []byte) bool {
 // 取消 lifecycle → 状态收敛 Closed → 清账本 → 唤醒 drain。连接关闭与
 // goroutine 等待由调用方收尾（close 全量执行；fatalTeardown 即时关闭）。
 func (c *CoreClient) teardownPhase(cause string) {
-	_ = cause
+	// cause 仅作观测：close 路径传 "user close"，fatalTeardown 另在收尾时
+	// 以 Info 级记录。此处置 Debug 保证两条路径的根因都有痕可查。
+	slog.Debug("session teardown", "cause", cause, "session", c.SessionID())
 	if c.lifecycleCancel != nil {
 		c.lifecycleCancel()
 	}

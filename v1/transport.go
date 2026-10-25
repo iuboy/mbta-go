@@ -133,6 +133,8 @@ type Listener struct {
 }
 
 // Listen 创建 QUIC listener（应用默认传输参数与流控窗口，见本文件常量注释）。
+// ctx 为签名预留未使用：listener 创建本身无阻塞等待，accept 阶段的取消语义
+// 由 Server.Start 的 AcceptLoop 承担（RunSpec.Listen 透传调用方 ctx）。
 func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
 	tlsCfg, err := buildServerTLS(cfg.Credentials)
 	if err != nil {

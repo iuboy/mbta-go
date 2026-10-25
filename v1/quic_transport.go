@@ -115,10 +115,13 @@ func (t *quicTransport) acceptDataStreams(ctx context.Context) {
 // DGRAM 帧（TypeDgram + Envelope——type 高位域使协议层 RecvDataFrame 无差别消费，
 // 与 TCP binding 的单连接 demux 对称）。不可靠语义天然允许在通道关闭竞态下丢弃。
 func (t *quicTransport) receiveDatagrams() {
+	// 连接自身 ctx（连接关闭即取消）替代裸 Background：退出语义不再单一
+	// 依赖 ReceiveDatagram 返回 error。
+	connCtx := t.conn.QC.Context()
 	for {
-		data, err := t.conn.QC.ReceiveDatagram(context.Background())
+		data, err := t.conn.QC.ReceiveDatagram(connCtx)
 		if err != nil {
-			return // 连接关闭/扩展未启用：退出（无清理义务，dataCh 由 acceptDataStreams 管）
+			return // 连接关闭/ctx 取消/扩展未启用：退出（无清理义务，dataCh 由 acceptDataStreams 管）
 		}
 		// DATAGRAM 载荷 = Envelope（帧类型由通道语义隐含为 TypeDgram）；
 		// 构造完整帧使协议层 dataLoop 的 type switch 命中 TypeDgram 分支。

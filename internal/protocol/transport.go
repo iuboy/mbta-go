@@ -41,6 +41,11 @@ type Transport interface {
 	RecvDataFrame(ctx context.Context) (core.Frame, error)
 
 	// SendFrame 写一帧（按帧 type 的通道域路由）。
+	//
+	// 写超时契约（MUST）：ctx 带 deadline 时以其为准；ctx 无 deadline 时实现
+	// MUST 兜底一个有限写超时（参照实现取 core.DefaultWriteTimeout）——
+	// teardown 路径刻意传分离 ctx（见 [SendControlFrame]），若实现漏写兜底，
+	// 卡死对端会让拆除期写永久阻塞调用 goroutine。ctx 已取消时 MUST 快速失败。
 	SendFrame(ctx context.Context, f core.Frame) error
 
 	// SupportsDatagram 报告是否提供不可靠通道（QUIC=true，TCP 系列=false）。
@@ -60,6 +65,10 @@ type Transport interface {
 }
 
 // SendControlFrame 构造一个 control 域帧并发送（server 全部应答帧共用）。
+//
+// ctx 语义：常规路径传连接 ctx；teardown 路径（CREDIT 攒批 flush、ABORT）
+// 刻意传分离 ctx（context.Background()）——连接 ctx 取消后这些帧仍须尝试
+// 发出，时限由 Transport.SendFrame 的无 deadline 兜底超时保证（见其 doc）。
 func SendControlFrame(ctx context.Context, tr Transport, typ uint8, payload []byte) error {
 	if uint64(len(payload)) > core.MaxFrameBytes {
 		return core.NewError(core.ErrCodeProtocolError,

@@ -150,7 +150,11 @@ func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
 				return
 			}
 		}
-		_ = spec.CloseListener(l)
+		if err := spec.CloseListener(l); err != nil {
+			// 关闭失败须留痕：此路径是防 listener fd 泄漏的兜底，静默吞错会让
+			// 泄漏无从排查（Close 的返回错误另经调用方通道上报）。
+			slog.Debug("close listener on ctx cancel", "error", err)
+		}
 	}()
 	defer close(done)
 
