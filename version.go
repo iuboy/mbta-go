@@ -51,15 +51,21 @@ func ProfileFor(v ProtocolVersion) (corepb.Profile, error) {
 	}
 }
 
+// ImplementedVersions 返回当前已实现的版本集枚举（顺序即注册序：v1 先于
+// ntls）。这是"支持哪些版本"的唯一权威：ParseVersion 的合法集与 server
+// facade 的 binding 注册集都以此为准——新增协议版本时在此追加一项。
+func ImplementedVersions() []ProtocolVersion {
+	return []ProtocolVersion{Version1, VersionNTLS}
+}
+
 // ParseVersion 把字符串解析为 ProtocolVersion。用于从配置文件/环境变量读取的场景
-// （那里只能是 string）。已知版本返回对应常量，未知返回 error。
+// （那里只能是 string）。合法集 = [ImplementedVersions] 枚举，未知返回 error。
 // 用 fmt.Errorf（而非 core error）避免 version.go 反向依赖 core 包。
 func ParseVersion(s string) (ProtocolVersion, error) {
-	switch s {
-	case "v1":
-		return Version1, nil
-	case "ntls":
-		return VersionNTLS, nil
+	for _, v := range ImplementedVersions() {
+		if ProtocolVersion(s) == v {
+			return v, nil
+		}
 	}
-	return "", fmt.Errorf("unsupported version: %s", s)
+	return "", fmt.Errorf("unsupported version: %s (implemented: %v)", s, ImplementedVersions())
 }

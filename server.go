@@ -22,13 +22,49 @@ type ServerOption func(*ServerConfig) error
 
 // Server 同时托管多个 MBTA 协议版本。各版本运行在独立 listener 上，
 // 配置各自的 ALPN。
+//
+// 多版本的装配与分派是注册表式：每个协议版本 binding 在 Start 初始化时
+// 注册一项（见 [binding]），Start/Close/Addr/SendCommand 全部经注册表
+// 分派——新增协议版本（如 mbta/2）只需构造同构 binding 并 registerBinding，
+// facade 分派面零改动。
 type Server struct {
 	cfg        *ServerConfig
 	v1Server   *v1.Server
 	ntlsServer *ntls.Server
-	epochs     *protocol.EpochAllocator // v1+ntls 双监听共享（同 agent 跨 binding 纪元单调）
-	mu         sync.RWMutex
-	started    bool
+	// bindings 是 ALPN → binding 注册表（分派表）。v1Server/ntlsServer
+	// 字段保留供诊断/测试直读子服务器 Config；生命周期与命令分派一律走
+	// 注册表，不再逐字段硬编码。
+	bindings map[string]*binding
+	// order 是注册顺序（确定性迭代：Addr 取首个注册项、Close 按序关闭）。
+	order   []string
+	epochs  *protocol.EpochAllocator // v1+ntls 双监听共享（同 agent 跨 binding 纪元单调）
+	mu      sync.RWMutex
+	started bool
+}
+
+// binding 是子服务器在 facade 注册表中的注册项：一个协议版本 = 一项。
+// 方法字段为闭包（子服务器类型不同构，泛型包装在这里不值当）；
+// name 用于错误包装前缀（与历史 "v1"/"ntls" 文案恒等），alpn 是注册表键。
+type binding struct {
+	name string // 错误包装名（"v1"/"ntls"）
+	alpn string // 线协议标识（"mbta/1"、"mbta-ntls/1"、"mbta-tls/1"）
+
+	start       func(ctx context.Context) error
+	close       func() error
+	addr        func() string
+	sendCommand func(ctx context.Context, agentID string, cmd *corepb.ControlCommand) (*corepb.ControlCommandAck, error) // nil = 该 binding 无命令通道
+}
+
+// registerBinding 注册一个 binding（幂等键为 alpn：重复注册覆盖原项并
+// 保留原顺序位）。须在锁内调用。
+func (s *Server) registerBinding(b binding) {
+	if s.bindings == nil {
+		s.bindings = make(map[string]*binding, 2)
+	}
+	if _, dup := s.bindings[b.alpn]; !dup {
+		s.order = append(s.order, b.alpn)
+	}
+	s.bindings[b.alpn] = &b
 }
 
 // ServerConfig 是服务器配置。共享设置对所有启用版本生效，
@@ -142,26 +178,25 @@ func (s *Server) Start(ctx context.Context) error {
 			return core.WrapError(core.ErrCodeConfig, "init ntls", err)
 		}
 	}
-	// 捕获子服务器引用，accept-loop goroutine 用局部变量读，避免与 Close 竞态。
-	v1srv := s.v1Server
-	ntlsSrv := s.ntlsServer
+	// 分派表构建（锁内，init 完成后）：v1 先注册（Addr/命令分派的顺序
+	// 语义与字段硬编码时代恒等——双版本并存时 v1 优先）。重启路径（ctx
+	// 优雅退出后 started 复位）由 registerBindings 先清表再注册。
+	s.registerBindings()
+	// 捕获注册表快照，accept-loop goroutine 用局部变量读，避免与 Close 竞态。
+	table := make([]*binding, 0, len(s.order))
+	for _, alpn := range s.order {
+		table = append(table, s.bindings[alpn])
+	}
 	s.mu.Unlock()
 
-	// 并发启动各版本的 accept 循环。
+	// 并发启动各版本 accept 循环（分派表迭代——与逐字段硬编码等价）。
 	g, ctx := errgroup.WithContext(ctx)
 
-	if v1srv != nil {
+	for _, b := range table {
+		b := b
 		g.Go(func() error {
-			if err := v1srv.Start(ctx); err != nil {
-				return core.WrapError(core.ErrCodeTransport, "v1", err)
-			}
-			return nil
-		})
-	}
-	if ntlsSrv != nil {
-		g.Go(func() error {
-			if err := ntlsSrv.Start(ctx); err != nil {
-				return core.WrapError(core.ErrCodeTransport, "ntls", err)
+			if err := b.start(ctx); err != nil {
+				return core.WrapError(core.ErrCodeTransport, b.name, err)
 			}
 			return nil
 		})
@@ -188,15 +223,17 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // Addr 返回已启用版本的监听地址（Start 完成监听后有效；启动前返回空串）。
-// 同时启用 v1+ntls 时返回 v1 地址。用于黑盒测试在 :0 随机端口启动后拿到实际地址。
+// 同时启用 v1+ntls 时返回 v1 地址（注册表首个注册项）。用于黑盒测试在 :0
+// 随机端口启动后拿到实际地址。
 func (s *Server) Addr() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.v1Server != nil {
-		return s.v1Server.Addr()
-	}
-	if s.ntlsServer != nil {
-		return s.ntlsServer.Addr()
+	// 语义与字段硬编码时代恒等：返回首个注册 binding 的地址（存在即返回，
+	// 不论是否为空串——v1 优先）。
+	for _, alpn := range s.order {
+		if b, ok := s.bindings[alpn]; ok {
+			return b.addr()
+		}
 	}
 	return ""
 }
@@ -209,15 +246,14 @@ func (s *Server) Close() error {
 
 	var errs []error
 
-	if s.v1Server != nil {
-		if err := s.v1Server.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("v1 close: %w", err))
+	// 分派表迭代（注册序）：错误包装文案与字段硬编码时代恒等（"v1 close"/"ntls close"）。
+	for _, alpn := range s.order {
+		b, ok := s.bindings[alpn]
+		if !ok {
+			continue
 		}
-	}
-
-	if s.ntlsServer != nil {
-		if err := s.ntlsServer.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("ntls close: %w", err))
+		if err := b.close(); err != nil {
+			errs = append(errs, fmt.Errorf("%s close: %w", b.name, err))
 		}
 	}
 
@@ -285,6 +321,48 @@ func (s *Server) initV1Server() error {
 	}
 	s.v1Server = v1srv
 	return nil
+}
+
+// registerBindings 按已初始化的子服务器构建分派表（须在锁内调用；init
+// 完成后、快照前）。先清表再注册——重启路径不残留上一轮闭包引用。
+func (s *Server) registerBindings() {
+	s.bindings = nil
+	s.order = nil
+	if s.v1Server != nil {
+		v1srv := s.v1Server
+		s.registerBinding(binding{
+			name:  "v1",
+			alpn:  v1.ALPNProtocol,
+			start: func(ctx context.Context) error { return v1srv.Start(ctx) },
+			close: func() error { return v1srv.Close() },
+			addr:  func() string { return v1srv.Addr() },
+			// v1.Server.SendCommand 委托共享注册表（nil 注册表安全返回
+			// ErrAgentNotConnected），与字段硬编码时代的分派路径恒等。
+			sendCommand: func(ctx context.Context, agentID string, cmd *corepb.ControlCommand) (*corepb.ControlCommandAck, error) {
+				return v1srv.SendCommand(ctx, agentID, cmd)
+			},
+		})
+	}
+	if s.ntlsServer != nil {
+		ntlsSrv := s.ntlsServer
+		alpn := ntls.ALPNProtocol
+		if s.cfg.NTLSCfg.Mode.IsTLS13() {
+			alpn = ntls.ALPNProtocolTLS
+		}
+		s.registerBinding(binding{
+			name:  "ntls",
+			alpn:  alpn,
+			start: func(ctx context.Context) error { return ntlsSrv.Start(ctx) },
+			close: func() error { return ntlsSrv.Close() },
+			addr:  func() string { return ntlsSrv.Addr() },
+			// 命令注册表 binding 无关（v1/ntls 连接注册同一 registry）：
+			// ntls binding 直连注册表分派——ntls-only 部署的命令通道由此
+			// 可用（字段硬编码时代 v1 缺位即恒 ErrAgentNotConnected）。
+			sendCommand: func(ctx context.Context, agentID string, cmd *corepb.ControlCommand) (*corepb.ControlCommandAck, error) {
+				return s.cfg.Commands.SendCommand(ctx, agentID, cmd)
+			},
+		})
+	}
 }
 
 // initNTLSServer 构造 ntls 子服务器（仅赋值字段，不启动；须在锁内调用）。
@@ -484,14 +562,20 @@ func NewCommandRegistry() *protocol.CommandRegistry {
 	return protocol.NewCommandRegistry()
 }
 
-// SendCommand 向指定 agent 的活动连接下发运维命令并等待其 ACK
-// （仅当 WithCommandRegistry 启用且 v1 server 已启动时有意义）。
+// SendCommand 向指定 agent 的活动连接下发运维命令并等待其 ACK。
+// 经 binding 注册表分派：按注册序取首个支持命令通道的 binding 执行
+// （v1 优先；命令注册表 binding 无关——agent 经任一 binding 连接均可寻址）。
+// 无已注册命令通道（空表/仅启用无命令面的 binding）时返回
+// [protocol.ErrAgentNotConnected]。
 func (s *Server) SendCommand(ctx context.Context, agentID string, cmd *corepb.ControlCommand) (*corepb.ControlCommandAck, error) {
 	s.mu.RLock()
-	v1srv := s.v1Server
-	s.mu.RUnlock()
-	if v1srv == nil {
-		return nil, protocol.ErrAgentNotConnected
+	defer s.mu.RUnlock()
+	for _, alpn := range s.order {
+		b, ok := s.bindings[alpn]
+		if !ok || b.sendCommand == nil {
+			continue
+		}
+		return b.sendCommand(ctx, agentID, cmd)
 	}
-	return v1srv.SendCommand(ctx, agentID, cmd)
+	return nil, protocol.ErrAgentNotConnected
 }
