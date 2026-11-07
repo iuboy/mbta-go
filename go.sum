@@ -8,8 +8,8 @@ github.com/fxamacker/cbor/v2 v2.10.0 h1:HVF3T5vYwLqO81ebPirWEPNv2SMrUMD3HLnKgEr6
 github.com/fxamacker/cbor/v2 v2.10.0/go.mod h1:uSwlToFuT9BZAKRxxVm3qQC8DR4tlWl7D6pf20iRYH4=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/iuboy/pollux-go v0.1.1-0 h1:kC7MZ1bbXh5JVsy6IkPcpiofPhkinpvbpJDkO8Lox2U=
-github.com/iuboy/pollux-go v0.1.1-0/go.mod h1:Fipb+ABMnG0foEVIJxgg7JjPE2ex8rmhNrNHx/7j8Sc=
+github.com/iuboy/pollux-go v0.1.2-2 h1:YFb9IUNcJPilQqhGZVdPrioxoVZgLDjKxEM9dDRE8ko=
+github.com/iuboy/pollux-go v0.1.2-2/go.mod h1:Fipb+ABMnG0foEVIJxgg7JjPE2ex8rmhNrNHx/7j8Sc=
 github.com/klauspost/compress v1.20.3 h1:zWNoFqq/lSuYQRim3dUXlXeA0IqwuZGicdG5ZTfY5j4=
 github.com/klauspost/compress v1.20.3/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=

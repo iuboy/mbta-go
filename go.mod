@@ -8,7 +8,7 @@ go 1.26.9
 require (
 	github.com/emmansun/gmsm v0.45.2
 	github.com/fxamacker/cbor/v2 v2.10.0
-	github.com/iuboy/pollux-go v0.1.1-0
+	github.com/iuboy/pollux-go v0.1.2-2
 	github.com/klauspost/compress v1.20.3
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/pierrec/lz4/v4 v4.1.33

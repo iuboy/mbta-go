@@ -98,6 +98,8 @@ v0.1.0–v0.7.0 标签已移除，CHANGELOG 保留历史条目）：
   版本更新同步修正。
 - 发版流程：CHANGELOG 定版（patch 递增、rev 复位 0；同 patch 热修递增
   rev）→ 打 `v0.1.x-<rev>` 标签推送 → CI release job 出 Release。
+- 目标版本号已被占用即视为重复：rev 向后延续至下一个未占用值
+  （`v0.1.2-x` → `v0.1.2-x+1` …），已发布版本号永不重用或覆盖。
 
 ## Commit 规范
 
