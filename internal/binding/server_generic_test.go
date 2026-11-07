@@ -11,7 +11,7 @@ import (
 )
 
 // unusedRunSpec 返回除 Listen 外全部为最小实现的 RunSpec（Accept 随 ctx 退出）。
-func minimalSpec(listen func(ctx context.Context) (net.Conn, error)) RunSpec[net.Conn, net.Conn] {
+func minimalSpec(listen func() (net.Conn, error)) RunSpec[net.Conn, net.Conn] {
 	return RunSpec[net.Conn, net.Conn]{
 		Listen: listen,
 		Accept: func(ctx context.Context, c net.Conn) (net.Conn, error) {
@@ -34,7 +34,7 @@ func TestServer_CloseDuringStartingWaitsThenCloses(t *testing.T) {
 	s := NewServer[net.Conn, net.Conn](4, HandlerConfig{})
 	listenStarted := make(chan struct{})
 	release := make(chan struct{})
-	spec := minimalSpec(func(ctx context.Context) (net.Conn, error) {
+	spec := minimalSpec(func() (net.Conn, error) {
 		close(listenStarted)
 		<-release
 		c1, _ := net.Pipe()

@@ -1,13 +1,43 @@
 # Changelog
 
-本文件记录 mbta-go 的显著变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
+本文件记录 mbta-go 的显著变更。
 
-## [Unreleased]
+## 版本策略（2026-11-07 起）
 
-> 本节聚合 2026-10 全面代码审查（docs/code-review-2026-10-22.md）的修复成果。
+r3 协议重写是一次完整的世系更替：**库版本自 v0.1.0-0 重新起算**，此前的
+v0.1.0–v0.7.0 标签已从仓库（本地与 GitHub）移除，其变更条目保留在本文档
+末尾仅作历史记录。新世系的版本号恒为 `v0.1.<patch>-<rev>`：
+
+- **只有 patch（`0.1.x` 的 x）与 rev（`-0` 的数字）两位会递增**；major/minor
+  （`0.1`）不再演进——包括破坏性变更在内的一切变更都只走 patch/rev 节奏。
+- **默认进行破坏性变更，无兼容要求**：除非维护者在变更指令中显式要求保持
+  兼容，API/proto/wire 的破坏性调整不需升 minor、不需兼容别名、不需迁移
+  期——调用方随版本更新同步修正。破坏性内容仍须在本文档「破坏性变更」
+  小节逐条列出（知情记录，而非兼容承诺）。
+- 同一 patch 内的修正递增 rev（`v0.1.2-0` → `v0.1.2-1`）；新变更发布递增
+  patch 并将 rev 复位 0。
+
+## [0.1.0-0] - 2026-11-07
+
+### 新特性（2026-11-07 追加）
+
+- **TLCP wire 恢复 ALPN 版本身份（spec §0.1）**：上游 pollux-go v0.1.0-0 支持 TLCP ALPN 协商（RFC 7301）后，ntls 双侧 TLCP Config 声明 `mbta-ntls/1`（客户端提议 + 服务端偏好；客户端 ALPN 信任门拒绝服务端选择未提议协议）——此前「TLCP 无 ALPN 协商」的上游限制偏差消除，`NegotiatedProtocol()` 端到端断言见 `ntls/alpn_test.go`。
+
+### 依赖
+
+- 上游同步：`github.com/iuboy/pollux-go v0.5.2 → v0.1.0-0`（世系重置首发：含 TLCP ALPN、HandshakeContext 中途取消、`VerifyDualCertSignatures` 真验签、Deprecated/无认证 sm4 模式清理——本仓消费面无 API 破坏，require 语义变更为版本线切换）。
+- 其余升级至最新：`emmansun/gmsm v0.45.2`、`fxamacker/cbor/v2 v2.10.0`、`golang.org/x/net v0.62.0`（x/crypto、x/sync、compress、lz4、ulid、prometheus、protobuf 已为最新）。
+
+> 本节聚合 r3 协议重写与 2026-10 全面代码审查（docs/code-review-2026-10-22.md）
+> 的修复成果；2026-11 对抗性检查的修复一并计入。
 
 ### 破坏性变更
 
+- **API 面破坏性收口（2026-11 对抗性检查裁决，默认破坏性策略下执行）**：
+  - `v1.Listen(ctx, cfg)` → `v1.Listen(cfg)`：ctx 是签名死参数（listener 创建非阻塞），与 `ntls.Listen(cfg)` 统一同构；`binding.RunSpec.Listen` 闭包签名同步 `func() (L, error)`。
+  - `v1.StreamPicker`/`v1.DataStream`/`v1.NewSingleStream` 转为未导出（`streamPicker`/`dataStream`/`newSingleStream`）：传输写路径只接受内建 deadline 包装，导出的「扩展点」是假象（自定义实现被 WriteFrame 显式拒绝）。
+  - `core.New(reg)` Deprecated 别名删除（语义不明，`core.NewMetrics` 是唯一正名）。
+  - `v1.Server`/`ntls.Server` 对 `binding.Server` 的 embedding 改为未导出字段：内嵌提升曾把 `binding.Server.Run(ctx, RunSpec)` 泄漏进公共 API（RunSpec 是 internal 类型，外部无法构造合法实参）。
 - **ntls `TLSMode bool` → `Mode` 枚举**（无兼容别名）：`ServerConfig`/`ClientCredentials` 删除 `TLSMode bool` 字段，改用 `Mode`（`ModeTLCP` 零值缺省 / `ModeTLS13`；未注册值构造期 fail-fast）。一个 bool 同时切换 ALPN/密码栈/证书形态的设计无法扩展第三种模式。`NTLSProfileFor` 签名同步改为 `func(mode ntls.Mode) corepb.Profile`。迁移：`TLSMode: true` → `Mode: ntls.ModeTLS13`；`TLSMode: false` → 删除字段或 `Mode: ntls.ModeTLCP`。
 - **`core.Outcome` 零值语义**：零值由 `OutcomeAccepted` 改为 `OutcomeUnspecified`——sink done 漏设 Level 时协议层按 released(internal) 处置并告警（此前静默合成 accepted，durable 模式下数据未落盘却回执已持久化）。handler MUST 显式设置 `Level`。
 - **corepb 生成代码 package 名 `mbta` → `corepb`**：与目录一致（`go_package` 的 `;corepb`）。未起别名的 `import "github.com/iuboy/mbta-go/corepb"` 调用方需把 `mbta.` 前缀改为 `corepb.`；带别名的调用方不受影响。
@@ -25,8 +55,11 @@
 - **注释审查遗留修复**：`ChunkID` 降级路径两次 `PutUint64` 写入区间重叠（`u[8:16]` 覆盖 `u[6:14]` 的字节 8..13，与注释意图不符），改为时间戳 + 取反 XOR 折叠的非重叠布局；`sink_failures_total`/`batch_latency_seconds` 的 prometheus Help 文案对齐 r3 语义（v1 的 "ACK"/"handler error" 措辞）；`touchZstdDictLocked` 清理未使用参数。
 - **文档对齐**：spec 与实现收敛——§1.2 帧注册表补 COMMAND/COMMAND_ACK（13→15 个）、§8.2 能力表补 `control_commands`、§5.4 credit 攒批改为「100ms 懒定时发放任意 >0 回收量」（阈值方案废止，v2-design H5 同步）、PING/PONG 与 §9.2 更新为双 binding 应用层心跳（废止 QUIC「MUST NOT 发 PING」初版裁决，随 0.7.0 心跳特性）。
 - **ctx/_ 审查修复**：`CoreClient.teardownPhase` 的 cause 死参数改为 Debug 观测日志（close 路径的 "user close" 此前无痕）；binding 在 ctx 取消时关闭 listener 失败不再静默吞错；QUIC DATAGRAM 接收循环改用连接自身 ctx（退出语义不再单一依赖 ReceiveDatagram 报错）；`Transport.SendFrame` 的无 deadline 写超时兜底契约与 `SendControlFrame` 的分离 ctx 语义写入接口文档（防新 binding 漏写兜底导致拆除期写永久阻塞）。
+- **提示词工程规范化**：AGENTS.md 重写为逐项对码核实版（概览/环境陷阱/实有 make 目标/安全不变量/代码约定/架构地图，GitNexus 自动块保留）；CLAUDE.md 改为 `@AGENTS.md` 导入（原两文件逐字等同 44 行，双维护漂移风险）；新增 docs/prompt-engineering.md（编写规则、修改 checklist、本仓库历史教训）；修正 CONTRIBUTING.md 失实内容（不存在的 `make test-conf`、未 pin 的 lint 版本），证书生成说明改为实有的 `make gen-certs`。
 
 ## [0.7.0] - 2026-10-19
+
+> 以下 0.1.0–0.7.0 条目属旧世系（r3 之前），仅作历史记录保留——对应标签已移除。
 
 ### 破坏性变更
 

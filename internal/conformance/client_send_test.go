@@ -121,15 +121,26 @@ func startClientEnv(t *testing.T, clientCaps []string, datagram bool, sink *sink
 	if sink != nil {
 		handler = sink.handler
 	}
-	env := startHandlerOnly(t, envConfig{clientCaps: clientCaps, sink: handler})
+	return startClientEnvCfg(t, envConfig{clientCaps: clientCaps, sink: handler}, datagram)
+}
 
+// startClientEnvCfg 是 startClientEnv 的全配置版（ackMode/clientDrainTimeout 等
+// envConfig 字段可注入——CLOSE/drain 矩阵类测试用）。
+func startClientEnvCfg(t *testing.T, cfg envConfig, datagram bool) (*protocol.CoreClient, *clientPipeTransport) {
+	t.Helper()
+	env := startHandlerOnly(t, cfg)
+
+	drain := 2 * time.Second // 测试收缩 drain 等待（防未终态 batch 钉死 Close）
+	if cfg.clientDrainTimeout > 0 {
+		drain = cfg.clientDrainTimeout
+	}
 	pipe := newClientPipe(env.tr, datagram)
 	cc := protocol.NewCoreClient(pipe, protocol.CoreClientConfig{
 		AgentID:      env.cfg.agentID,
 		Token:        env.cfg.token,
-		Capabilities: clientCaps,
+		Capabilities: cfg.clientCaps,
 		Profile:      env.cfg.profile,
-		DrainTimeout: 2 * time.Second, // 测试收缩 drain 等待（防未终态 batch 钉死 Close）
+		DrainTimeout: drain,
 	})
 	cc.SetReadControlLoop(cc.ReadControlLoop)
 

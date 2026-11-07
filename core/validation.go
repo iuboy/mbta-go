@@ -23,6 +23,12 @@ const MaxTraceStateFieldLen = 256
 // sink 调用参数、命令寻址目标及日志标识，须严格限制长度以防 DoS 与日志注入。
 const MaxAgentIDLen = 256
 
+// MaxBatchCorrelationLen 是 Batch.correlation 的最大字节长度（与单个 signal 字段
+// 同界）。correlation 是解密后 batch 内的明文字符串、无 8MB 解压上限之外的独立
+// 约束：不设界时恶意对端可在 in-flight slot 与 Duplicate 回执回显路径驻留/放大
+// 近 8MB（64 slot 并发 ≈ 448MB 驻留）。
+const MaxBatchCorrelationLen = 4096
+
 // validateAgentID 校验 agent_id：非空、长度上限、不含控制字符（含 \t \n \r）。
 // agent_id 是客户端自报的服务/实例标识符，若含换行等控制字符可被用于日志注入攻击
 // （syslog/ELK 行伪造），因此使用 hasStrictControlChars 而非 hasControlChars。

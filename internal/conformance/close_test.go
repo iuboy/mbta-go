@@ -20,11 +20,6 @@ import (
 // TestClose_DrainReleasesStuck 验证 CLOSE 后服务端排空：卡住的 inflight（handler
 // 未调 done）被合成为 RESULT(released, server_draining) 并回收额度；迟到的
 // done(Durable) 被安全丢弃。
-//
-// 已知实现缺陷（见任务报告 bug-D）：releaseStuck → terminal() 只记终态+回收，
-// 从不发送 RESULT 帧——drain 放弃项的 released(server_draining) 反馈缺失，
-// 客户端只能白等 AckTimeout（§5.3「禁止沉默」被违反）。本测试钉住规格，
-// 待实现修复后转绿。
 func TestClose_DrainReleasesStuck(t *testing.T) {
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) })

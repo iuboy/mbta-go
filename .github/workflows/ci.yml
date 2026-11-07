@@ -40,7 +40,8 @@ jobs:
           cache: false
       - name: gofmt check
         run: |
-          unformatted=$(gofmt -l .)
+          # -s 与 Makefile fmt-check 对齐（缺 -s 时 CI 放行可简化代码，本地门禁拒绝）。
+          unformatted=$(gofmt -s -l .)
           if [ -n "$unformatted" ]; then
             echo "::error::以下文件需要 gofmt -s -w："
             echo "$unformatted"
@@ -65,7 +66,9 @@ jobs:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.12.2
+          # 与本地开发环境对齐（v2.12.2 漏报 copyloopvar 等 2.15 已修规则；
+          # 升级 action 版本线时同步 CONTRIBUTING 的本地安装指引）。
+          version: v2.15.0
           args: --timeout=5m
 
   test:
@@ -80,7 +83,9 @@ jobs:
       - name: Run go vet
         run: go vet ./...
       - name: Run tests with coverage
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        # -coverpkg 修正单包口径失真：conformance 套件对 core/protocol 的跨包
+        # 覆盖（实测约 60%）不带上时，coverage.out 会把 protocol 报成 ~13%。
+        run: go test -race -coverprofile=coverage.out -covermode=atomic -coverpkg=./... ./...
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -101,13 +106,11 @@ jobs:
       - name: buf lint
         run: buf lint
       - name: buf breaking (vs main)
-        # 仅 PR 上检查（dev 是破坏性变更的开发分支——r3 协议重写期间
-        # proto 全量替换，dev-vs-main 的 breaking 检查在此阶段必然失败；
-        # 合入 main 前的 PR 检查是正确门槛）。
-        # PR #4（r3+v0.7.0 合入 main）一次性豁免：本 PR 即是"有意识的破坏性
-        # 变更决策"本身（proto 全量替换、无生产部署），breaking 检查的报告
-        # 无增量信息。合入后此条件永不匹配（无害），下个 dev 周期随手清理。
-        if: github.event_name == 'pull_request' && github.event.pull_request.number != 4
+        # 知情门禁而非阻断门禁（版本与破坏性策略，见 AGENTS.md/CONTRIBUTING）：
+        # 本项目默认允许破坏性变更、无兼容要求——报告 wire 破坏面供 PR 审查
+        # 确认是有意识的决策，不阻断合入。
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
         env:
           REPO: ${{ github.repository }}
         run: buf breaking --against "https://github.com/$REPO.git#branch=main"
@@ -145,7 +148,15 @@ jobs:
       - name: Run integration tests
         # test/（黑盒 facade 集成/性能）+ v1/ntls e2e 均挂 integration tag，
         # 不带 tag 的 go test ./... 对它们只报 no test files（零回归保护）。
-        run: go test -race -count=1 -tags=integration ./test/ ./v1/ ./ntls/
+        # 集成测试同时产出跨包覆盖率（v1/ntls 面的单元覆盖极低，集成是主保护）。
+        run: go test -race -count=1 -tags=integration -coverprofile=integration.out -coverpkg=./... ./test/ ./v1/ ./ntls/
+      - name: Upload integration coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-coverage
+          path: integration.out
+          retention-days: 14
 
   vuln:
     name: Vulnerability scan
@@ -161,8 +172,10 @@ jobs:
         with:
           go-version-file: go.mod
       - name: govulncheck
+        # 扫描器版本 pin（@latest 不可复现：上游发版可能引入行为/告警漂移，
+        # 同一 commit 两次 CI 结果不一致）。升级时验证 ./... 零命中后更新。
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./...
 
   bench:
@@ -176,12 +189,24 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Run benchmarks
-        run: go test -bench=. -benchmem -count=1 -run=^$ ./...
+        # 产出 JSON 上传为 artifact：perf 基线对比在本地 benchstat 进行
+        #（CI 无历史基线存储，趋势判定不在流水线内做——与 perf_bench_test
+        # 尾注一致）。
+        run: go test -bench=. -benchmem -count=1 -run=^$ ./... | tee bench.txt
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench.txt
+          retention-days: 30
 
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, fmt, lint, test, proto, vuln]
+    # integration 必须入列：v1/ntls 的单元覆盖极低（v1 ~2%），集成测试是
+    # binding 面的主要回归保护——此前漏列导致集成失败仍可发版。
+    needs: [build, fmt, lint, test, proto, vuln, integration]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

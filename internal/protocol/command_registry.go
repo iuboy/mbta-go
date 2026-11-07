@@ -133,7 +133,12 @@ func (r *CommandRegistry) SendCommand(ctx context.Context, agentID string, cmd *
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
-		delete(r.pending, key)
+		// 指向检查（与 unregister 同模式）：同 (agentID, commandId) 的并发发送
+		// 会覆盖 pending——迟到退出者只清理仍属于自己的条目，后到等待者的
+		// ACK 路由不被误删。
+		if cur, ok := r.pending[key]; ok && cur == ackCh {
+			delete(r.pending, key)
+		}
 		r.mu.Unlock()
 	}()
 

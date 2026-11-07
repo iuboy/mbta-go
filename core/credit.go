@@ -72,6 +72,7 @@ type CreditLedger struct {
 	clampB     int64 // 本地钳制（恶意/受损服务端防护）
 	clampY     int64
 	slots      map[uint64]*OutSlot
+	timedOut   map[uint64]bool // 已派发 timeout 回调的 seq（ReapExpired 写、Terminal 消费即清除）
 	violations int
 }
 
@@ -101,6 +102,7 @@ func NewCreditLedger(initialB, initialY int64, clampB, clampY int64) *CreditLedg
 		clampB:   clampB,
 		clampY:   clampY,
 		slots:    make(map[uint64]*OutSlot),
+		timedOut: make(map[uint64]bool),
 	}
 }
 
@@ -154,16 +156,28 @@ func (l *CreditLedger) OnCredit(dB, dY int64) {
 	l.returnedY += dY
 }
 
-// Terminal 处理某 seq 的 RESULT：移出 pending slot（不触碰 credit——返还权威在
-// 服务端 CREDIT）。返回 slot 供回调；未知 seq（已 reap/rollback）返回 nil。
-func (l *CreditLedger) Terminal(seq uint64) *OutSlot {
+// Terminal 处理某 seq 的 RESULT（不触碰 credit——返还权威在服务端 CREDIT）。
+// terminal=true 表示终态 level（durable/rejected/released）：移出 pending slot，
+// drain 计数谓词（spec §3.7「全部已发 seq 均达终态」）随之收敛。durable 模式下
+// ACCEPTED 是中间态——terminal=false 不移出（drain 不得在中间态提前完成，
+// 否则 durable 未落盘即关连接丢数据）。
+//
+// 返回 slot 与该 seq 的 timeout 抑制标记：timedOut=true 表示客户端 reaper 已
+// 派发 timeout 回调，本帧（迟到真实 RESULT）不再二次回调（标记读取与清除在
+// 账本锁内原子完成——与 ReapExpired 的登记构成同一临界区，消除「reaper 删
+// slot 与登记之间真实 RESULT 先行派发」的双回调窗口）。slot 为 nil（已
+// reap/rollback/未知 seq）不影响派发判定：durable 模式下 DURABLE（终态）在
+// ACCEPTED 之后仍须到达应用。
+func (l *CreditLedger) Terminal(seq uint64, terminal bool) (*OutSlot, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s, ok := l.slots[seq]
-	if ok {
+	if ok && terminal {
 		delete(l.slots, seq)
 	}
-	return s
+	timedOut := l.timedOut[seq]
+	delete(l.timedOut, seq)
+	return s, timedOut
 }
 
 // Rollback 写失败路径专用：移出 slot 并把额度补偿回 returned。
@@ -190,6 +204,8 @@ func (l *CreditLedger) Rollback(seq uint64) *OutSlot {
 }
 
 // ReapExpired 回收 deadline 已过的 slot（标记失败并移出 pending；不回补 credit）。
+// 移出与 timedOut 登记同一锁内完成：迟到的真实 RESULT 经 Terminal 读到标记后
+// 抑制回调——「timeout + 真实」双终态回调窗口在构造上关闭。
 func (l *CreditLedger) ReapExpired(now time.Time) []*OutSlot {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -199,6 +215,7 @@ func (l *CreditLedger) ReapExpired(now time.Time) []*OutSlot {
 			s.Failed = true
 			reaped = append(reaped, s)
 			delete(l.slots, seq)
+			l.timedOut[seq] = true
 		}
 	}
 	return reaped
@@ -223,6 +240,7 @@ func (l *CreditLedger) Reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.slots = make(map[uint64]*OutSlot)
+	l.timedOut = make(map[uint64]bool)
 }
 
 // --- 服务端 CreditManager + SettleGrant ---

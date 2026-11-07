@@ -60,9 +60,12 @@ func TestCreditLedger_ResultNotImplicitReturn(t *testing.T) {
 	if err := l.Consume(1, 400, "c1", time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	slot := l.Terminal(1)
+	slot, timedOut := l.Terminal(1, true)
 	if slot == nil || slot.Seq != 1 || slot.Correlation != "c1" {
 		t.Fatalf("terminal slot = %+v, want seq=1 corr=c1", slot)
+	}
+	if timedOut {
+		t.Error("terminal reported timedOut without prior reap")
 	}
 	if b, y := l.Available(); b != 1 || y != 600 {
 		t.Errorf("after RESULT available = (%d,%d), want (1,600)（RESULT 不返还）", b, y)
@@ -71,8 +74,8 @@ func TestCreditLedger_ResultNotImplicitReturn(t *testing.T) {
 		t.Error("ledger not drained after terminal")
 	}
 	// 未知 seq 的 RESULT：nil slot，无副作用。
-	if s := l.Terminal(99); s != nil {
-		t.Errorf("terminal for unknown seq returned %+v, want nil", s)
+	if s, to := l.Terminal(99, true); s != nil || to {
+		t.Errorf("terminal for unknown seq returned (%+v,%v), want (nil,false)", s, to)
 	}
 	// CREDIT 返还后才恢复。
 	l.OnCredit(1, 400)

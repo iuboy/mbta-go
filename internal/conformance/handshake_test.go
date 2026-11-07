@@ -50,6 +50,20 @@ type envConfig struct {
 	zstdDict   []byte
 	zstdDictID uint32
 
+	// dgramRate：Policy.DatagramRateBytes（0 = DefaultServerPolicy 的默认值；
+	// 负 = 0 不限速）。DGRAM 令牌桶测试用。
+	dgramRate int64
+
+	// redirect：服务端 RedirectChecker（nil = 不注入）。
+	redirect core.RedirectChecker
+
+	// commands：服务端命令注册表（nil = 不注入）。
+	commands *protocol.CommandRegistry
+
+	// clientDrainTimeout：客户端 CoreClientConfig.DrainTimeout（0 = 测试默认 2s；
+	// drain 谓词类测试注入更长窗口防 Close 提前切断断言）。
+	clientDrainTimeout time.Duration
+
 	// onSession：会话生命周期回调（nil = 不注入——契约允许，Handle 收尾
 	// 的 DISCONNECTED 回调必须有 nil 守卫）。
 	onSession core.OnSession
@@ -104,6 +118,13 @@ type testEnv struct {
 
 // envPolicy 由 envConfig 构造服务端策略（startEnv/startHandlerOnly 共用）。
 func envPolicy(cfg envConfig) core.ServerPolicy {
+	rate := cfg.dgramRate
+	if rate == 0 {
+		rate = core.DefaultDatagramRateBytes
+	}
+	if rate < 0 {
+		rate = 0
+	}
 	return core.ServerPolicy{
 		Profile:               cfg.profile,
 		SupportedCapabilities: cfg.serverCaps,
@@ -114,6 +135,7 @@ func envPolicy(cfg envConfig) core.ServerPolicy {
 		MaxBatchBytes:         cfg.maxBatchBytes,
 		ZstdDict:              cfg.zstdDict,
 		ZstdDictID:            cfg.zstdDictID,
+		DatagramRateBytes:     rate,
 	}
 }
 
@@ -129,6 +151,8 @@ func startEnv(t *testing.T, cfg envConfig) *testEnv {
 		Policy:            policy,
 		ServerID:          "srv-" + testutil.RandString(4),
 		Epochs:            cfg.epochs,
+		RedirectChecker:   cfg.redirect,
+		Commands:          cfg.commands,
 		SinkOpts:          cfg.sinkOpts,
 		SinkHandler:       cfg.sink,
 		SinkDeadline:      cfg.sinkDeadline,
@@ -576,6 +600,8 @@ func startHandlerOnly(t *testing.T, cfg envConfig) *testEnv {
 		Policy:            envPolicy(cfg),
 		ServerID:          "srv-" + testutil.RandString(4),
 		Epochs:            cfg.epochs,
+		RedirectChecker:   cfg.redirect,
+		Commands:          cfg.commands,
 		SinkOpts:          cfg.sinkOpts,
 		SinkHandler:       cfg.sink,
 		SinkDeadline:      cfg.sinkDeadline,

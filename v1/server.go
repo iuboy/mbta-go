@@ -44,10 +44,12 @@ type ServerConfig struct {
 }
 
 // Server 接受并处理 MBTA agent 连接（QUIC）。
-// 内嵌 binding.Server（消除与 ntls 的服务端外壳重复），
-// 自身仅保留 QUIC 专属的 Start/Addr/Close 入口。
+// 持有未导出的 binding.Server（消除与 ntls 的服务端外壳重复），
+// 自身仅保留 QUIC 专属的 Start/Addr/Close 入口——embedding 曾为导出提升，
+// binding.Server.Run(ctx, RunSpec) 因此泄漏进公共 API（RunSpec 是 internal
+// 类型，外部无法构造合法实参），破坏性收口改为未导出字段。
 type Server struct {
-	*binding.Server[*Listener, *Conn]
+	bs     *binding.Server[*Listener, *Conn]
 	config ServerConfig
 }
 
@@ -84,7 +86,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		Server: binding.NewServer[*Listener, *Conn](cfg.MaxConcurrentConns, hcfg),
+		bs:     binding.NewServer[*Listener, *Conn](cfg.MaxConcurrentConns, hcfg),
 		config: cfg,
 	}, nil
 }
@@ -92,9 +94,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 // Start 监听 QUIC 连接并运行 accept 循环，阻塞直至 ctx 取消。
 // 每个被接受的连接经 CoreHandler.Handle 在独立 goroutine 中处理。
 func (s *Server) Start(ctx context.Context) error {
-	return s.Run(ctx, binding.RunSpec[*Listener, *Conn]{
-		Listen: func(ctx context.Context) (*Listener, error) {
-			l, err := Listen(ctx, s.config.Transport)
+	return s.bs.Run(ctx, binding.RunSpec[*Listener, *Conn]{
+		Listen: func() (*Listener, error) {
+			l, err := Listen(s.config.Transport)
 			if err != nil {
 				return nil, core.WrapError(core.ErrCodeTransport, "listen", err)
 			}
@@ -113,10 +115,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Addr 返回服务器监听地址（Start 完成监听后有效；启动前返回空串）。
 func (s *Server) Addr() string {
-	return s.Server.Addr(func(l *Listener) net.Addr { return l.Addr() })
+	return s.bs.Addr(func(l *Listener) net.Addr { return l.Addr() })
 }
 
 // Close 关闭服务器并释放监听资源。
 func (s *Server) Close() error {
-	return s.Server.Close(func(l *Listener) error { return l.Close() })
+	return s.bs.Close(func(l *Listener) error { return l.Close() })
 }

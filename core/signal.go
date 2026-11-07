@@ -119,16 +119,41 @@ func (b *SignalBatch) Validate() error {
 	return nil
 }
 
+// MaxHistogramBuckets 是 ExpHistogram 单侧 bucket 数组的条数上限。OTel 实践值
+// （scale ≤ 20、常规分布）远小于此界；无上限时 8MB batch 可携带约 400 万
+// buckets（每条 wire 2 字节、内存 8 字节的 4x 放大）直达 sink 下游的线性计费面。
+const MaxHistogramBuckets = 16384
+
 // validateSignal 校验单个 SignalRecord：signal_type 合法性、类型特定必填、字段长度与
 // trace 上下文约束。拆分自 Validate 以控制认知复杂度。
 func validateSignal(i int, s *SignalRecord) error {
 	if err := validateSignalType(i, s); err != nil {
 		return err
 	}
+	if err := validateExpHistogram(i, s.ExpHistogram); err != nil {
+		return err
+	}
 	if err := validateSignalFieldLengths(i, s); err != nil {
 		return err
 	}
 	return validateSignalTraceContext(i, s)
+}
+
+// validateExpHistogram 校验直方图 bucket 条数（histogram 信号类型之外的载荷载
+// validateSignalType 已拒，此处只需处理已携带者）。
+func validateExpHistogram(i int, h *ExponentialHistogram) error {
+	if h == nil {
+		return nil
+	}
+	if len(h.GetPositiveBuckets()) > MaxHistogramBuckets {
+		return NewError(ErrCodeBatchInvalid,
+			fmt.Sprintf("signal[%d]: positive_buckets exceeds max %d (got %d)", i, MaxHistogramBuckets, len(h.GetPositiveBuckets())))
+	}
+	if len(h.GetNegativeBuckets()) > MaxHistogramBuckets {
+		return NewError(ErrCodeBatchInvalid,
+			fmt.Sprintf("signal[%d]: negative_buckets exceeds max %d (got %d)", i, MaxHistogramBuckets, len(h.GetNegativeBuckets())))
+	}
+	return nil
 }
 
 // validateSignalType 校验 signal_type 必填、闭合枚举（拦截 "metric" 等历史/非法值）

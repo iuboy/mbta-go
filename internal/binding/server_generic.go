@@ -69,7 +69,9 @@ func NewServer[L, C any](maxConns int, hcfg HandlerConfig) *Server[L, C] {
 // RunSpec 是 Run 的配置：6 个 binding 特有的闭包，描述如何 listen/accept/包装/关闭。
 type RunSpec[L, C any] struct {
 	// Listen 构造 listener 并返回（Start 成功后注入 Server.listener）。
-	Listen func(ctx context.Context) (L, error)
+	// 无 ctx：listener 创建非阻塞，取消语义由 Accept 承担——与 v1/ntls
+	// 的 Listen(cfg) 导出面同构（ctx 死参数破坏性收口）。
+	Listen func() (L, error)
 	// Accept 从 listener 取下一连接（ctx 取消时返回 error）。
 	Accept func(ctx context.Context, l L) (C, error)
 	// NewTransport 把连接包装成 protocol.Transport。
@@ -120,7 +122,7 @@ func (s *Server[L, C]) Run(ctx context.Context, spec RunSpec[L, C]) error {
 		s.mu.Unlock()
 	}()
 
-	l, err := spec.Listen(ctx)
+	l, err := spec.Listen()
 	if err != nil {
 		// Listen 失败：重置 starting→stopped，允许重试（defer 也会兜底）。
 		s.runState.Store(runStateStopped)

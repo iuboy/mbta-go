@@ -249,6 +249,15 @@ func (c *Client) SetResultHandler(h func(seq uint64, level string, code uint32, 
 	c.core.SetResultHandler(h)
 }
 
+// SetCommandHandler 注册运维命令执行回调（capability: control_commands）。
+// 回调以独立 goroutine 运行（并发受协议层命令槽数限制 + 5min 超时 + panic
+// 防护），完成后自动回 COMMAND_ACK（applied/failed）。与 [v1.Client.SetCommandHandler]
+// 并行面——双 binding 公共方法集须保持对称（审查裁决：拷贝点漏抄变编译期
+// 约束前，以互指注释钉住）。
+func (c *Client) SetCommandHandler(h func(context.Context, *corepb.ControlCommand) (corepb.CommandAckCode, string)) {
+	c.core.SetCommandHandler(h)
+}
+
 // SetRedirectHandler 注册服务端 REDIRECT（S→C 集群重定向到 leader）回调。
 func (c *Client) SetRedirectHandler(h func(context.Context, []byte)) {
 	c.core.SetRedirectHandler(h)

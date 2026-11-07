@@ -1,6 +1,8 @@
 # Contributing to MBTA-Go
 
 感谢参与 MBTA-Go 开发！本文档涵盖开发流程、测试约定与代码质量要求。
+AI 编码代理（Codex/Cursor/Claude Code 等）的项目约定见 [AGENTS.md](./AGENTS.md)，
+提示词面的编写规则见 [docs/prompt-engineering.md](./docs/prompt-engineering.md)。
 
 ## 开发环境
 
@@ -18,12 +20,13 @@ git clone git@github.com:iuboy/pollux-go.git ../pollux-go
 
 ```bash
 make help           # 列出所有目标
-make test           # 单元 + conformance 测试（排除 integration）
-make test-conf      # 仅 conformance（FakeTransport 协议验证）
+make test           # 单元 + conformance（-race -cover，无需证书/端口）
+go test ./internal/conformance/  # 仅 conformance（FakeTransport 协议验证）
 make test-int       # 集成 / e2e（需要证书 + 端口）
 make test-all       # 全量测试（含集成）
-make lint           # golangci-lint（固定版本 v2.12.2）
+make lint           # golangci-lint（CI 经 golangci-lint-action@v7 执行）
 make vet            # go vet
+make gen-certs      # 生成 v1/ntls 两套测试证书（见下节）
 make proto          # 从 .proto 重新生成 corepb/
 make proto-lint     # lint .proto
 make proto-breaking # 检测 vs main 的 wire 不兼容变更
@@ -43,16 +46,14 @@ make cover          # HTML 覆盖率报告
 
 ### 证书生成
 
-集成测试需要 TLS / TLCP 证书。证书**不入库**（防止私钥泄露），由生成脚本产生：
+集成测试需要 TLS / TLCP 证书。证书**不入库**（防止私钥泄露），一条命令生成两套：
 
 ```bash
-# v1 (QUIC + TLS 1.3) 测试证书
-./test/data/certificates/gen_certs.sh
-
-# ntls (TLCP) 测试证书——见 test/data/ntls/ 下的生成说明
+make gen-certs   # = bash test/data/certificates/gen_certs.sh + go run test/data/ntls/gen_certs.go
 ```
 
-生成后证书位于 `test/data/certificates/`（已被 `.gitignore` 忽略）。
+生成位置：v1（QUIC + TLS 1.3）证书在 `test/data/certificates/`，ntls（TLCP）SM2 双证书
+在 `test/data/ntls/`——两处均已 `.gitignore` 忽略。
 
 ### 测试同步原则
 
@@ -82,7 +83,21 @@ make proto          # 重新生成
 git diff corepb/    # 确认生成内容
 ```
 
-CI 会跑 `buf breaking` 检测 wire 不兼容变更——破坏性协议改动需 bump 版本 + 文档说明。
+CI 会跑 `buf breaking` 报告 wire 不兼容变更——本项目**默认允许破坏性变更、
+无兼容要求**（见下），该检查是知情门禁而非阻断门禁：看报告确认破坏面是
+有意识的决策即可合入，破坏性内容写入 CHANGELOG「破坏性变更」小节。
+
+## 版本与破坏性策略
+
+自 r3 协议重写起（2026-11-07），库版本自 `v0.1.0-0` 重新起算（旧世系
+v0.1.0–v0.7.0 标签已移除，CHANGELOG 保留历史条目）：
+
+- 版本号恒为 `v0.1.<patch>-<rev>`，只有 patch 与 rev 递增。
+- **默认进行破坏性变更，无兼容要求**：除非维护者明确要求保持兼容，API/
+  proto/wire 破坏性调整不做兼容别名、不做迁移期、不升 minor——调用方随
+  版本更新同步修正。
+- 发版流程：CHANGELOG 定版（patch 递增、rev 复位 0；同 patch 热修递增
+  rev）→ 打 `v0.1.x-<rev>` 标签推送 → CI release job 出 Release。
 
 ## Commit 规范
 

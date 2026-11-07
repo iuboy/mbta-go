@@ -6,33 +6,33 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// TestNewMetrics tests the New metrics constructor.
+// TestNewMetrics tests the NewMetrics constructor.
 func TestNewMetrics(t *testing.T) {
 	t.Run("create metrics with default registerer", func(t *testing.T) {
 		registry := prometheus.NewRegistry()
-		metrics := New(registry)
+		metrics := NewMetrics(registry)
 
 		if metrics == nil {
-			t.Fatal("New() should not return nil")
+			t.Fatal("NewMetrics() should not return nil")
 		}
 	})
 
 	t.Run("create metrics with nil registerer (uses default)", func(t *testing.T) {
 		// Note: This will register with prometheus.DefaultRegisterer
 		// which may affect global state. Consider using a custom registry in tests.
-		metrics := New(nil)
+		metrics := NewMetrics(nil)
 
 		if metrics == nil {
-			t.Fatal("New(nil) should not return nil")
+			t.Fatal("NewMetrics(nil) should not return nil")
 		}
 	})
 
 	t.Run("create metrics with custom registerer", func(t *testing.T) {
 		registry := prometheus.NewRegistry()
-		metrics := New(registry)
+		metrics := NewMetrics(registry)
 
 		if metrics == nil {
-			t.Fatal("New() should not return nil")
+			t.Fatal("NewMetrics() should not return nil")
 		}
 	})
 }
@@ -40,7 +40,7 @@ func TestNewMetrics(t *testing.T) {
 // TestMetricsFields tests that all metric getter methods return non-nil values.
 func TestMetricsFields(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := New(registry)
+	metrics := NewMetrics(registry)
 
 	tests := []struct {
 		name  string
@@ -106,7 +106,7 @@ func TestMetricsFields(t *testing.T) {
 // TestMetricsNamespace tests that metrics use the correct namespace.
 func TestMetricsNamespace(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	New(registry)
+	NewMetrics(registry)
 
 	metricFamilies, err := registry.Gather()
 	if err != nil {
@@ -128,7 +128,7 @@ func TestMetricsNamespace(t *testing.T) {
 // TestMetricsCount tests that we have the expected number of metrics.
 func TestMetricsCount(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	New(registry)
+	NewMetrics(registry)
 
 	metricFamilies, err := registry.Gather()
 	if err != nil {
@@ -144,7 +144,7 @@ func TestMetricsCount(t *testing.T) {
 // TestMetricsMetricTypes tests that metrics have correct types.
 func TestMetricsMetricTypes(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := New(registry)
+	metrics := NewMetrics(registry)
 
 	t.Run("Gauge metrics exist", func(t *testing.T) {
 		if metrics.ConnectionsActive() == nil ||
@@ -186,5 +186,5 @@ func TestNoOpMetrics(t *testing.T) {
 
 // TestMBTAMetrics_ImplementsMetrics 运行期确认 *MBTAMetrics 满足 Metrics 接口（编译期断言见 metrics.go）。
 func TestMBTAMetrics_ImplementsMetrics(t *testing.T) {
-	var _ Metrics = New(prometheus.NewRegistry())
+	var _ Metrics = NewMetrics(prometheus.NewRegistry())
 }

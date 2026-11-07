@@ -30,8 +30,13 @@ import (
 	"github.com/iuboy/pollux-go/tlcp"
 )
 
-// tlcpHandshakeTimeout 是客户端 TLCP 握手的整体上限（见 Dial 内注释）。
-const tlcpHandshakeTimeout = 30 * time.Second
+// tlcpHandshakeTimeout 是客户端 TLCP 握手的整体上限（见 Dial 内注释）；
+// tlsHandshakeTimeout 是 TLS 1.3 分支的同位上限（Dial 的 tls.Dialer 路径
+// 在 ctx 无 deadline 时握手读操作无超时——见 Dial 内注释）。
+const (
+	tlcpHandshakeTimeout = 30 * time.Second
+	tlsHandshakeTimeout  = 30 * time.Second
+)
 
 // ALPNProtocol 是 ntls binding TLCP 模式（mbta-ntls/1）的 ALPN 标识。
 const ALPNProtocol = "mbta-ntls/1"
@@ -147,8 +152,13 @@ type ClientConfig struct {
 
 // buildServerTLCP 构建 TLCP 服务端配置（加载双 SM2 证书；配置 CAFile 即
 // 要求并校验客户端证书，启用 mTLS）。
+//
+// ALPN：NextProtos 声明 [ALPNProtocol]（mbta-ntls/1）——pollux-go 已支持
+// TLCP ALPN 协商（RFC 7301），wire 上恢复 spec §0.1 的版本身份声明（此前
+// 上游无协商能力时的偏差已消除；客户端信任门拒绝服务端选择未提议协议）。
 func buildServerTLCP(cfg *ServerConfig) (*tlcp.Config, error) {
 	tc := tlcp.NewConfig()
+	tc.NextProtos = []string{ALPNProtocol}
 	// 用 pollux-go/cert 加载 SM2 双证书（标准 tls.LoadX509KeyPair 不识别 SM2 曲线）
 	dual, err := cert.LoadDualCertificateFiles(cfg.SignCertFile, cfg.SignKeyFile, cfg.EncCertFile, cfg.EncKeyFile)
 	if err != nil {
@@ -216,6 +226,9 @@ func buildClientTLCP(cfg *ClientCredentials, serverAddr string) (*tlcp.Config, e
 		return nil, core.NewError(core.ErrCodeCredential, "ntls credentials required")
 	}
 	tc := tlcp.NewConfig()
+	// 客户端提议 mbta-ntls/1（spec §0.1 版本身份；服务端若选择未提议协议
+	// 由 ALPN 信任门拒绝）。
+	tc.NextProtos = []string{ALPNProtocol}
 	tc.ServerName = cfg.ServerName
 	tc.InsecureSkipVerify = cfg.InsecureSkipVerify
 	if tc.ServerName == "" && !tc.InsecureSkipVerify {
@@ -367,58 +380,13 @@ func Listen(cfg *ServerConfig) (*Listener, error) {
 // 后台 goroutine 异步关闭。
 func Dial(ctx context.Context, cfg *ClientConfig) (net.Conn, error) {
 	isTLS := cfg.Credentials != nil && cfg.Credentials.Mode.IsTLS13()
-	type result struct {
-		c   net.Conn
-		err error
-	}
-	ch := make(chan result, 1)
+	ch := make(chan dialResult, 1)
 	go func() {
 		if isTLS {
-			tc, err := buildClientTLS13(cfg.Credentials)
-			if err != nil {
-				ch <- result{nil, err}
-				return
-			}
-			c, err := (&tls.Dialer{Config: tc}).DialContext(ctx, "tcp", cfg.Server)
-			ch <- result{c, err}
+			ch <- dialTLS13Result(ctx, cfg)
 			return
 		}
-		tc, err := buildClientTLCP(cfg.Credentials, cfg.Server)
-		if err != nil {
-			ch <- result{nil, err}
-			return
-		}
-		// 先 DialContext 建立可取消 TCP 连接，再在其上做 TLCP 握手（tlcp.Dial 不接受 context）。
-		rawConn, dErr := (&net.Dialer{}).DialContext(ctx, "tcp", cfg.Server)
-		if dErr != nil {
-			ch <- result{nil, dErr}
-			return
-		}
-		// TLCP 握手 deadline：pollux-go 的 HandshakeContext 仅在入口检查一次 ctx、
-		// 中途不可取消（已核实 v0.4.4 engine_conn.go），stalled 对端会使握手 goroutine
-		// 永久阻塞（ctx 取消后的清理 goroutine 也随之挂死——goroutine+fd 泄漏）。
-		// 对 rawConn 设整体握手 deadline 强制其有界；握手后必须清零，交还协议层
-		// 的读超时管理。ctx 带 deadline 时取较早者。
-		handshakeTimeout := tlcpHandshakeTimeout
-		if dl, ok := ctx.Deadline(); ok {
-			if remaining := time.Until(dl); remaining < handshakeTimeout {
-				handshakeTimeout = remaining
-			}
-		}
-		if sdErr := rawConn.SetDeadline(time.Now().Add(handshakeTimeout)); sdErr != nil {
-			_ = rawConn.Close()
-			ch <- result{nil, sdErr}
-			return
-		}
-		c := tlcp.Client(rawConn, tc)
-		hErr := c.HandshakeContext(ctx)
-		_ = rawConn.SetDeadline(time.Time{})
-		if hErr != nil {
-			_ = rawConn.Close()
-			ch <- result{nil, hErr}
-			return
-		}
-		ch <- result{c, nil}
+		ch <- dialTLCPResult(ctx, cfg)
 	}()
 	select {
 	case <-ctx.Done():
@@ -436,17 +404,110 @@ func Dial(ctx context.Context, cfg *ClientConfig) (net.Conn, error) {
 	}
 }
 
+// dialResult 是 dial 分支函数的返回载体（goroutine 内经 channel 传出）。
+type dialResult struct {
+	c   net.Conn
+	err error
+}
+
+// dialTLS13Result 建立 TLS 1.3 连接：先建 rawConn 再设整体握手 deadline——
+// tls.Dialer 的 DialContext 在 ctx 无 deadline 时读操作无超时（NetDialer 零值
+// Timeout=0，ctx watcher 仅在 Done 时中断），恶意/故障服务端完成 TCP 握手后
+// 不回应 TLS 握手即永久阻塞（goroutine+fd 泄漏），与 TLCP 分支同构修复。
+func dialTLS13Result(ctx context.Context, cfg *ClientConfig) dialResult {
+	tc, err := buildClientTLS13(cfg.Credentials)
+	if err != nil {
+		return dialResult{nil, err}
+	}
+	rawConn, dErr := (&net.Dialer{}).DialContext(ctx, "tcp", cfg.Server)
+	if dErr != nil {
+		return dialResult{nil, dErr}
+	}
+	c, hErr := handshakeOnConn(ctx, rawConn, tlsHandshakeTimeout, func() handshakeConn {
+		return tls.Client(rawConn, tc)
+	})
+	if hErr != nil {
+		return dialResult{nil, hErr}
+	}
+	return dialResult{c, nil}
+}
+
+// dialTLCPResult 建立 TLCP 连接：先 DialContext 建立可取消 TCP 连接，再在其上
+// 做 TLCP 握手（tlcp.Dial 不接受 context）。握手 deadline：pollux-go 的
+// HandshakeContext 仅在入口检查一次 ctx、中途不可取消（已核实 v0.4.4
+// engine_conn.go），stalled 对端会使握手 goroutine 永久阻塞（ctx 取消后的
+// 清理 goroutine 也随之挂死——goroutine+fd 泄漏）。对 rawConn 设整体握手
+// deadline 强制其有界；握手后必须清零，交还协议层的读超时管理。
+func dialTLCPResult(ctx context.Context, cfg *ClientConfig) dialResult {
+	tc, err := buildClientTLCP(cfg.Credentials, cfg.Server)
+	if err != nil {
+		return dialResult{nil, err}
+	}
+	rawConn, dErr := (&net.Dialer{}).DialContext(ctx, "tcp", cfg.Server)
+	if dErr != nil {
+		return dialResult{nil, dErr}
+	}
+	c, hErr := handshakeOnConn(ctx, rawConn, tlcpHandshakeTimeout, func() handshakeConn {
+		return tlcp.Client(rawConn, tc)
+	})
+	if hErr != nil {
+		return dialResult{nil, hErr}
+	}
+	return dialResult{c, nil}
+}
+
+// handshakeConn 是具备 ctx 感知握手的客户端安全连接（crypto/tls.Conn 与
+// pollux-go tlcp.Conn 共同满足）。
+type handshakeConn interface {
+	net.Conn
+	HandshakeContext(ctx context.Context) error
+}
+
+// handshakeOnConn 在 rawConn 上执行握手（wrap 构造 TLS/TLCP 客户端连接并
+// 返回）：设 min(timeout, ctx 剩余) 的整体 deadline → 握手 → 清零 deadline。
+// 失败关 rawConn（含 deadline 设置失败）。
+func handshakeOnConn(ctx context.Context, rawConn net.Conn, timeout time.Duration, wrap func() handshakeConn) (net.Conn, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(dl); remaining < timeout {
+			timeout = remaining
+		}
+	}
+	if sdErr := rawConn.SetDeadline(time.Now().Add(timeout)); sdErr != nil {
+		_ = rawConn.Close()
+		return nil, sdErr
+	}
+	c := wrap()
+	hErr := c.HandshakeContext(ctx)
+	_ = rawConn.SetDeadline(time.Time{})
+	if hErr != nil {
+		_ = rawConn.Close()
+		return nil, hErr
+	}
+	return c, nil
+}
+
 // --- Server ---
 
 // Server 是 ntls 服务器。
-// 内嵌 binding.Server（与 v1 同构的外壳），自身仅保留 Start/Addr/Close 入口。
+// 持有未导出的 binding.Server（与 v1 同构的外壳），自身仅保留
+// Start/Addr/Close 入口——embedding 曾为导出提升，binding.Server.Run(ctx,
+// RunSpec) 因此泄漏进公共 API（RunSpec 是 internal 类型，外部无法构造合法
+// 实参），破坏性收口改为未导出字段。
 type Server struct {
-	*binding.Server[*Listener, net.Conn]
+	bs     *binding.Server[*Listener, net.Conn]
 	config ServerConfig
 }
 
 // Config 返回服务端配置（facade 测试与诊断用；返回副本）。
 func (s *Server) Config() ServerConfig { return s.config }
+
+// SendCommand 向指定 agent 的活动连接下发运维命令并等待其 COMMAND_ACK
+// （同步语义，含超时；REJECTED/FAILED 转为 AckError/ErrCommand*）。
+// agent 离线或未协商 control_commands 能力时返回错误。
+// 与 [v1.Server.SendCommand] 并行面——双 binding 公共方法集保持对称。
+func (s *Server) SendCommand(ctx context.Context, agentID string, cmd *corepb.ControlCommand) (*corepb.ControlCommandAck, error) {
+	return s.config.Commands.SendCommand(ctx, agentID, cmd)
+}
 
 // NewServer 创建 ntls 服务器（仅构造不启动；启动用 [Server.Start]）。
 // 构造期 fail-fast 校验：监听地址、Mode 合法性与证书形态（TLCP 双 SM2 或
@@ -487,21 +548,21 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		Server: binding.NewServer[*Listener, net.Conn](cfg.MaxConcurrentConns, hcfg),
+		bs:     binding.NewServer[*Listener, net.Conn](cfg.MaxConcurrentConns, hcfg),
 		config: cfg,
 	}, nil
 }
 
 // Addr 返回服务器监听地址（Start 完成监听后有效；启动前返回空串）。
 func (s *Server) Addr() string {
-	return s.Server.Addr(func(l *Listener) net.Addr { return l.Addr() })
+	return s.bs.Addr(func(l *Listener) net.Addr { return l.Addr() })
 }
 
 // Start 监听 TCP 连接并运行 accept 循环，阻塞直至 ctx 取消。
 // 每个被接受的连接经 CoreHandler.Handle 在独立 goroutine 中处理。
 func (s *Server) Start(ctx context.Context) error {
-	return s.Run(ctx, binding.RunSpec[*Listener, net.Conn]{
-		Listen: func(ctx context.Context) (*Listener, error) { return Listen(&s.config) },
+	return s.bs.Run(ctx, binding.RunSpec[*Listener, net.Conn]{
+		Listen: func() (*Listener, error) { return Listen(&s.config) },
 		Accept: func(ctx context.Context, l *Listener) (net.Conn, error) { return l.Accept() },
 		NewTransport: func(ctx context.Context, c net.Conn) (protocol.Transport, error) {
 			return newTCPTransport(c, s.config.Policy.MaxFrameBytes), nil
@@ -514,7 +575,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Close 关闭服务器并释放监听资源。
 func (s *Server) Close() error {
-	return s.Server.Close(func(l *Listener) error { return l.Close() })
+	return s.bs.Close(func(l *Listener) error { return l.Close() })
 }
 
 // --- Client（完整类型定义与方法在 client.go）---

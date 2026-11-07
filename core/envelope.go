@@ -54,7 +54,9 @@ func SealEnvelope(p SealParams) ([]byte, error) {
 		return nil, NewError(ErrCodeBatchInvalid, "seal: seq must be >= 1")
 	}
 	// 对称拒绝（Open 侧必拒 KeyEpoch≠0）：允许 Seal 构造对端必拒的帧
-	// 是本地无报错的静默故障源。
+	// 是本地无报错的静默故障源。实现 rekey（epoch>0）时 MUST 保持
+	// key_epoch ≤ 0xff——envelopeAD 以单字节承载 epoch（spec §4.2 冻结面），
+	// 超过 0xff 会与 epoch−256 的 AD 碰撞，须改 AD 布局并走破坏性版本变更。
 	if p.KeyEpoch != 0 {
 		return nil, NewError(ErrCodeBatchInvalid, "seal: key_epoch must be 0 in first version")
 	}
@@ -145,7 +147,9 @@ func dualMAC(profile corepb.Profile, key, ad, ciphertext []byte) []byte {
 }
 
 // envelopeAD 构造 AEAD Associated Data（字节级规范见文件头注释）。
-// lp = 4B BE 长度前缀。
+// lp = 4B BE 长度前缀。keyEpoch 以单字节承载（spec §4.2 冻结面，首版恒 0）：
+// 调用方（Seal/Open）已拒绝非零 epoch，此处截断仅在未来 rekey 放宽时相关——
+// 届时 MUST 先断言 keyEpoch ≤ 0xff（epoch 与 epoch+256 的 AD 否则碰撞）。
 func envelopeAD(frameType uint8, sessionID []byte, keyEpoch uint32, seq uint64, comp corepb.Compression, profile corepb.Profile) []byte {
 	profName := ProfileName(profile)
 	ad := make([]byte, 0, 2+4+len(sessionID)+1+8+1+4+len(profName))
@@ -369,7 +373,14 @@ func decompress(c corepb.Compression, src []byte, dict *ZstdDictCodec) ([]byte, 
 		defer gzipReaderPool.Put(r)
 		return copyLimited(r)
 	case corepb.Compression_COMPRESSION_ZSTD:
-		dec := zstdDecoderPool.Get().(*zstd.Decoder)
+		v := zstdDecoderPool.Get()
+		dec, ok := v.(*zstd.Decoder)
+		if !ok || dec == nil {
+			// 池 New 丢弃构造错误时 Get 得 nil（与 encoder 路径同防御：
+			// 断言失败报错而非 Reset 上 panic）。WithDecoderMaxMemory 为
+			// 合法固定选项，构造失败实践不可达——防御不对称的结构性封堵。
+			return nil, NewError(ErrCodeInternal, "zstd decoder pool corrupted")
+		}
 		defer zstdDecoderPool.Put(dec)
 		if err := dec.Reset(bytes.NewReader(src)); err != nil {
 			return nil, WrapError(ErrCodeEnvelopeOpenFail, "zstd reset", err)

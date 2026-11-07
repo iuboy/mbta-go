@@ -18,6 +18,7 @@
 |------|------|
 | [v2-design.md](./v2-design.md) | **r3 设计与审查记录**（先例研究、逐节设计 rationale、两轮审查裁决 §18、conformance 断言清单）。协议语义争议时与 core spec 互补：spec 为准，本文提供决策依据。 |
 | [performance-optimization.md](./performance-optimization.md) | Go 参考实现的性能与架构笔记。对象池/内存布局等属 Go 优化，不构成协议一致性要求。 |
+| [prompt-engineering.md](./prompt-engineering.md) | 提示词工程约定：AGENTS.md/CLAUDE.md 等 AI 协作面的编写规则、修改 checklist 与检索结论（2026-10）。 |
 
 ## 阅读顺序
 

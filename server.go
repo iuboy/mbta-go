@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
 	"time"
@@ -169,8 +170,12 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.cfg.EnableNTLS {
 		if err := s.initNTLSServer(); err != nil {
 			// initNTLSServer 失败：清理已初始化的 v1Server，避免资源残留。
+			// Close 失败留痕（listener/端口未释放会被 init 错误掩盖——兜底
+			// 留痕约定）。
 			if s.v1Server != nil {
-				_ = s.v1Server.Close()
+				if closeErr := s.v1Server.Close(); closeErr != nil {
+					slog.Debug("cleanup v1 server after ntls init failure", "error", closeErr)
+				}
 				s.v1Server = nil
 			}
 			s.started = false
@@ -193,7 +198,6 @@ func (s *Server) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
 	for _, b := range table {
-		b := b
 		g.Go(func() error {
 			if err := b.start(ctx); err != nil {
 				return core.WrapError(core.ErrCodeTransport, b.name, err)
@@ -208,7 +212,11 @@ func (s *Server) Start(ctx context.Context) error {
 		s.started = false
 		s.mu.Unlock()
 		// 显式 Close 触发子服务器清理（errgroup cancel 已使 ctx.Done，但 Close 保证资源释放）。
-		_ = s.Close()
+		// Close 失败留痕：Start 的原始错误仍为返回主因，但 Close 失败意味着
+		// listener/端口可能未释放（fd 泄漏被掩盖违反兜底留痕约定）。
+		if closeErr := s.Close(); closeErr != nil {
+			slog.Debug("cleanup close after accept loop failure", "error", closeErr)
+		}
 		return core.WrapError(core.ErrCodeTransport, "server accept loop", err)
 	}
 
@@ -562,11 +570,23 @@ func NewCommandRegistry() *protocol.CommandRegistry {
 	return protocol.NewCommandRegistry()
 }
 
+// 运维命令通道的可判定错误族：内部哨兵（protocol.ErrCommand*）的 facade
+// 再导出。internal 包符号外部模块不可 import——不再导出时调用方写不出
+// errors.Is(err, mbta.ErrAgentNotConnected)，只能靠字符串匹配判别命令失败
+// 类别（架构审查 P2 裁决）。值为同一实例，与 binding 直连路径的判别互通。
+var (
+	ErrAgentNotConnected = protocol.ErrAgentNotConnected
+	ErrAgentNoCapability = protocol.ErrAgentNoCapability
+	ErrCommandTimeout    = protocol.ErrCommandTimeout
+	ErrCommandRejected   = protocol.ErrCommandRejected
+	ErrCommandFailed     = protocol.ErrCommandFailed
+)
+
 // SendCommand 向指定 agent 的活动连接下发运维命令并等待其 ACK。
 // 经 binding 注册表分派：按注册序取首个支持命令通道的 binding 执行
 // （v1 优先；命令注册表 binding 无关——agent 经任一 binding 连接均可寻址）。
 // 无已注册命令通道（空表/仅启用无命令面的 binding）时返回
-// [protocol.ErrAgentNotConnected]。
+// [ErrAgentNotConnected]；其余可判定错误见 ErrCommand* 族（errors.Is）。
 func (s *Server) SendCommand(ctx context.Context, agentID string, cmd *corepb.ControlCommand) (*corepb.ControlCommandAck, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -577,5 +597,5 @@ func (s *Server) SendCommand(ctx context.Context, agentID string, cmd *corepb.Co
 		}
 		return b.sendCommand(ctx, agentID, cmd)
 	}
-	return nil, protocol.ErrAgentNotConnected
+	return nil, ErrAgentNotConnected
 }

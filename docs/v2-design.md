@@ -85,7 +85,7 @@ v2 的每个核心决策都锚定一个经过大规模验证的开源/标准设�
 | 0x03 | HELLO_NAK | s→c | control | 握手拒绝（含 retryable/retry_hint） |
 | 0x20 | RESULT | s→c | control | 对某 seq 的反馈（唯一反馈帧） |
 | 0x21 | CREDIT | s→c | control | credit 发放（**唯一流控发放帧**；返还一律经它） |
-| 0x30/0x31 | PING/PONG | 双向 | control | 双 binding 应用层心跳（v0.7.0 起注入，废止 QUIC 仅传输层保活的原案） |
+| 0x30/0x31 | PING/PONG | 双向 | control | 双 binding 应用层心跳（r3 起注入，废止 QUIC 仅传输层保活的原案） |
 | 0x40 | CLOSE | 双向 | control | drain 超时提示 |
 | 0x41 | REDIRECT | s→c | control | HA 重定向（proto 载荷；地址经校验） |
 | 0x50 | ABORT | 双向 | control | 立即拆除（写失败/协议违规/账本漂移） |

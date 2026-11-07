@@ -53,6 +53,10 @@ func (h *CoreHandler) flushPending() {
 	c := &core.Credit{Batches: uint64(b), Bytes: uint64(y)}
 	p, err := core.Encode(c)
 	if err != nil {
+		// TakeRecovered 已清空攒批缓冲——Encode 失败即该笔回收永久滞留（客户端
+		// credit 单向泄漏直至重连）。proto 对 Credit 实际不会失败，此处留痕以
+		// 兜底可观测（AGENTS.md：关键兜底路径失败 MUST 留日志）。
+		slog.Warn("encode credit failed; recovered quota stranded", "batches", b, "bytes", y, "error", err)
 		return
 	}
 	if err := SendControlFrame(context.Background(), h.tr, core.TypeCredit, p); err != nil {
@@ -160,6 +164,9 @@ func (h *CoreHandler) decodeAndValidate(env *core.Envelope, frameType uint8) (*c
 	if batch.GetSeq() != env.GetSeq() {
 		return nil, nil, nil, core.CodeBatchInvalid
 	}
+	if len(batch.GetCorrelation()) > core.MaxBatchCorrelationLen {
+		return nil, nil, nil, core.CodeBatchInvalid
+	}
 	if int(batch.GetEventsCount()) > maxBatchEvents {
 		return nil, nil, nil, core.CodeBatchInvalid
 	}
@@ -212,6 +219,16 @@ func (h *CoreHandler) processBatch(ctx context.Context, payload []byte) {
 		return
 	}
 	send := h.sender(ctx)
+
+	// Draining 强制执行（close 注释承诺的「此后新 seq → released(server_draining)」）：
+	// CLOSE 后连接尚未断开期间到达的新 BATCH 不再投递 sink——未 Consume 的 grant
+	// 直接 Settle（按帧字节数回收，客户端已扣额度守恒闭环）。
+	if h.sm.State() == core.ServerStateDraining {
+		grant.Settle(send, corepb.ResultLevel_RESULT_LEVEL_RELEASED,
+			core.CodeServerDraining, 1000, int64(len(payload)))
+		h.maybeScheduleFlush()
+		return
+	}
 
 	frameBytes := int64(len(payload))
 	if cerr := grant.Consume(frameBytes); cerr != nil {
@@ -282,6 +299,11 @@ func (h *CoreHandler) sendResult(ctx context.Context, r *core.Result) {
 
 // processDatagram 处理不可靠 DGRAM（at-most-once；豁免 credit，令牌桶+并发槽）。
 func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
+	// Draining 期新 DGRAM 静默丢弃（BATCH 路径回 released 回执，DGRAM 无回执
+	// 通道——at-most-once 语义允许丢弃；与 close 后语义一致）。
+	if h.sm.State() == core.ServerStateDraining {
+		return
+	}
 	if !h.dgramAllow(int64(len(payload))) {
 		return // 速率超限：静默丢弃（at-most-once 语义允许）
 	}
@@ -293,10 +315,30 @@ func (h *CoreHandler) processDatagram(ctx context.Context, payload []byte) {
 	if code != 0 {
 		return // DGRAM 失败一律静默丢弃
 	}
+	// 解压后计量补扣：入口按压缩后 wire 字节扣桶，高压缩比 payload（如 8MB 全零
+	// 压至 ~30KB）会让 wire 计量下的实际解压吞吐失真（8MB/s 预算 → 2.2GB/s 实际）。
+	// 差额允许记负（负债压低未来可用额度），真实成本由此回归桶计量。
+	if extra := int64(len(batchWire)) - int64(len(payload)); extra > 0 {
+		h.dgramCharge(extra)
+	}
 	if h.config.SinkHandler != nil {
 		ev := h.makeEvent(batch, sb, batchWire)
 		h.callHandler(ctx, ev, func(core.Outcome) {}) // at-most-once：done 无 wire 语义
 	}
+}
+
+// dgramCharge 无条件扣减令牌桶（可记负）。dgramAllow 的「不足即拒」只适用于
+// 入口预检；解压后的补扣是事后计量——拒绝已无意义，记负让债务抑制后续帧。
+func (h *CoreHandler) dgramCharge(n int64) {
+	if h.dgramRate <= 0 {
+		return
+	}
+	h.dgramBucketMu.Lock()
+	defer h.dgramBucketMu.Unlock()
+	if h.dgramLast.IsZero() {
+		h.dgramLast = time.Now()
+	}
+	h.dgramAvail -= n
 }
 
 // dgramAllow 令牌桶（Policy.DatagramRateBytes；0 = 不限，仅并发槽防护）。

@@ -107,7 +107,10 @@ func buildServerTLS(cfg *ServerCredentials) (*tls.Config, error) {
 // 不提供默认配置）。
 func buildClientTLS(cfg *ClientCredentials) (*tls.Config, error) {
 	if cfg == nil {
-		return nil, core.NewError(core.ErrCodeCredential, "client TLS credentials required: provide ClientCredentials or explicitly set InsecureSkipVerify for development")
+		// 指引自洽：InsecureSkipVerify 是 *ClientCredentials 的字段，cfg 为 nil
+		// 时不存在「显式设置」的途径——正确指引是传入非 nil 凭证。
+		return nil, core.NewError(core.ErrCodeCredential,
+			"client TLS credentials required: pass non-nil ClientCredentials (CAFile for verification, or InsecureSkipVerify=true for development)")
 	}
 	// 配置构造上提 tlshelper（review P3：与 ntls buildClientTLS13 逐行重复 ~30 行）。
 	tlsCfg, err := tlshelper.BuildClientTLSConfig(tlshelper.ClientTLSOptions{
@@ -133,9 +136,10 @@ type Listener struct {
 }
 
 // Listen 创建 QUIC listener（应用默认传输参数与流控窗口，见本文件常量注释）。
-// ctx 为签名预留未使用：listener 创建本身无阻塞等待，accept 阶段的取消语义
-// 由 Server.Start 的 AcceptLoop 承担（RunSpec.Listen 透传调用方 ctx）。
-func Listen(ctx context.Context, cfg QUICServerConfig) (*Listener, error) {
+// 无 ctx 参数：listener 创建本身无阻塞等待，accept 阶段的取消语义由
+// Server.Start 的 AcceptLoop 承担。与 ntls.Listen 同构签名（双 binding
+// Listen 面对称；ctx 死参数经破坏性收口移除）。
+func Listen(cfg QUICServerConfig) (*Listener, error) {
 	tlsCfg, err := buildServerTLS(cfg.Credentials)
 	if err != nil {
 		return nil, err
@@ -222,11 +226,11 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 }
 
 // Close 关闭 listener 并释放底层 UDP socket（quic.Listener.Close 不关
-// PacketConn，端口释放依赖此处显式关闭）。
+// PacketConn，端口释放依赖此处显式关闭）。两层关闭错误合并返回——丢弃
+// QUIC 层错误会让调用方误判完全释放。
 func (l *Listener) Close() error {
 	// quic.Listener.Close 不会关闭底层 PacketConn，需显式关闭 UDP socket 以释放端口。
-	_ = l.listener.Close()
-	return l.conn.Close()
+	return errors.Join(l.listener.Close(), l.conn.Close())
 }
 
 // Addr 返回 listener 的监听地址。

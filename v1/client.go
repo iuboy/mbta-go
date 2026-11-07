@@ -56,7 +56,7 @@ type v1ClientTransport struct {
 	frameLimit atomic.Uint64 // 协商帧上限（0=默认 16MB）
 	conn       *Conn
 	controlStr *quic.Stream
-	picker     atomic.Pointer[StreamPicker] // 原子读写，消除与 postAuth 写的 data race
+	picker     atomic.Pointer[streamPicker] // 原子读写，消除与 postAuth 写的 data race
 	controlMu  sync.Mutex                   // 串行化 control stream 写
 }
 
@@ -314,13 +314,13 @@ func (c *Client) Connect(ctx context.Context) error {
 	return err
 }
 
-// openDataStream 打开单条数据流并构造 StreamPicker。
-func openDataStream(ctx context.Context, conn *Conn) (StreamPicker, error) {
+// openDataStream 打开单条数据流并构造 streamPicker（内建选择器，见 stream_picker.go）。
+func openDataStream(ctx context.Context, conn *Conn) (streamPicker, error) {
 	ds, err := conn.OpenDataStream(ctx)
 	if err != nil {
 		return nil, core.WrapError(core.ErrCodeStream, "open data stream", err)
 	}
-	return NewSingleStream(&quicStreamWrapper{stream: ds, idx: 0}), nil
+	return newSingleStream(&quicStreamWrapper{stream: ds, idx: 0}), nil
 }
 
 // SendBatch 通过 MBTA 协议发送 SignalBatch，返回分配的 seq。

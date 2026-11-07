@@ -29,7 +29,8 @@ type CorrelationDeduper struct {
 	cap   int
 	ttl   time.Duration
 	seen  map[string]time.Time
-	order list.List // key 到达序（队首最旧，容量淘汰）
+	order list.List                // key 到达序（队首最旧，容量淘汰）
+	pos   map[string]*list.Element // key → order 节点反向索引（O(1) 定位淘汰）
 }
 
 // NewCorrelationDeduper 创建去重器。capacity ≤0 取 65536；ttl ≤0 表示不过期
@@ -38,7 +39,12 @@ func NewCorrelationDeduper(capacity int, ttl time.Duration) *CorrelationDeduper 
 	if capacity <= 0 {
 		capacity = 65536
 	}
-	return &CorrelationDeduper{cap: capacity, ttl: ttl, seen: make(map[string]time.Time, 1024)}
+	return &CorrelationDeduper{
+		cap:  capacity,
+		ttl:  ttl,
+		seen: make(map[string]time.Time, 1024),
+		pos:  make(map[string]*list.Element, 1024),
+	}
 }
 
 // Dedup 报告 key 是否首次出现：首次返回 true（放行）并登记；重复或已过期被
@@ -54,22 +60,23 @@ func (d *CorrelationDeduper) Dedup(key string) bool {
 		if d.ttl <= 0 || now.Sub(ts) < d.ttl {
 			return false // 窗口内重复
 		}
-		delete(d.seen, key) // 过期：视作首次
-		for e := d.order.Front(); e != nil; e = e.Next() {
-			if e.Value.(string) == key {
-				d.order.Remove(e)
-				break
-			}
+		// 过期：视作首次。经反向索引 O(1) 定位旧节点（此前线性扫描 order——
+		// 攻击者控制 correlation 值在过期边界精准重放可放大到 O(cap)/次）。
+		if e, ok := d.pos[key]; ok {
+			d.order.Remove(e)
+			delete(d.pos, key)
 		}
+		delete(d.seen, key)
 	}
 	d.seen[key] = now
-	d.order.PushBack(key)
+	d.pos[key] = d.order.PushBack(key)
 	for len(d.seen) > d.cap {
 		front := d.order.Front()
 		if front == nil {
 			break
 		}
 		delete(d.seen, front.Value.(string))
+		delete(d.pos, front.Value.(string))
 		d.order.Remove(front)
 	}
 	return true

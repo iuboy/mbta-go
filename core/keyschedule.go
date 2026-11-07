@@ -234,16 +234,30 @@ func (k *SessionKeys) Wipe() {
 	k.NoncePrefixS = [4]byte{}
 }
 
+// zeroize 就地清零密钥派生中间产物（best-effort，与 SessionKeys.Wipe 同一
+// 缓解性质：Go 移动式 GC 下不保证堆中无副本，仅降低内存取证暴露面）。
+func zeroize(bs ...[]byte) {
+	for _, b := range bs {
+		for i := range b {
+			b[i] = 0
+		}
+	}
+}
+
 // pskCK 计算密钥日程的中间链（ck → pskMix → pskCK）——DeriveSessionKeys 与
-// DeriveDualMACKey 共用（协商 dual_integrity 时不重算）。
+// DeriveDualMACKey 共用（协商 dual_integrity 时不重算）。中间量 ck/pskMix
+// 用后即清零。
 func pskCK(p corepb.Profile, zz, thHello, tokenProof []byte) ([]byte, error) {
 	h := ProfileHash(p)
 	ck := hkdf.Extract(h, zz, thHello)
 	pskMix := make([]byte, 32)
 	if err := io_readFull(hkdf.Expand(h, ck, []byte("mbta/psk")), pskMix); err != nil {
+		zeroize(ck, pskMix)
 		return nil, WrapError(ErrCodeInternal, "hkdf psk expand", err)
 	}
-	return hkdf.Extract(h, tokenProof, pskMix), nil
+	pck := hkdf.Extract(h, tokenProof, pskMix)
+	zeroize(ck, pskMix)
+	return pck, nil
 }
 
 // DeriveSessionKeys 执行完整密钥日程（两侧调用相同函数）。
@@ -259,6 +273,7 @@ func DeriveSessionKeys(p corepb.Profile, zz, thHello, tokenProof []byte) (*Sessi
 	splitLen := keyLen*2 + HMACKeyLen(p) + 8
 	okm := make([]byte, splitLen)
 	if err := io_readFull(hkdf.Expand(h, pck, []byte("mbta/split")), okm); err != nil {
+		zeroize(pck, okm)
 		return nil, WrapError(ErrCodeInternal, "hkdf split expand", err)
 	}
 	keys := &SessionKeys{Profile: p}
@@ -268,6 +283,7 @@ func DeriveSessionKeys(p corepb.Profile, zz, thHello, tokenProof []byte) (*Sessi
 	keys.HandshakeKey = append([]byte(nil), okm[keyLen*2:hsEnd]...)
 	copy(keys.NoncePrefixC[:], okm[hsEnd:hsEnd+4])
 	copy(keys.NoncePrefixS[:], okm[hsEnd+4:hsEnd+8])
+	zeroize(pck, okm)
 	return keys, nil
 }
 
@@ -281,8 +297,10 @@ func DeriveDualMACKey(p corepb.Profile, zz, thHello, tokenProof []byte) ([]byte,
 	}
 	dk := make([]byte, HMACKeyLen(p))
 	if err := io_readFull(hkdf.Expand(h, pck, []byte("mbta/dual")), dk); err != nil {
+		zeroize(pck, dk)
 		return nil, WrapError(ErrCodeInternal, "hkdf dual expand", err)
 	}
+	zeroize(pck)
 	return dk, nil
 }
 

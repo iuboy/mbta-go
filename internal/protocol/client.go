@@ -51,24 +51,26 @@ type CoreClient struct {
 	negCaps atomic.Value                       // []string
 	codec   atomic.Value                       // corepb.Codec
 	limits  atomic.Value                       // *corepb.Limits
+	ackMode atomic.Value                       // corepb.AckMode（drain 终态判定：durable 模式下 accepted 为中间态）
 	zdict   atomic.Pointer[core.ZstdDictCodec] // zstd_dict：连接持有的字典 codec（DICT 帧后非 nil）
 
 	resultHandler    atomic.Pointer[func(seq uint64, level string, code uint32, correlation string)]
 	redirectHandler  atomic.Pointer[func(ctx context.Context, payload []byte)]
 	redirectInflight atomic.Bool
 	commandHandler   atomic.Pointer[CommandHandler]
-	seenCmdMu        sync.Mutex
-	seenCommands     map[string]struct{}
-	seenCmdOrder     []string // seenCommands 的到达序（环形淘汰最旧，见 markSeenCommand）
-
-	// timedOut 记录已向应用派发 timeout 回调的 seq（AckReaperLoop 写、handleResult
-	// 消费即清除）：迟到的真实 RESULT 不再二次回调。durable 模式的 ACCEPTED（中间态）
-	// → DURABLE（终态）两次派发不受影响——抑制仅以本地 timeout 派发为依据。
-	timedOutMu sync.Mutex
-	timedOut   map[uint64]struct{}
+	// commandSlots 限流命令回调的并发 goroutine 数（恶意/被攻陷服务端命令洪水
+	// 防线），NewCoreClient 初始化。
+	commandSlots chan struct{}
+	seenCmdMu    sync.Mutex
+	seenCommands map[string]struct{}
+	seenCmdOrder []string // seenCommands 的到达序（环形淘汰最旧，见 markSeenCommand）
 
 	sendMu sync.Mutex
 
+	// lifecycle 字段组由 lifecycleMu 保护：startLifecycle 写入与
+	// teardownPhase/waitGoroutines 的读取存在并发交错（直连 binding 时 Connect
+	// 与用户 Close 可并发）——此前裸字段是 -race 可检出的数据竞态。
+	lifecycleMu     sync.Mutex
 	lifecycleCtx    context.Context
 	lifecycleCancel context.CancelFunc
 	ackDone         chan struct{}
@@ -107,12 +109,13 @@ func NewCoreClient(tr ClientTransport, cfg CoreClientConfig) *CoreClient {
 	}
 	cfg.Meta = meta
 	cc := &CoreClient{
-		cfg:     cfg,
-		metrics: cfg.Metrics,
-		sm:      core.NewStateMachine(),
-		seq:     core.NewSeqGenerator(),
-		agentID: cfg.AgentID,
-		drainCh: make(chan struct{}, 1),
+		cfg:          cfg,
+		metrics:      cfg.Metrics,
+		sm:           core.NewStateMachine(),
+		seq:          core.NewSeqGenerator(),
+		agentID:      cfg.AgentID,
+		drainCh:      make(chan struct{}, 1),
+		commandSlots: make(chan struct{}, maxCommandHandlers),
 	}
 	if tr != nil {
 		cc.tr.Store(&tr)
@@ -180,6 +183,13 @@ func (c *CoreClient) Handshake(ctx context.Context) error {
 		return core.NewError(core.ErrCodeAuthFailed,
 			"handshake rejected: "+core.CodeName(nak.GetCode())+" (retryable="+boolStr(nak.GetRetryable())+")")
 	case core.TypeHelloAck:
+		// 尺寸先验拒先于 Decode（恶意/受损服务端防线，与服务端 handleHello 对称）：
+		// HELLO_ACK 天然小上界（core.MaxHandshakeFrameBytes），超额帧在
+		// proto.Unmarshal 分配 selected_capabilities 等列表前拒绝。
+		if len(f.Payload) > core.MaxHandshakeFrameBytes {
+			return core.NewError(core.ErrCodeBadHandshake,
+				"hello_ack frame exceeds handshake limit")
+		}
 		var ack core.HelloAck
 		if derr := core.Decode(f.Payload, &ack); derr != nil {
 			return core.WrapError(core.ErrCodeHandshake, "decode hello_ack", derr)
@@ -204,6 +214,7 @@ func (c *CoreClient) Handshake(ctx context.Context) error {
 		c.negCaps.Store(ack.GetSelectedCapabilities())
 		c.codec.Store(core.CodecFor(ack.GetSelectedCapabilities()))
 		c.limits.Store(ack.GetLimits())
+		c.ackMode.Store(ack.GetAckMode())
 		c.ledger.Store(core.NewCreditLedger(
 			int64(ack.GetCredits().GetBatches()), int64(ack.GetCredits().GetBytes()), 0, 0))
 		c.expiry.Store(ack.GetExpiryUnix())
@@ -235,7 +246,12 @@ func (c *CoreClient) deriveKeys(priv *core.EphemeralKey, ack *core.HelloAck, thH
 	if err != nil {
 		return nil, err
 	}
-	return core.DeriveSessionKeysWithCaps(c.cfg.Profile, zz, thHello, tokenProof, ack.GetSelectedCapabilities())
+	keys, kerr := core.DeriveSessionKeysWithCaps(c.cfg.Profile, zz, thHello, tokenProof, ack.GetSelectedCapabilities())
+	// ECDH 共享密钥用后即清零（与服务端 deriveServerKeys 对称；zz 此后无使用方）。
+	for i := range zz {
+		zz[i] = 0
+	}
+	return keys, kerr
 }
 
 func boolStr(b bool) string {
@@ -394,8 +410,6 @@ func (c *CoreClient) SetResultHandler(h func(seq uint64, level string, code uint
 	c.resultHandler.Store(&h)
 }
 
-// SetCommandHandler 注册运维命令执行回调（capability: control_commands）。
-// 执行完成后协议层自动回 COMMAND_ACK（applied/failed）。
 // SetRedirectHandler 注册 REDIRECT 回调（ctx 带 30s 超时）。
 func (c *CoreClient) SetRedirectHandler(h func(ctx context.Context, payload []byte)) {
 	c.redirectHandler.Store(&h)
@@ -417,7 +431,8 @@ func (c *CoreClient) HeartbeatEnabled() bool { return c.heartbeatLoopFn != nil }
 
 // StartLifecycle 启动后台 goroutine（拒绝在已关闭实例上启动；Once 保证幂等——
 // 二次调用会替换 lifecycleCtx/ackQueue 等字段，旧 goroutine 的 ctx 永不取消而
-// 泄漏，review F13 裁决）。
+// 泄漏，review F13 裁决）。closed 检查在 startLifecycle 的 lifecycleMu 临界区内
+// 复查：与并发 Close 的交错由锁收口，任一顺序都不逃逸 goroutine。
 func (c *CoreClient) StartLifecycle() {
 	if c.closed.Load() {
 		slog.Warn("StartLifecycle on closed client ignored")
@@ -427,6 +442,14 @@ func (c *CoreClient) StartLifecycle() {
 }
 
 func (c *CoreClient) startLifecycle() {
+	// closed 复查与字段写入同锁收口：Close/fatalTeardown 置位 closed 后本函数
+	// 不再启动任何 goroutine（否则新 lifecycleCtx 无人取消、goroutine 逃逸）。
+	// 先行完成的 Close 读到 nil channel 直接跳过等待——两序皆收敛。
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closed.Load() {
+		return
+	}
 	c.lifecycleCtx, c.lifecycleCancel = context.WithCancel(context.Background())
 	c.ackDone = make(chan struct{})
 	c.heartbeatDone = make(chan struct{})
@@ -512,9 +535,14 @@ func (c *CoreClient) notifyDrainIfEmpty() {
 }
 
 // waitGoroutines 等待 lifecycle goroutine（每通道 5s 预算）。
+// 通道快照在 lifecycleMu 下读取——与 startLifecycle 的写入（若 Close 先行完成则
+// 通道仍为 nil，跳过等待；startLifecycle 侧的 closed 复查保证不会事后启动）互斥。
 func (c *CoreClient) waitGoroutines() {
 	const budget = 5 * time.Second
-	for _, ch := range []chan struct{}{c.ackDone, c.heartbeatDone, c.reaperDone, c.ackWorkerDone} {
+	c.lifecycleMu.Lock()
+	chs := []chan struct{}{c.ackDone, c.heartbeatDone, c.reaperDone, c.ackWorkerDone}
+	c.lifecycleMu.Unlock()
+	for _, ch := range chs {
 		if ch == nil {
 			continue
 		}
@@ -558,6 +586,15 @@ func (c *CoreClient) SelectedCapabilities() []string {
 	return nil
 }
 
+// ackModeLoad 返回握手协商的 ack_mode（握手前零值 ACCEPTED_ONLY——此时
+// accepted 即终态，drain 判定不等待 durable）。
+func (c *CoreClient) ackModeLoad() corepb.AckMode {
+	if v := c.ackMode.Load(); v != nil {
+		return v.(corepb.AckMode)
+	}
+	return corepb.AckMode_ACK_MODE_ACCEPTED_ONLY
+}
+
 // DictActive 报告 zstd 字典是否已到达并激活（DICT 帧处理后为 true）。
 func (c *CoreClient) DictActive() bool { return c.zdict.Load() != nil }
 
@@ -579,8 +616,11 @@ func (c *CoreClient) teardownPhase(cause string) {
 	// cause 仅作观测：close 路径传 "user close"，fatalTeardown 另在收尾时
 	// 以 Info 级记录。此处置 Debug 保证两条路径的根因都有痕可查。
 	slog.Debug("session teardown", "cause", cause, "session", c.SessionID())
-	if c.lifecycleCancel != nil {
-		c.lifecycleCancel()
+	c.lifecycleMu.Lock()
+	cancel := c.lifecycleCancel
+	c.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 	c.sm.ForceClosed()
 	if l := c.ledger.Load(); l != nil {

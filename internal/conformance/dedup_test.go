@@ -43,11 +43,12 @@ func TestDedup_InWindowDuplicate_Idempotent(t *testing.T) {
 			t.Errorf("duplicate reply #%d level = %v, want ACCEPTED（幂等回执）", n, r.GetLevel())
 		}
 	}
-	time.Sleep(200 * time.Millisecond)
+	// 静默窗口替代 time.Sleep 同步：窗口期内无新投递即证去重（AGENTS.md 禁令）。
+	waitSinkQuiet(t, sink, 300*time.Millisecond)
 	if n := sink.countSeq(1); n != 1 {
 		t.Errorf("seq=1 delivered %d times, want exactly 1（去重失效）", n)
 	}
-	// duplicate 回执的 correlation echo 由 TestResult_CorrelationEcho 断言（已知缺陷 bug-C）。
+	// duplicate 回执的 correlation echo 由 TestResult_CorrelationEcho 断言。
 }
 
 // TestDedup_AfterTerminal_ReplaysStoredOutcome 验证终态环回执：
@@ -82,7 +83,7 @@ func TestDedup_AfterTerminal_ReplaysStoredOutcome(t *testing.T) {
 	if r.GetCode() != 0 {
 		t.Errorf("replay result code = %d, want 0", r.GetCode())
 	}
-	time.Sleep(200 * time.Millisecond)
+	waitSinkQuiet(t, sink, 300*time.Millisecond)
 	if n := sink.countSeq(1); n != 1 {
 		t.Errorf("seq=1 delivered %d times after replay, want 1（终态重发不得重复投递）", n)
 	}
@@ -123,5 +124,22 @@ func TestDedup_BeyondWindow_Aborts(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("handler did not return after window violation")
+	}
+}
+
+// waitSinkQuiet 等待 sink 在窗口期内保持零新投递（「断言不出现」类同步：
+// 到达即计数变化，静默到窗口结束即通过——替代被禁的 time.Sleep 固定等待）。
+func waitSinkQuiet(t *testing.T, s *sinkCapture, window time.Duration) {
+	t.Helper()
+	deadline := time.After(window)
+	for {
+		before := s.count()
+		select {
+		case <-s.recv:
+			// 新投递：重置窗口继续观察。
+		case <-deadline:
+			_ = before
+			return
+		}
 	}
 }

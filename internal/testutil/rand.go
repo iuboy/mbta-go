@@ -28,6 +28,19 @@ func RandString(n int) string {
 	return string(b)
 }
 
+// RandHex 返回 n 字节随机数据的 hex 串（2n 个字符，合法 ASCII/UTF-8）。
+// crypto/rand 失败时 panic（测试环境视为不可继续）；body/payload fixture 用。
+func RandHex(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
+	return hex.EncodeToString(b)
+}
+
 // RandInt 返回 [lo, hi) 区间内的随机整数。hi <= lo 时返回 lo。
 func RandInt(lo, hi int) int {
 	if hi <= lo {

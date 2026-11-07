@@ -129,6 +129,11 @@ func (h *CoreHandler) sinkWorker() {
 
 // runSinkTask 执行单个 task：SinkDeadline 内 handler 未调 done 则经 done 合成
 // released（done 幂等，迟到的真实调用安全丢弃）。
+//
+// 契约边界（SinkHandler 实现方必读）：超时后的合成 released 只解除 wire 侧
+// 等待，本函数仍无限期等待 handler 返回——不尊重 ctx 的 handler 会永久钉死
+// 一个 sink worker（NumCPU 个全被钉死后该连接 sink 停摆，属可用性降级）。
+// handler MUST 将 ctx 传播进全部阻塞操作（IO/锁/下游调用）。
 func (h *CoreHandler) runSinkTask(t sinkTask) {
 	defer h.sinkQueuedBytes.Add(-t.bytes)
 	completed := make(chan struct{})

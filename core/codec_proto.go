@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	corepb "github.com/iuboy/mbta-go/corepb"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -26,15 +27,57 @@ func (protoCodec) Marshal(sb *SignalBatch) ([]byte, error) {
 }
 
 func (protoCodec) Unmarshal(data []byte) (*SignalBatch, error) {
+	// 条数预检发生在 proto.Unmarshal 全量分配之前：proto 对 repeated 字段无
+	// 解码上限，8MB payload 的最小合法 record（11 wire 字节）可在条数检查前
+	// 解出 76 万条 × 双层结构（corepb+core 各一份）≈ 537MB 堆——validate-after-decode
+	// 放大窗口与 cbor 侧 MaxArrayElements 的裁决对称，proto 是默认 codec 更须封堵。
+	if err := checkProtoSignalCount(data); err != nil {
+		return nil, err
+	}
 	var pb corepb.SignalBatch
 	if err := proto.Unmarshal(data, &pb); err != nil {
 		return nil, WrapError(ErrCodeBatchInvalid, "unmarshal signal batch", err)
 	}
-	// 内容合法性（signal_type 闭合枚举/条数/字段长度等）由调用方的 sb.Validate()
+	// 其余内容合法性（signal_type 闭合枚举/字段长度等）由调用方的 sb.Validate()
 	// 统一负责——生产路径在 internal/protocol handler_batch.decodeAndValidate
 	// 接线，codec 层不重复（cbor codec 同样无此检查，保持一致）。
 	return fromProtoSignalBatch(&pb), nil
 }
+
+// MaxProtoSignals 是 proto codec 对 SignalBatch.signals（field 4）的条数解码上限，
+// 与 internal/protocol 的 maxBatchEvents 同值（codec 层不 import 上层常量，值由
+// conformance 对齐测试钉住）。
+const MaxProtoSignals = 10000
+
+// checkProtoSignalCount 预扫 wire 统计 signals 字段（field 4，BytesType）出现
+// 次数并在超限时拒绝——发生在全量解码分配之前（8MB 预扫约 10ms）。malformed
+// wire 在此报错与 proto.Unmarshal 的拒绝语义一致，不改变原有错误分类。
+func checkProtoSignalCount(data []byte) error {
+	count := 0
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return WrapError(ErrCodeBatchInvalid, "scan signal batch", protowire.ParseError(n))
+		}
+		data = data[n:]
+		fn := protowire.ConsumeFieldValue(num, typ, data)
+		if fn < 0 {
+			return WrapError(ErrCodeBatchInvalid, "scan signal batch", protowire.ParseError(fn))
+		}
+		if num == signalsFieldNum && typ == protowire.BytesType {
+			count++
+			if count > MaxProtoSignals {
+				return NewError(ErrCodeBatchInvalid,
+					fmt.Sprintf("signal count exceeds codec decode limit %d", MaxProtoSignals))
+			}
+		}
+		data = data[fn:]
+	}
+	return nil
+}
+
+// signalsFieldNum 是 SignalBatch.signals 的 proto 字段号（proto/signal.proto）。
+const signalsFieldNum = 4
 
 func init() {
 	RegisterCodec(protoCodec{})

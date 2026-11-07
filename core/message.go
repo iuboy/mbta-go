@@ -74,7 +74,17 @@ func EphemeralPubLen(p corepb.Profile) int {
 const (
 	MaxHelloCaps   = 32
 	MaxHelloCapLen = 64
+	// MaxHelloMetaEntries 是 HELLO.meta 的条目数上限。逐条长度校验不约束条数：
+	// proto 解码先于校验执行，16MB 帧可先解出百万级 map entries 再被逐条拒绝
+	// （认证前内存放大，与 capabilities 条数上限对称的防线）。
+	MaxHelloMetaEntries = 32
 )
+
+// MaxHandshakeFrameBytes 是握手帧（HELLO/HELLO_ACK/NAK）的帧层尺寸上限。
+// 握手消息有天然小上界（agent_id 256B + meta 32×256B + caps 32×64B + eph 65B +
+// proof ≪ 64KB）；先于 Decode 的尺寸先验拒把认证前/恶意服务端的解码放大窗口
+// 压到常数级（16MB 全额帧 otherwise 全量进 proto.Unmarshal 的 map/repeated 分配）。
+const MaxHandshakeFrameBytes = 64 << 10
 
 // ValidateHello 校验 HELLO。agent_id 必填且过长度/控制字符校验；
 // meta 各字段可选但一旦提供须过同强度校验（继承 v1 加固）；
@@ -97,6 +107,9 @@ func ValidateHello(m *corepb.Hello) error {
 		if hasStrictControlChars(c) {
 			return NewError(ErrCodeBadHandshake, "capability contains control characters")
 		}
+	}
+	if len(m.GetMeta()) > MaxHelloMetaEntries {
+		return NewError(ErrCodeBadHandshake, fmt.Sprintf("meta exceeds maximum %d entries", MaxHelloMetaEntries))
 	}
 	for k, v := range m.GetMeta() {
 		if err := validateHelloMetaField("meta."+k, k); err != nil {
@@ -126,6 +139,17 @@ func ValidateHelloAck(a *corepb.HelloAck) error {
 	}
 	if a.GetAckMode() != corepb.AckMode_ACK_MODE_ACCEPTED_ONLY && a.GetAckMode() != corepb.AckMode_ACK_MODE_DURABLE {
 		return NewError(ErrCodeAckModeBad, fmt.Sprintf("invalid ack_mode %v", a.GetAckMode()))
+	}
+	// 恶意/受损服务端防线：selected_capabilities 条数与单条长度钳制（服务端注册
+	// 能力集 ≤8）。CodecFor 对超长列表仅做前缀匹配，但 Decode 分配先于校验——
+	// 与 HELLO.capabilities 同一裁决。
+	if len(a.GetSelectedCapabilities()) > MaxHelloCaps {
+		return NewError(ErrCodeBadHandshake, fmt.Sprintf("selected_capabilities exceeds maximum %d entries", MaxHelloCaps))
+	}
+	for _, c := range a.GetSelectedCapabilities() {
+		if len(c) > MaxHelloCapLen {
+			return NewError(ErrCodeBadHandshake, fmt.Sprintf("selected_capability exceeds maximum length %d", MaxHelloCapLen))
+		}
 	}
 	if a.GetCredits().GetBatches() == 0 || a.GetCredits().GetBytes() == 0 {
 		return NewError(ErrCodeCreditInvalid, "initial credits must be positive")

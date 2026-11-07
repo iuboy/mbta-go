@@ -142,13 +142,6 @@ func (m *MBTAMetrics) SinkQueueDepth() Gauge         { return m.sinkQueueDepthGa
 func (m *MBTAMetrics) BatchSizeBytes() Histogram     { return m.batchSizeBytesHist }
 func (m *MBTAMetrics) ConnectionDuration() Histogram { return m.connectionDurationSec }
 
-// Deprecated: 语义不明（core.New 创建的是指标集），改用 NewMetrics。本别名
-// 在破坏性重构收尾时删除。
-//
-// New 创建并注册全部 MBTA 指标。传 prometheus.DefaultRegisterer 做全局注册，
-// 或传独立 *prometheus.Registry 做隔离注册（测试、多租户）。
-func New(reg prometheus.Registerer) *MBTAMetrics { return NewMetrics(reg) }
-
 // NewMetrics 创建并注册全部 MBTA 指标（reg=nil 时用全局 DefaultRegisterer；
 // 测试/多租户传独立 *prometheus.Registry）。
 func NewMetrics(reg prometheus.Registerer) *MBTAMetrics {

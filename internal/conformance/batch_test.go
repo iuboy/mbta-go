@@ -5,8 +5,7 @@ package conformance
 //   - accepted_only：accepted 即终态 + credit 回收 → CREDIT 帧；
 //   - durable：accepted 中间态不返还 credit，done(Durable) 后返还；
 //   - 负路径：envelope_open_failed / batch_invalid（seq 失配）/ batch_too_large
-//     的 RESULT 反馈（已知实现缺陷：terminal() 不发送 RESULT，见任务报告 bug-D，
-//     下列三个负路径测试当前红——规格要求客户端必须收到 rejected 反馈）。
+//     的 RESULT 反馈（bug-D 已修复：grant 化 Settle 统一发送 RESULT）。
 
 import (
 	"testing"
@@ -60,15 +59,14 @@ func TestBatch_AcceptedOnly_TerminalAndCredit(t *testing.T) {
 	if ev.Raw != nil {
 		t.Error("sink raw supplied although SinkOptions.Raw=false")
 	}
-	// Decoded 供给的正确性由 TestSink_DecodedSupply 单独断言（当前为已知实现缺陷）。
+	// Decoded 供给的正确性由 TestSink_DecodedSupply 单独断言（bug-B 修复后为回归项）。
 }
 
 // TestSink_DecodedSupply 验证 SinkOptions.Raw=false 时 Decoded 必须供给解码后的
 // SignalBatch。
 //
-// 已知实现缺陷（见任务报告 bug-B）：makeEvent 把 Batch 消息编码（而非
-// Batch.payload 内的 SignalBatch 编码）交给 decodeSignalBatch，proto 解码必然
-// 失败 → Decoded 恒为 nil。本测试钉住契约，待实现修复后转绿。
+// 回归（bug-B 已修复）：makeEvent 供给 decodeAndValidate 解码后的 SignalBatch，
+// 解码失败不再静默吞错。
 func TestSink_DecodedSupply(t *testing.T) {
 	sink := newSinkCapture()
 	env := startEnv(t, envConfig{sink: sink.handler})
@@ -125,9 +123,8 @@ func TestBatch_Durable_TwoPhaseSettlement(t *testing.T) {
 // TestResult_CorrelationEcho 验证 RESULT.correlation 在全部回执路径原样回显：
 // done(Durable) 合成的终态 RESULT 与幂等 duplicate 回执。
 //
-// 已知实现缺陷（见任务报告 bug-C）：InflightSlot.Correlation 由 batchCorr 桩
-// 恒置空串、deliver 未补充登记，done 路径与 duplicate 路径的 RESULT 均丢失 echo。
-// 本测试钉住契约，待实现修复后转绿。
+// 回归（bug-C 已修复）：Backfill 回填明文侧 correlation，done 与 duplicate
+// 路径的 RESULT 均回显 echo。
 func TestResult_CorrelationEcho(t *testing.T) {
 	t.Run("durable", func(t *testing.T) {
 		sink := newSinkCapture()
@@ -174,9 +171,7 @@ func TestResult_CorrelationEcho(t *testing.T) {
 // TestBatch_Rejected_EnvelopeSeqMismatch 验证 Envelope.seq ≠ Batch.seq →
 // RESULT(rejected, batch_invalid)。
 //
-// 已知实现缺陷（见任务报告 bug-D）：processBatch 负路径只调 terminal()（记终态 +
-// 回收 credit）而从不发送 RESULT 帧——客户端收不到任何反馈。本测试钉住规格，
-// 待实现修复后转绿。
+// 回归（bug-D 已修复）：负路径经 grant.Settle(rejected) 发送 RESULT。
 func TestBatch_Rejected_EnvelopeSeqMismatch(t *testing.T) {
 	sink := newSinkCapture()
 	env := startEnv(t, envConfig{sink: sink.handler})
@@ -195,7 +190,7 @@ func TestBatch_Rejected_EnvelopeSeqMismatch(t *testing.T) {
 }
 
 // TestBatch_Rejected_EnvelopeOpenFail 验证 AD 失配（session_id 篡改）→
-// RESULT(rejected, envelope_open_failed)。（已知实现缺陷 bug-D，见上。）
+// RESULT(rejected, envelope_open_failed)。
 func TestBatch_Rejected_EnvelopeOpenFail(t *testing.T) {
 	sink := newSinkCapture()
 	env := startEnv(t, envConfig{sink: sink.handler})
@@ -226,7 +221,7 @@ func TestBatch_Rejected_EnvelopeOpenFail(t *testing.T) {
 }
 
 // TestBatch_Rejected_TooLarge 验证解压后 payload 超 limits.max_batch_bytes →
-// RESULT(rejected, batch_too_large)。（已知实现缺陷 bug-D，见上。）
+// RESULT(rejected, batch_too_large)。
 func TestBatch_Rejected_TooLarge(t *testing.T) {
 	sink := newSinkCapture()
 	env := startEnv(t, envConfig{

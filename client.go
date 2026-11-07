@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/iuboy/mbta-go/core"
+	corepb "github.com/iuboy/mbta-go/corepb"
 	ntls "github.com/iuboy/mbta-go/ntls"
 	v1 "github.com/iuboy/mbta-go/v1"
 )
@@ -35,6 +36,13 @@ type ResultHandler func(seq uint64, level string, code uint32, correlation strin
 // 否则超时后 goroutine 泄漏（Go runtime 无法杀死阻塞的 goroutine）。
 type RedirectHandler func(ctx context.Context, payload []byte)
 
+// CommandHandler 在服务端下发运维命令帧（COMMAND，capability: control_commands
+// 协商选定后）时被调用：实现执行命令并返回结果码/消息，协议层自动回
+// COMMAND_ACK。RESTART 类自重启命令应先完成落盘准备再返回——ACK 必须先于
+// 进程退出发出。回调以独立 goroutine 运行（并发受协议层命令槽数限制 +
+// 5min 超时 + panic 防护），不阻塞控制读循环。
+type CommandHandler func(ctx context.Context, cmd *corepb.ControlCommand) (corepb.CommandAckCode, string)
+
 // versionedClient 以统一接口包装版本专属客户端（facade 方法直接透传）。
 type versionedClient interface {
 	Connect(ctx context.Context) error
@@ -44,6 +52,7 @@ type versionedClient interface {
 	State() string
 	SetResultHandler(handler ResultHandler)
 	SetRedirectHandler(handler RedirectHandler)
+	SetCommandHandler(handler CommandHandler)
 }
 
 // ClientConfig 是客户端配置。
@@ -300,6 +309,21 @@ func (c *Client) SetRedirectHandler(handler RedirectHandler) {
 	c.client.SetRedirectHandler(handler)
 }
 
+// SetCommandHandler 注册运维命令执行回调（capability: control_commands；
+// 服务端经 [Server.SendCommand] 下发）。此前面板缺失导致 facade 客户端永远
+// 无法响应运维命令（静默 30s 超时）——命令面补齐裁决。
+// 锁语义与 Close 后行为同 [Client.SetResultHandler]（用 Lock 保护）。
+func (c *Client) SetCommandHandler(handler CommandHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.client == nil {
+		slog.Warn("SetCommandHandler on closed client; handler will never fire")
+		return
+	}
+	c.client.SetCommandHandler(handler)
+}
+
 // ActiveVersion 返回配置的协议版本。
 func (c *Client) ActiveVersion() ProtocolVersion {
 	c.mu.RLock()
@@ -369,8 +393,10 @@ func (c *Client) initNTLSClient() (versionedClient, error) {
 }
 
 // versionedCore 是两个 binding 客户端的共同方法集（versionWrapper 泛型约束；
-// v1.Client 与 ntls.Client 以指针接收者满足）。ResultHandler/RedirectHandler
-// 在 facade 是定义类型，约束里用底层函数签名（方法集匹配要求参数类型精确一致）。
+// v1.Client 与 ntls.Client 以指针接收者满足）。ResultHandler/RedirectHandler/
+// CommandHandler 在 facade 是定义类型，约束里用底层函数签名（方法集匹配要求
+// 参数类型精确一致）。该接口即双 binding 公共方法集的编译期强制——binding
+// 客户端漏实现公共方法在此直接编译失败（拷贝点对称性从事故纪律升级为类型约束）。
 type versionedCore[C any] interface {
 	Connect(ctx context.Context) error
 	SendBatch(ctx context.Context, batch *core.SignalBatch, opts ...core.SendOption) (uint64, error)
@@ -379,6 +405,7 @@ type versionedCore[C any] interface {
 	State() core.State
 	SetResultHandler(handler func(seq uint64, level string, code uint32, correlation string))
 	SetRedirectHandler(handler func(ctx context.Context, payload []byte))
+	SetCommandHandler(handler func(ctx context.Context, cmd *corepb.ControlCommand) (corepb.CommandAckCode, string))
 }
 
 // versionWrapper 把任一 binding 客户端适配为 versionedClient——此前 v1/ntls
@@ -401,6 +428,9 @@ func (w *versionWrapper[C]) SetResultHandler(handler ResultHandler) {
 }
 func (w *versionWrapper[C]) SetRedirectHandler(handler RedirectHandler) {
 	w.client.SetRedirectHandler(handler)
+}
+func (w *versionWrapper[C]) SetCommandHandler(handler CommandHandler) {
+	w.client.SetCommandHandler(handler)
 }
 
 // —— 客户端选项（函数式选项模式）——

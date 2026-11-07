@@ -204,7 +204,7 @@ default:
 - `core.TokenValidator`（`ResolveToken` 必选）— 认证令牌验证与 token_proof 校验（**token 必须 ≥128bit 随机熵**：proof 可被离线猜解，低熵 token 使认证退化为字典攻击；见 core spec §2.2 要点 9）
 - `core.OnSession` — 会话生命周期回调
 - `core.RedirectChecker` — HA leader 重定向
-- `core.CorrelationDeduper` — 跨连接重发的应用层幂等去重（LRU + TTL；配合 `Batch.Meta.Correlation`）
+- `core.CorrelationDeduper` — 跨连接重发的应用层幂等去重（LRU + TTL；配合 `Batch.Correlation`）
 
 ## 许可证
 

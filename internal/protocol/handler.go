@@ -207,13 +207,10 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 		slog.Warn("data goroutines did not exit in drain timeout; abandoning", "session", string(h.getSessionID()))
 	}
 
-	// 服务端排空：对放弃的 inflight 项发 released（禁止沉默——否则客户端白等满
-	// 超时）。使用 WithoutCancel：Handle 收尾时 ctx 通常已取消（停机/读错误路径），
-	// 直接透传会让 binding SendFrame 的 ctx.Err() 预检把全部 released RESULT
-	// 静默丢弃，同时下方 WARN 仍谎报已释放——观测与实际相反。
-	h.releaseStuck(context.WithoutCancel(ctx), core.CodeServerDraining, 0)
-
-	// sink 排空（有界）：超时取消 sinkCtx 放弃等待（防卡死 sink 钉死 connSem 槽位）。
+	// sink 排空（有界，先于 inflight 释放）：durable 批次在 CLOSE 声明的排空预算内
+	// 仍可经 sink done 走正常 DURABLE 终态——先释放会把预算内可完成的 durable 无谓
+	// 降级为 released（spec §3.7「drain 超时**后**放弃 inflight」）。超时取消 sinkCtx
+	// 放弃等待（防卡死 sink 钉死 connSem 槽位）。
 	if h.sinkQueue != nil {
 		close(h.sinkDone)
 		drained := make(chan struct{})
@@ -225,6 +222,12 @@ func (h *CoreHandler) Handle(ctx context.Context) error {
 			slog.Warn("sink workers did not drain; abandoning", "session", string(h.getSessionID()))
 		}
 	}
+
+	// 服务端排空：对（sink 预算后）仍卡住的 inflight 项发 released（禁止沉默——
+	// 否则客户端白等满超时）。使用 WithoutCancel：Handle 收尾时 ctx 通常已取消
+	// （停机/读错误路径），直接透传会让 binding SendFrame 的 ctx.Err() 预检把全部
+	// released RESULT 静默丢弃，同时 WARN 仍谎报已释放——观测与实际相反。
+	h.releaseStuck(context.WithoutCancel(ctx), core.CodeServerDraining, 0)
 
 	// 会话密钥 best-effort 擦除（纵深防御）：仅 data goroutine 全部退出（dataClean）
 	// 时执行——此时密钥的唯二使用者（握手/数据解密路径）都已终止，直接写字节无
@@ -294,9 +297,16 @@ func (h *CoreHandler) controlLoop(ctx context.Context) error {
 			slog.Info("client aborted", "session", string(h.getSessionID()))
 			return nil
 		default:
-			// TCP binding 已按 type 高位分流、QUIC control stream 只承载 control 帧，
-			// 此分支正常不可达——纯防御。
-			slog.Debug("unexpected frame on control channel; skipping", "type", f.Header.Type)
+			// 类型错域：data 域帧（0x80+，QUIC 恶意客户端可在 control 流上发送）
+			// 属协议违规，按 spec §7.2 以 protocol_error 拆连——此前静默跳过会
+			// 让已认证对端以垃圾帧+心跳无限期占用连接槽。未知 control 类型
+			// （0x00-0x7F 未注册）仍按 spec §12.1 前向兼容跳过。
+			if core.IsDataType(f.Header.Type) {
+				h.abort(ctx, core.CodeProtocolError,
+					fmt.Sprintf("data-domain frame 0x%02x on control channel", f.Header.Type))
+				return core.NewError(core.ErrCodeProtocolError, "data-domain frame on control channel")
+			}
+			slog.Debug("unknown control frame type; skipping", "type", f.Header.Type)
 		}
 	}
 }
@@ -324,6 +334,14 @@ func tokenFingerprint(tok string) string {
 // handleHello 执行 1-RTT 握手（r3 §5.1）：
 // 解码校验 → token_proof 验证 → eph/ECDH → 派生 → HELLO_ACK。
 func (h *CoreHandler) handleHello(ctx context.Context, payload []byte) error {
+	// 尺寸先验拒先于 Decode：握手消息有天然小上界（core.MaxHandshakeFrameBytes），
+	// 超额 HELLO 在 proto.Unmarshal 全量分配 map/repeated 前拒绝（认证前内存放大
+	// 防线，transport 层的 16MB 帧上限对握手帧过于宽松）。
+	if len(payload) > core.MaxHandshakeFrameBytes {
+		h.sendNak(ctx, core.CodeBadHandshakeMessage, false, 0)
+		return core.NewError(core.ErrCodeBadHandshake,
+			fmt.Sprintf("hello frame exceeds handshake limit %d bytes", core.MaxHandshakeFrameBytes))
+	}
 	var hello core.Hello
 	if err := core.Decode(payload, &hello); err != nil {
 		h.sendNak(ctx, core.CodeBadHandshakeMessage, false, 0)
@@ -524,6 +542,11 @@ func (h *CoreHandler) deriveServerKeys(ctx context.Context, profile corepb.Profi
 		h.sendNak(ctx, core.CodeInternal, false, 0)
 		return nil, nil, err
 	}
+	// ECDH 共享密钥用后即清零（派生中间量的擦除见 keyschedule）——zz 在本
+	// 函数之后无任何使用方，清零与 SessionKeys.Wipe 同一缓解性质。
+	for i := range zz {
+		zz[i] = 0
+	}
 	return keys, ephPub(priv), nil
 }
 
@@ -635,11 +658,15 @@ func (h *CoreHandler) getSessionID() []byte {
 func (h *CoreHandler) handlePing(ctx context.Context, payload []byte) {
 	var ping core.PingMsg
 	if err := core.Decode(payload, &ping); err != nil {
+		// 畸形心跳留痕（与客户端 handlePing 对称）：静默吞错会把根因藏进
+		// 「读超时断连」的表象里。
+		slog.Debug("invalid ping payload; not ponging", "error", err)
 		return
 	}
 	pong := &core.PongMsg{TimeUnixNs: ping.GetTimeUnixNs(), Nonce: ping.GetNonce(), Status: "ok"}
 	p, err := core.Encode(pong)
 	if err != nil {
+		slog.Debug("encode pong failed", "error", err)
 		return
 	}
 	if err := SendControlFrame(ctx, h.tr, core.TypePong, p); err != nil {
@@ -726,6 +753,13 @@ func (h *CoreHandler) dataLoop(ctx context.Context) {
 				slog.Debug("datagram dropped: concurrency slots full")
 			}
 		default:
+			// 类型错域（与 controlLoop default 对称）：control 域帧出现在数据通道
+			// 按 protocol_error 拆连；未知 data 类型（0x80+ 未注册）按 §12.1 跳过。
+			if core.IsControlType(f.Header.Type) {
+				h.abort(ctx, core.CodeProtocolError,
+					fmt.Sprintf("control-domain frame 0x%02x on data channel", f.Header.Type))
+				return
+			}
 			slog.Debug("unexpected data type; skipping", "type", f.Header.Type)
 		}
 	}

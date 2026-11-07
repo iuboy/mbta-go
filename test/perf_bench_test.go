@@ -320,7 +320,7 @@ func collectStages(t *testing.T) []StageMetric {
 		if err := ledger.Consume(lSeq, 1024, "corr", deadline); err != nil {
 			t.Fatal(err)
 		}
-		ledger.Terminal(lSeq)
+		_, _ = ledger.Terminal(lSeq, true)
 		ledger.OnCredit(1, 1024)
 	})
 
@@ -583,7 +583,8 @@ func TestPerfExport(t *testing.T) {
 		large.ThroughputMBps, large.BatchPerSec, large.AvgLatencyMs)
 	t.Logf("perf report written: %s", path)
 
-	// 基本合理性哨兵：数量级偏离说明实现回归（只报告不失败，趋势由 CI 对比 JSON 判定）。
+	// 基本合理性哨兵：数量级偏离说明实现回归（只报告不失败；趋势对比由 CI
+	// 上传的 bench artifact + 本地 benchstat 完成，流水线内不做基线判定）。
 	if e2e.HandshakeMs > 500 {
 		t.Errorf("握手延迟 %.1fms 超过 500ms（数量级异常，检查密钥日程/QUIC 栈）", e2e.HandshakeMs)
 	}

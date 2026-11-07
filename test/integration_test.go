@@ -25,9 +25,12 @@ import (
 	v1 "github.com/iuboy/mbta-go/v1"
 )
 
-// --- 公共 fixture（测试自给，不依赖 internal/testutil）---
+// --- 公共 fixture（测试自给，维持黑盒视角）---
 
-// randHex 生成 n 字节的随机 hex 串（外部包无法 import internal/testutil）。
+// randHex 生成 n 字节的随机 hex 串。
+// 本包刻意不 import internal/testutil：黑盒测试以外部消费者视角验证 facade
+// （见包文档）——并非 internal 包不可导入（同模块内 legal，此前注释的说法
+// 是误解，会误导贡献者），而是把「facade 面自足可用」作为被测属性本身。
 func randHex(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
