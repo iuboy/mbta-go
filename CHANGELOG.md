@@ -19,7 +19,7 @@ v0.1.0–v0.7.0 标签已从仓库（本地与 GitHub）移除，其变更条目
 - 目标版本号已被占用（打标/推送时发现重复）即视为冲突：rev 向后延续至下一
   个未占用值（`v0.1.2-x` → `v0.1.2-x+1` …），已发布版本号永不重用或覆盖。
 
-## [0.1.0-0] - 2026-11-07
+## [0.1.0-0] - 2026-11-08
 
 ### 新特性（2026-11-07 追加）
 
@@ -27,7 +27,8 @@ v0.1.0–v0.7.0 标签已从仓库（本地与 GitHub）移除，其变更条目
 
 ### 依赖
 
-- 上游同步：`github.com/iuboy/pollux-go v0.5.2 → v0.1.0-0`（世系重置首发：含 TLCP ALPN、HandshakeContext 中途取消、`VerifyDualCertSignatures` 真验签、Deprecated/无认证 sm4 模式清理——本仓消费面无 API 破坏，require 语义变更为版本线切换）。
+- 上游同步：`github.com/iuboy/pollux-go v0.5.2 → v0.1.2-2`（世系重置后含 quic-go subtree v0.65.0、TLCP ALPN 协商、HandshakeContext 中途取消、`VerifyDualCertSignatures` 真验签、Deprecated/无认证 sm4 模式清理、第四轮安全审计修复——2 P1/6 P2/P3 批——与清单外收尾；本仓消费面无 API 破坏）。
+- Go 指令基线 1.26.9 → **1.26.10**：GO-2026-6809（crypto/x509 不信任被攻陷的中间证书）在 1.26.10 修复，CI govulncheck 硬门禁基线随之清零。
 - 其余升级至最新：`emmansun/gmsm v0.45.2`、`fxamacker/cbor/v2 v2.10.0`、`golang.org/x/net v0.62.0`（x/crypto、x/sync、compress、lz4、ulid、prometheus、protobuf 已为最新）。
 
 > 本节聚合 r3 协议重写与 2026-10 全面代码审查（docs/code-review-2026-10-22.md）
