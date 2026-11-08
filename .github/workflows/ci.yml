@@ -217,4 +217,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          # 版本格式 v0.1.x-<rev> 恒含连字符——contains 判定会把每个正式版误标
+          # 为 prerelease。rev 是版本号位而非 semver 预发布位，固定全量发布。
+          prerelease: false
